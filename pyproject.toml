@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simplechart"
+version = "0.1.0"
+description = "A desktop stock charting application for swing traders"
+requires-python = ">=3.13"
+
+dependencies = [
+    "PyQt6>=6.6",
+    "finplot>=1.9",      # pyqtgraph-based finance charting; pulls in pandas
+    "yfinance>=0.2",     # dev/test data provider; replace with Alpaca in production
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Install with: pip install -e ".[dev]"
+dev = [
+    "mypy>=1.8",         # type checking + mypyc compilation
+    "pytest>=8.0",
+    "pytest-qt>=4.4",    # Qt widget testing helpers
+]
+
+[project.scripts]
+simplechart = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["app*", "chart*", "data*", "indicators*", "plugins*"]
+
+# ------------------------------------------------------------------
+# mypyc compilation targets
+# ------------------------------------------------------------------
+# Modules listed here are compiled to native C extensions by
+# scripts/build_compiled.py. Add a module path here, then run the
+# build script — no other changes needed.
+#
+# Rules for a module to be compilable:
+#   - All parameters and return values must be explicitly typed
+#   - No use of Any, Union in hot paths
+#   - No I/O (no file access, no network, no print)
+#   - No ABCMeta, no dynamic attribute setting
+#
+# Omit this section or leave targets empty to run interpreted (fine
+# for development — the .py files are valid Python and run normally).
+
+[tool.simplechart.compile]
+targets = [
+    "indicators._fast.ma",
+    "indicators._fast.avwap",
+]
+
+# ------------------------------------------------------------------
+# mypy
+# ------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true   # finplot has no type stubs
+
+# ------------------------------------------------------------------
+# pytest
+# ------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

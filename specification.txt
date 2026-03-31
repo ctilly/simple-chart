@@ -1,0 +1,37 @@
+I want to build a replacement stock charting application to replace my extremely expensive subscription to TradeStation.  since I can't find a suitable replacement that I like I've decided to build my own based on the following summary from a conversation that I have with Claude in the browser.  This application is for swing trading charts only; no trading or transactions.  That isn't to say that won't use it to chart the occassional day trade on the 5 minute (intraday) chart, but the overall look, feel, and behaviors should favor swing trading.
+
+I actually do all my trading inside of Webull and I actually really like the Webull charts, but since it lacks my main indicator that I heavily rely on, the Anchored VWAP, I also use TradeStation.  I've been holding out hope that Webull would eventually add the indicator but I'm tired of waiting on them; so here we are.  
+I say all of this because I want my new charting application to be as simple to use as Webull.  Indicators are easy to add to the chart and easy to configure.  I can toggle the indicator(s) on and off.
+
+It is important to note that the chart is interactive, even when applying indicators. What I mean by that is that I can click on a bar and that will apply the Anchored VWAP.  Or I can right click on a bar and select AVWAP from a context menu.  Once the AVWAP appears on the chart, I can click on the plot to open a configuration window where I can change the color or other relevant properties.  Obviously moving averages aren't interactive that way, but I want the ability to plot any moving average, e.g. 5-day, 20, 50, 100, 200 day moving averages.  And, this is important, they are DAY averages, not period averages, so as I change the time frame from the daily chart to the 65 minute chart, the fucking moving averages stay put. For example, if the 50 SMA is at $14.56 on the daily, then when I zoom into the 65 minute then it is still at $14.56.  All the moving averages should behave this way; they are NOT period averages, they are DAY averages.  However, that isn't to say a separate indicator for period averages can't also be added, but for my purposes now I want the SMA to always plot the day average by default.  The primary use of this application is for swing trading, NOT day trading, so I want the behaviors to reflect that distinction.
+
+It is important that the application be extensible, particularly for adding new indicators.  I have a fixed set of indicators that I use so that is my focus for now, but I intend to open source this project so others need the option to add their preferred indicators and behaviors. 
+
+Project: SimpleChart
+A desktop stock charting application for Linux. Here's the design we've settled on:
+Stack
+
+Charting: finplot (pyqtgraph-based, finance-specific)
+Data source: Alpaca API (historical OHLCV)
+Local cache: SQLite
+Indicator engine: Python with mypyc compilation for hot loops
+Language: Python 3.13+
+
+Architecture — 4 layers
+
+Data layer (Alpaca REST → SQLite cache)
+Indicator engine (compiled with mypyc — array in, array out, no I/O)
+Charting layer (finplot)
+Glue/orchestration (pure Python)
+
+Timeframes: 5m, 15m, 30m, 39m, 65m, daily, weekly
+Indicators to support:
+
+Anchored VWAP (AVWAP) — multiple per chart, user-defined color and label, anchors stored as UTC timestamps in SQLite so they persist across sessions and work correctly across all timeframes
+Moving averages — including a 5-day MA (not 5-period — must convert days to bars based on active timeframe)
+Indicators should be toggle-able (so I can declutter easily as I zoom in on the lower timeframes but now lose the plots)
+Fibonacci retracements (future)
+Extensible for additional indicators
+
+Critical design requirement:
+AVWAP anchors are stored as UTC timestamps, never bar indexes. This ensures correct behavior when switching timeframes and eliminates the viewport-recalculation bug seen in TradeStation and TradingView.
