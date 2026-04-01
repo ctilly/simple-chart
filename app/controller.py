@@ -68,13 +68,14 @@ import plugins  # noqa: F401 — triggers registration of all indicators
 # Each entry is (indicator_name, params). Adjust to taste.
 
 DEFAULT_INDICATORS: list[tuple[str, dict[str, Any]]] = [
-    ("sma", {"days": 50,  "color": "#00BFFF"}),
-    ("sma", {"days":200,  "color": "#FF8C00"}),
+    ("sma", {"days":  5, "color": "#FFA500"}),  # amber
+    ("sma", {"days": 20, "color": "#00CED1"}),  # teal
+    ("sma", {"days": 50, "color": "#1E90FF"}),  # blue
 ]
 
 # How many calendar days of bars to load by default.
-# 600 days ensures the 200-day SMA has a full history visible from the
-# left edge of the chart (200 warmup bars + ~400 days of visible data).
+# 600 days ensures the 50-day SMA has ample warmup history visible from
+# the left edge of the chart (~50 warmup bars + ~550 days of visible data).
 _DEFAULT_LOOKBACK_DAYS = 600
 
 # yfinance hard-limits intraday bar history by timeframe. Requesting
@@ -307,6 +308,7 @@ class MainWindow(QMainWindow):
             self._fetch_thread.wait()
 
         self._chart.plot_manager.clear_all()
+        self._chart.legend.clear_all()
 
         worker = _FetchWorker(
             aggregator=self._aggregator,
@@ -546,6 +548,18 @@ class MainWindow(QMainWindow):
             bars=bars,
         )
         self._current_series = series
+
+        # Keep candle/volume data and _bar_index in sync with the reloaded
+        # bar slice. If the bar count has changed since the last full render
+        # (e.g. the lookback boundary shifted by a second and dropped the
+        # oldest bar), pd.Series(values, index=self._bar_index) will raise
+        # a length-mismatch ValueError. Refreshing candles here keeps
+        # _bar_index aligned, which also ensures indicator color changes
+        # (which call update_data) take effect without a timeframe reload.
+        pm = self._chart.plot_manager
+        pm.draw_candles(series)
+        pm.draw_volume(series)
+
         # Inject anchors and recompute.
         avwap_state = self._state.get_indicator("avwap")
         if avwap_state is not None:

@@ -168,6 +168,11 @@ class ChartLegend(QWidget):
         if series_key in self._labels:
             self._labels[series_key].set_indicator_visible(visible)
 
+    def clear_all(self) -> None:
+        """Remove all indicator labels. Called when switching symbols."""
+        for series_key in list(self._labels.keys()):
+            self.remove_indicator(series_key)
+
     def update_color(self, series_key: str, color: str) -> None:
         """Update the color of an existing label (no-op if key not present)."""
         if series_key in self._labels:

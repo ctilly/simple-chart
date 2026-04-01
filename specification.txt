@@ -35,3 +35,5 @@ Extensible for additional indicators
 
 Critical design requirement:
 AVWAP anchors are stored as UTC timestamps, never bar indexes. This ensures correct behavior when switching timeframes and eliminates the viewport-recalculation bug seen in TradeStation and TradingView.
+
+

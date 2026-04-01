@@ -32,5 +32,10 @@ env/
 .DS_Store
 Thumbs.db
 
+# misc
+bugs.txt
+enhancements.txt
+
+
 # Claude Code project settings (local only)
 .claude/
