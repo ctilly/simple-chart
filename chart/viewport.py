@@ -83,6 +83,7 @@ class _WindowStateLike(Protocol):
 
 
 class _ViewBoxLike(Protocol):
+    childGroup: object
     datasrc: _DataSourceLike | None
     datasrc_or_standalone: _DataSourceLike | None
     force_range_update: int
@@ -101,6 +102,8 @@ class _ViewBoxLike(Protocol):
     def mapSceneToView(self, point: _PointLike) -> _PointLike: ...
     def linkedView(self, axis: int) -> object | None: ...
     def mouseDragEvent(self, event: _DragEventLike, axis: int | None = None) -> None: ...
+    def translateBy(self, t: object | None = None, x: float | None = None, y: float | None = None) -> None: ...
+    def _resetTarget(self) -> None: ...
     def setMouseEnabled(self, x: bool | None = None, y: bool | None = None) -> None: ...
     def set_range(self, x0: float | None, y0: float, x1: float | None, y1: float) -> bool | None: ...
     def targetRect(self) -> _RectLike: ...
@@ -173,10 +176,13 @@ def unlock_x_pan(ax: object) -> None:
     datasrc = viewbox.datasrc_or_standalone
     if datasrc is None:
         return
+    x_min = -_FREE_X_PAN_BARS
+    x_max = datasrc.xlen + _FREE_X_PAN_BARS
     ax.setLimits(  # type: ignore[attr-defined]
-        xMin=-_FREE_X_PAN_BARS,
-        xMax=datasrc.xlen + _FREE_X_PAN_BARS,
+        xMin=x_min,
+        xMax=x_max,
     )
+    _force_x_limits(viewbox, x_min=x_min, x_max=x_max)
 
 
 def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> None:
@@ -205,7 +211,7 @@ def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> Non
 
         if is_left_drag and no_modifier_drag:
             if allow_vertical_pan:
-                pg.ViewBox.mouseDragEvent(self, event, axis=None)
+                _translate_drag(self, event, axis=axis)
                 _persist_current_x_range(self)
                 if event.isFinish():
                     self.win._isMouseLeftDrag = False
@@ -219,7 +225,7 @@ def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> Non
                 event.accept()
                 return
 
-            pg.ViewBox.mouseDragEvent(self, event, axis=0)
+            _translate_drag(self, event, axis=0)
             _persist_current_x_range(self)
             if event.isFinish():
                 self.win._isMouseLeftDrag = False
@@ -293,6 +299,58 @@ def _patch_update_y_zoom(viewbox: _ViewBoxLike) -> None:
         return self.set_range(left, y0, right, y1)
 
     viewbox.update_y_zoom = types.MethodType(_update_y_zoom, viewbox)  # type: ignore[method-assign]
+
+
+def _translate_drag(
+    viewbox: _ViewBoxLike,
+    event: _DragEventLike,
+    *,
+    axis: int | None,
+) -> None:
+    pos = pg.Point(event.pos())
+    last_pos = pg.Point(event.lastPos())
+    delta = (pos - last_pos) * -1
+
+    transform = getattr(viewbox.childGroup, "transform")()
+    inverse_transform = pg.functions.invertQTransform(transform)
+    transformed_delta = inverse_transform.map(delta) - inverse_transform.map(pg.Point(0.0, 0.0))
+
+    delta_x = transformed_delta.x()
+    delta_y = transformed_delta.y()
+
+    move_x = axis in (None, 0)
+    move_y = axis in (None, 1)
+
+    x_shift = delta_x if move_x else None
+    y_shift = delta_y if move_y else None
+
+    _force_x_limits(viewbox)
+    viewbox._resetTarget()
+    if x_shift is not None or y_shift is not None:
+        viewbox.translateBy(x=x_shift, y=y_shift)
+        viewbox.sigRangeChangedManually.emit(viewbox.state["mouseEnabled"])  # type: ignore[attr-defined]
+
+
+def _force_x_limits(
+    viewbox: _ViewBoxLike,
+    *,
+    x_min: float | None = None,
+    x_max: float | None = None,
+) -> None:
+    datasrc = viewbox.datasrc_or_standalone
+    if datasrc is None:
+        return
+
+    limits = viewbox.state.get("limits")
+    if not isinstance(limits, dict):
+        return
+
+    if x_min is None:
+        x_min = -_FREE_X_PAN_BARS
+    if x_max is None:
+        x_max = datasrc.xlen + _FREE_X_PAN_BARS
+
+    limits["xLimits"] = [x_min, x_max]
 
 
 def _finish_pan(
@@ -447,15 +505,18 @@ def _bias_price_axis_precision(
     if span <= 0:
         return min_decimals
 
-    # Bias toward finer labels sooner than finplot's default heuristics.
-    target_step = span / 12.0
+    # Bias toward finer labels and denser ticks sooner than finplot's
+    # default heuristics so cents appear earlier during zoom-in.
+    target_step = span / 18.0
     if target_step <= 0:
         return min_decimals
 
-    desired_decimals = max(0, min(6, int(math.ceil(-math.log10(target_step))) + 1))
+    desired_decimals = max(0, min(2, int(math.ceil(-math.log10(target_step))) + 2))
+    if span <= 25.0:
+        desired_decimals = max(desired_decimals, 2)
     if zooming_in:
         desired_decimals = max(desired_decimals, min_decimals)
-    desired_eps = min(getattr(axis, "significant_eps", 1e-8), max(target_step / 10.0, 1e-8))
+    desired_eps = min(getattr(axis, "significant_eps", 1e-8), max(target_step / 20.0, 1e-8))
 
     axis.significant_decimals = max(getattr(axis, "significant_decimals", 0), desired_decimals)  # type: ignore[attr-defined]
     axis.significant_eps = desired_eps  # type: ignore[attr-defined]
@@ -468,6 +529,21 @@ def _patch_price_axis_format(price_ax: object) -> None:
     right_axis = axes.get("right", {}).get("item")
     if right_axis is None or getattr(right_axis, "_simplechart_fmt_patch", False):
         return
+
+    set_tick_density = getattr(right_axis, "setTickDensity", None)
+    if callable(set_tick_density):
+        set_tick_density(1.35)
+    set_style = getattr(right_axis, "setStyle", None)
+    if callable(set_style):
+        set_style(
+            maxTickLevel=2,
+            textFillLimits=[
+                (0, 1.00),
+                (2, 0.90),
+                (4, 0.80),
+                (6, 0.70),
+            ],
+        )
 
     original_fmt_values = right_axis.fmt_values
 

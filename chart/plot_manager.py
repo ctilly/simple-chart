@@ -25,8 +25,7 @@ Note on pandas:
     not appear anywhere else in the codebase.
 """
 
-from collections.abc import MutableMapping
-from typing import Protocol, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -45,28 +44,6 @@ from chart.viewport import apply_interaction_modes, unlock_x_pan
 from data.models import OHLCVSeries
 
 
-class _AxisLike(Protocol):
-    def removeItem(self, item: object) -> None: ...
-    def reset(self) -> None: ...
-
-
-class _PlotHandleLike(Protocol):
-    ax: _AxisLike
-    colors: MutableMapping[str, str]
-    opts: MutableMapping[str, object]
-
-    def setPen(self, pen: object) -> None: ...
-    def setVisible(self, visible: bool) -> None: ...
-    def update_data(self, data: object) -> None: ...
-
-
-class _DataSourceLike(Protocol):
-    init_steps: int
-    xlen: int
-
-    def update_init_x(self, steps: int) -> None: ...
-
-
 class PlotManager:
     """
     Central registry of finplot plot handles.
@@ -82,12 +59,12 @@ class PlotManager:
         # Maps series_key -> finplot plot handle.
         # Keys follow the same naming convention as compute() output:
         # "sma_50", "avwap_1704067200000", etc.
-        self._plots: dict[str, _PlotHandleLike] = {}
+        self._plots: dict[str, object] = {}
 
         # Candle and volume handles are separate — they are always present
         # and replaced entirely on symbol load rather than updated in place.
-        self._candle_plot: _PlotHandleLike | None = None
-        self._volume_plot: _PlotHandleLike | None = None
+        self._candle_plot: object | None = None
+        self._volume_plot: object | None = None
 
         # DatetimeIndex of the most recently drawn bar series. Stored so
         # indicator plots can use the same time axis as the candles.
@@ -113,19 +90,16 @@ class PlotManager:
         self._bar_index = df.index  # save for indicator alignment
 
         if self._candle_plot is not None:
-            self._candle_plot.update_data(df)
+            self._candle_plot.update_data(df)  # type: ignore[attr-defined]
         else:
-            self._candle_plot = cast(
-                _PlotHandleLike,
-                fplt.candlestick_ochl(
-                    df,
-                    ax=self._price_panel.ax,
-                    colorfunc=fplt.price_colorfilter,
-                ),
+            self._candle_plot = fplt.candlestick_ochl(
+                df,
+                ax=self._price_panel.ax,
+                colorfunc=fplt.price_colorfilter,
             )
             # Hollow/solid scheme: bull candles have a white body (hollow)
             # with a green outline and wick; bear candles are fully red.
-            self._candle_plot.colors.update({
+            cast(Any, self._candle_plot).colors.update({
                 "bull_body":   BACKGROUND,    # hollow
                 "bull_frame":  CANDLE_UP,
                 "bull_shadow": CANDLE_UP,
@@ -150,17 +124,14 @@ class PlotManager:
         df = _series_to_volume_df(series)
 
         if self._volume_plot is not None:
-            self._volume_plot.update_data(df)
+            self._volume_plot.update_data(df)  # type: ignore[attr-defined]
         else:
-            self._volume_plot = cast(
-                _PlotHandleLike,
-                fplt.volume_ocv(
-                    df,
-                    ax=self._volume_panel.ax,
-                    colorfunc=fplt.volume_colorfilter,
-                ),
+            self._volume_plot = fplt.volume_ocv(
+                df,
+                ax=self._volume_panel.ax,
+                colorfunc=fplt.volume_colorfilter,
             )
-            self._volume_plot.colors.update({
+            cast(Any, self._volume_plot).colors.update({
                 "bull_frame": VOLUME_UP,
                 "bull_body":  VOLUME_UP,
                 "bear_frame": VOLUME_DOWN,
@@ -210,20 +181,17 @@ class PlotManager:
             # finplot's _start_visual_update → pg setData → updateItems with
             # styleUpdate=True, which reads opts['pen']. Setting the pen first
             # ensures the new color is in opts['pen'] when that re-render runs.
-            handle.setPen(
+            handle.setPen(  # type: ignore[attr-defined]
                 pg.mkPen(color=color, width=LINE_WIDTH_INDICATOR)
             )
-            handle.opts["handed_color"] = color
-            handle.update_data(data)
+            handle.opts["handed_color"] = color  # type: ignore[attr-defined]
+            handle.update_data(data)  # type: ignore[attr-defined]
         else:
-            handle = cast(
-                _PlotHandleLike,
-                fplt.plot(
-                    data,
-                    ax=self._price_panel.ax,
-                    color=color,
-                    width=LINE_WIDTH_INDICATOR,
-                ),
+            handle = fplt.plot(
+                data,
+                ax=self._price_panel.ax,
+                color=color,
+                width=LINE_WIDTH_INDICATOR,
             )
             self._plots[series_key] = handle
 
@@ -236,7 +204,7 @@ class PlotManager:
         """
         if series_key in self._plots:
             handle = self._plots.pop(series_key)
-            handle.ax.removeItem(handle)
+            handle.ax.removeItem(handle)  # type: ignore[attr-defined]
 
     def set_visible(self, series_key: str, visible: bool) -> None:
         """
@@ -246,7 +214,7 @@ class PlotManager:
         so it can be shown again without recomputing.
         """
         if series_key in self._plots:
-            self._plots[series_key].setVisible(visible)
+            self._plots[series_key].setVisible(visible)  # type: ignore[attr-defined]
 
     def clear_indicators(self) -> None:
         """
@@ -256,7 +224,7 @@ class PlotManager:
         so they are not cleared here.
         """
         for handle in self._plots.values():
-            handle.ax.removeItem(handle)
+            handle.ax.removeItem(handle)  # type: ignore[attr-defined]
         self._plots.clear()
 
     def clear_all(self) -> None:
@@ -294,10 +262,10 @@ class PlotManager:
         equals 200 so this is a no-op.
         """
         vb = self._price_panel.ax.vb  # type: ignore[attr-defined]
-        datasrc = cast(_DataSourceLike | None, getattr(vb, "datasrc", None))
+        datasrc = cast(Any, getattr(vb, "datasrc", None))
         if datasrc is None:
             return
-        total = datasrc.xlen
+        total: int = datasrc.xlen
         if total <= 1:
             return
         init_steps: int = getattr(vb, "init_steps", 200)
