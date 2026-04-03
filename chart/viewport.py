@@ -35,6 +35,7 @@ _AXIS_ZOOM_SENSITIVITY = 1.003
 _MANUAL_Y_DRAG_PIXELS = 6.0
 _MIN_V_ZOOM_SCALE = 0.02
 _MAX_V_ZOOM_SCALE = 50.0
+_MAX_Y_OVERSHOOT_RATIO = 0.25
 
 
 class _PointLike(Protocol):
@@ -98,6 +99,7 @@ class _ViewBoxLike(Protocol):
 
     def mapToView(self, point: _PointLike) -> _PointLike: ...
     def mapSceneToView(self, point: _PointLike) -> _PointLike: ...
+    def linkedView(self, axis: int) -> object | None: ...
     def mouseDragEvent(self, event: _DragEventLike, axis: int | None = None) -> None: ...
     def setMouseEnabled(self, x: bool | None = None, y: bool | None = None) -> None: ...
     def set_range(self, x0: float | None, y0: float, x1: float | None, y1: float) -> bool | None: ...
@@ -110,10 +112,10 @@ class _ViewBoxLike(Protocol):
 @dataclass(frozen=True)
 class _AxisZoomState:
     baseline: float
-    start_scale: float
+    min_decimals: int
     start_screen_y: float
-    start_rect_top: float
-    start_rect_bottom: float
+    start_low: float
+    start_high: float
 
 
 _AXIS_ZOOM_STATES: WeakKeyDictionary[object, _AxisZoomState] = WeakKeyDictionary()
@@ -137,6 +139,7 @@ def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:
 
     apply_interaction_modes(price_ax, volume_ax)
     volume_vb.master_viewbox = price_vb
+    _patch_price_axis_format(price_ax)
 
     _patch_update_y_zoom(price_vb)
     _patch_update_y_zoom(volume_vb)
@@ -203,6 +206,7 @@ def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> Non
         if is_left_drag and no_modifier_drag:
             if allow_vertical_pan:
                 pg.ViewBox.mouseDragEvent(self, event, axis=None)
+                _persist_current_x_range(self)
                 if event.isFinish():
                     self.win._isMouseLeftDrag = False
                     drag = _drag_delta(event)
@@ -216,6 +220,7 @@ def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> Non
                 return
 
             pg.ViewBox.mouseDragEvent(self, event, axis=0)
+            _persist_current_x_range(self)
             if event.isFinish():
                 self.win._isMouseLeftDrag = False
             else:
@@ -321,24 +326,36 @@ def _scale_from_price_axis_drag(viewbox: _ViewBoxLike, event: _DragEventLike) ->
         baseline = (anchor_view.y() - current_rect.top()) / current_span
         state = _AxisZoomState(
             baseline=min(max(baseline, 0.0), 1.0),
-            start_scale=viewbox.v_zoom_scale,
+            min_decimals=_axis_min_decimals(viewbox),
             start_screen_y=event.screenPos().y(),
-            start_rect_top=current_rect.top(),
-            start_rect_bottom=current_rect.bottom(),
+            start_low=current_rect.top(),
+            start_high=current_rect.bottom(),
         )
         _AXIS_ZOOM_STATES[viewbox] = state
 
     dy_total = event.screenPos().y() - state.start_screen_y
-    zoom_factor = _AXIS_ZOOM_SENSITIVITY ** dy_total
-    viewbox.v_zoom_baseline = state.baseline
     viewbox.v_autozoom = False
-    viewbox.v_zoom_scale = min(
-        max(state.start_scale * zoom_factor, _MIN_V_ZOOM_SCALE),
-        _MAX_V_ZOOM_SCALE,
-    )
+    zoom_factor = _AXIS_ZOOM_SENSITIVITY ** dy_total
+
+    start_span = max(state.start_high - state.start_low, 2e-7)
+    new_span = start_span / zoom_factor
+    data_low, data_high = _data_y_bounds_for_window(viewbox, current_rect.left(), current_rect.right())
+    if data_high is not None and data_low is not None:
+        max_span = max(
+            data_high - data_low,
+            (data_high + max(abs(data_high) * _MAX_Y_OVERSHOOT_RATIO, (data_high - data_low) * _MAX_Y_OVERSHOOT_RATIO))
+            - (data_low - max(abs(data_low) * _MAX_Y_OVERSHOOT_RATIO, (data_high - data_low) * _MAX_Y_OVERSHOOT_RATIO)),
+        )
+        new_span = min(max(new_span, 2e-7), max_span)
+
+    anchor_value = state.start_low + state.baseline * start_span
+    new_low = anchor_value - state.baseline * new_span
+    new_high = anchor_value + (1.0 - state.baseline) * new_span
 
     target_rect = viewbox.targetRect()
-    viewbox.update_y_zoom(target_rect.left(), target_rect.right())
+    viewbox.set_range(target_rect.left(), new_low, target_rect.right(), new_high)
+    _clamp_axis_drag_range(viewbox, target_rect.left(), target_rect.right())
+    _refresh_price_axis_precision(viewbox, zooming_in=(dy_total > 0), min_decimals=state.min_decimals)
 
     if event.isFinish():
         _AXIS_ZOOM_STATES.pop(viewbox, None)
@@ -347,6 +364,8 @@ def _scale_from_price_axis_drag(viewbox: _ViewBoxLike, event: _DragEventLike) ->
         viewbox.win._isMouseLeftDrag = True
 
     event.accept()
+
+
 def _reset_viewbox(viewbox: _ViewBoxLike) -> None:
     datasrc = viewbox.datasrc_or_standalone
     if datasrc is None:
@@ -358,6 +377,161 @@ def _reset_viewbox(viewbox: _ViewBoxLike) -> None:
     viewbox.v_zoom_baseline = 0.5
     viewbox.v_zoom_scale = 1.0 - fplt.y_pad
     viewbox.update_y_zoom(datasrc.init_x0, datasrc.init_x1)
+
+
+def _persist_current_x_range(viewbox: _ViewBoxLike) -> None:
+    left, right = _current_target_x_range(viewbox)
+    for target in _linked_x_viewboxes(viewbox):
+        datasrc = target.datasrc_or_standalone
+        if datasrc is None:
+            continue
+        datasrc.init_x0 = left
+        datasrc.init_x1 = right
+
+
+def _current_target_x_range(viewbox: _ViewBoxLike) -> tuple[float, float]:
+    target_range = viewbox.state.get("targetRange")
+    if isinstance(target_range, list) and len(target_range) >= 1:
+        x_range = target_range[0]
+        if isinstance(x_range, list) and len(x_range) == 2:
+            left = x_range[0]
+            right = x_range[1]
+            if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+                return float(left), float(right)
+
+    rect = viewbox.targetRect()
+    return rect.left(), rect.right()
+
+
+def _linked_x_viewboxes(viewbox: _ViewBoxLike) -> list[_ViewBoxLike]:
+    linked: list[_ViewBoxLike] = [viewbox]
+    window_axes = getattr(viewbox.win, "axs", [])
+    for axis in window_axes:
+        candidate = cast(_ViewBoxLike, getattr(axis, "vb"))
+        if candidate is viewbox:
+            continue
+        if candidate.linkedView(0) is viewbox or viewbox.linkedView(0) is candidate:
+            linked.append(candidate)
+    return linked
+
+
+def _refresh_price_axis_precision(
+    viewbox: _ViewBoxLike,
+    *,
+    zooming_in: bool,
+    min_decimals: int,
+) -> None:
+    axis = getattr(viewbox, "parent", lambda: None)()
+    datasrc = viewbox.datasrc_or_standalone
+    update_significants = getattr(fplt, "_update_significants", None)
+    if axis is None or datasrc is None or not callable(update_significants):
+        return
+    update_significants(axis, datasrc, True)
+    next_min = _bias_price_axis_precision(axis, viewbox, min_decimals=min_decimals, zooming_in=zooming_in)
+    right_axis = axis.axes.get("right", {}).get("item")
+    if right_axis is not None:
+        right_axis._min_decimals = next_min
+        right_axis.picture = None
+        right_axis.update()
+
+
+def _bias_price_axis_precision(
+    axis: object,
+    viewbox: _ViewBoxLike,
+    *,
+    min_decimals: int,
+    zooming_in: bool,
+) -> int:
+    rect = viewbox.targetRect()
+    span = abs(rect.bottom() - rect.top())
+    if span <= 0:
+        return min_decimals
+
+    # Bias toward finer labels sooner than finplot's default heuristics.
+    target_step = span / 12.0
+    if target_step <= 0:
+        return min_decimals
+
+    desired_decimals = max(0, min(6, int(math.ceil(-math.log10(target_step))) + 1))
+    if zooming_in:
+        desired_decimals = max(desired_decimals, min_decimals)
+    desired_eps = min(getattr(axis, "significant_eps", 1e-8), max(target_step / 10.0, 1e-8))
+
+    axis.significant_decimals = max(getattr(axis, "significant_decimals", 0), desired_decimals)  # type: ignore[attr-defined]
+    axis.significant_eps = desired_eps  # type: ignore[attr-defined]
+    axis.significant_forced = True  # type: ignore[attr-defined]
+    return desired_decimals
+
+
+def _patch_price_axis_format(price_ax: object) -> None:
+    axes = getattr(price_ax, "axes", {})
+    right_axis = axes.get("right", {}).get("item")
+    if right_axis is None or getattr(right_axis, "_simplechart_fmt_patch", False):
+        return
+
+    original_fmt_values = right_axis.fmt_values
+
+    def _fmt_values(vs: object) -> object:
+        result = original_fmt_values(vs)
+        min_decimals = getattr(right_axis, "_min_decimals", 0)
+        if min_decimals > 0 and getattr(right_axis, "next_fmt", "").endswith("f"):
+            right_axis.next_fmt = f"%.{min_decimals}f"
+        return result
+
+    right_axis.fmt_values = _fmt_values
+    right_axis._min_decimals = 0
+    right_axis._simplechart_fmt_patch = True
+
+
+def _axis_min_decimals(viewbox: _ViewBoxLike) -> int:
+    axis = getattr(viewbox, "parent", lambda: None)()
+    if axis is None:
+        return 0
+    right_axis = axis.axes.get("right", {}).get("item")
+    if right_axis is None:
+        return 0
+    return int(getattr(right_axis, "_min_decimals", 0))
+
+
+def _clamp_axis_drag_range(viewbox: _ViewBoxLike, left: float, right: float) -> None:
+    data_low, data_high = _data_y_bounds_for_window(viewbox, left, right)
+    if data_high is None or data_low is None:
+        return
+
+    span = data_high - data_low
+    upper_padding = max(abs(data_high) * _MAX_Y_OVERSHOOT_RATIO, span * _MAX_Y_OVERSHOOT_RATIO)
+    lower_padding = max(abs(data_low) * _MAX_Y_OVERSHOOT_RATIO, span * _MAX_Y_OVERSHOOT_RATIO)
+
+    min_visible_low = data_low - lower_padding
+    max_visible_high = data_high + upper_padding
+
+    current_rect = viewbox.targetRect()
+    current_low = current_rect.top()
+    current_high = current_rect.bottom()
+
+    clamped_low = max(current_low, min_visible_low)
+    clamped_high = min(current_high, max_visible_high)
+
+    if clamped_high <= clamped_low:
+        clamped_low = min_visible_low
+        clamped_high = max_visible_high
+
+    viewbox.set_range(left, clamped_low, right, clamped_high)
+
+
+def _data_y_bounds_for_window(viewbox: _ViewBoxLike, left: float, right: float) -> tuple[float | None, float | None]:
+    datasrc = viewbox.datasrc_or_standalone
+    if datasrc is None:
+        return None, None
+
+    visible_left, visible_right = _visible_data_window(left, right, datasrc.xlen)
+    if visible_right <= visible_left:
+        return None, None
+
+    _, _, high, low, count = datasrc.hilo(visible_left, visible_right)
+    if count <= 0 or not _is_finite_range(high, low):
+        return None, None
+    return low, high
 
 
 def _visible_data_window(left: float, right: float, xlen: int) -> tuple[float, float]:
