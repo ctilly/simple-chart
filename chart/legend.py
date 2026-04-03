@@ -18,7 +18,7 @@ reflect the new state.
 from typing import Callable
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QCursor, QFont
+from PyQt6.QtGui import QColor, QCursor, QFont, QMouseEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -65,9 +65,8 @@ class IndicatorLabel(QLabel):
         self._visible = visible
         self._apply_style()
 
-    def mousePressEvent(self, event: object) -> None:  # type: ignore[override]
-        from PyQt6.QtGui import QMouseEvent
-        if not isinstance(event, QMouseEvent):
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        if event is None:
             return
         if event.button() == Qt.MouseButton.LeftButton:
             self._on_toggle(self._series_key)

@@ -27,12 +27,11 @@ finplot integration:
     height ratio is set via pyqtgraph's row stretch factors.
 """
 
-import types
 from typing import Callable
 
 import finplot as fplt
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from chart.interactions import ChartInteractions
@@ -40,43 +39,10 @@ from chart.legend import ChartLegend
 from chart.panel import Panel, PanelType
 from chart.plot_manager import PlotManager
 from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
+from chart.viewport import install_viewport_behavior, reset_viewports
 
 
-def _patch_free_pan(vb: object) -> None:
-    """
-    Patch a FinViewBox so left-click drag pans freely in both axes.
-
-    finplot hard-codes axis=0 in mouseDragEvent, which constrains panning
-    to horizontal only. We replace the method on the specific viewbox
-    instance to pass axis=None, enabling unrestricted pan.
-    """
-    def _mouseDragEvent(self: object, ev: object, axis: object = None) -> None:  # type: ignore[override]
-        ev_button = ev.button()  # type: ignore[attr-defined]
-        if getattr(self, "master_viewbox", None):
-            return self.master_viewbox.mouseDragEvent(ev, axis=None)  # type: ignore[attr-defined]
-        if not getattr(self, "datasrc", None):
-            return
-        if ev_button == Qt.MouseButton.LeftButton:
-            pg.ViewBox.mouseDragEvent(self, ev, axis=None)  # type: ignore[arg-type]
-            if ev.isFinish():  # type: ignore[attr-defined]
-                self.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
-                # Only auto-reset y-zoom when dragging was primarily horizontal.
-                # If the user dragged in y they want the y range to stay where
-                # they put it — calling refresh_all_y_zoom would snap it back.
-                drag = ev.pos() - ev.buttonDownPos()  # type: ignore[attr-defined]
-                if abs(drag.x()) >= abs(drag.y()):    # type: ignore[attr-defined]
-                    self.refresh_all_y_zoom()         # type: ignore[attr-defined]
-            else:
-                self.win._isMouseLeftDrag = True   # type: ignore[attr-defined]
-        elif ev_button == Qt.MouseButton.RightButton:
-            pg.ViewBox.mouseDragEvent(self, ev, axis=1)  # type: ignore[arg-type]
-        else:
-            pg.ViewBox.mouseDragEvent(self, ev, axis=None)  # type: ignore[arg-type]
-
-    vb.mouseDragEvent = types.MethodType(_mouseDragEvent, vb)  # type: ignore[attr-defined]
-
-
-class _FinplotMaster(pg.GraphicsLayoutWidget):
+class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
     """
     pg.GraphicsLayoutWidget with the .axs property that finplot expects.
 
@@ -112,6 +78,7 @@ class ChartWidget(QWidget):
         super().__init__(parent)
         self._setup_finplot()
         self._build_layout()
+        self._install_shortcuts()
 
     def _setup_finplot(self) -> None:
         """
@@ -154,12 +121,9 @@ class ChartWidget(QWidget):
         self._master.ci.layout.setRowStretchFactor(1, 1)
 
         # Grid lines — very low alpha for a barely-visible reference grid.
-        price_ax.showGrid(x=True, y=True, alpha=0.06)  # type: ignore[attr-defined]
+        price_ax.showGrid(x=True, y=True, alpha=0.06)
 
-        # finplot's mouseDragEvent hard-codes axis=0 which constrains panning
-        # to horizontal only. Patch both viewboxes to allow free (x+y) pan.
-        _patch_free_pan(price_ax.vb)   # type: ignore[attr-defined]
-        _patch_free_pan(volume_ax.vb)  # type: ignore[attr-defined]
+        install_viewport_behavior(price_ax, volume_ax)
 
         self._price_panel  = Panel(price_ax,  PanelType.PRICE,  ratio=4)
         self._volume_panel = Panel(volume_ax, PanelType.VOLUME, ratio=1)
@@ -186,6 +150,11 @@ class ChartWidget(QWidget):
         self._plot_manager = PlotManager(self._price_panel, self._volume_panel)
         self._interactions = ChartInteractions(self._price_panel.ax, self._master)
 
+    def _install_shortcuts(self) -> None:
+        reset_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        reset_shortcut.activated.connect(self.reset_viewport)
+        self._reset_shortcut = reset_shortcut
+
     # ------------------------------------------------------------------
     # Public interface for the controller
     # ------------------------------------------------------------------
@@ -201,6 +170,10 @@ class ChartWidget(QWidget):
     @property
     def interactions(self) -> ChartInteractions:
         return self._interactions
+
+    def reset_viewport(self) -> None:
+        reset_viewports(self._price_panel.ax, self._volume_panel.ax)
+        fplt.refresh()
 
     def wire_legend(
         self,
@@ -221,7 +194,11 @@ class ChartWidget(QWidget):
             parent=self,
         )
         layout = self.layout()
-        old = layout.itemAt(0).widget()  # type: ignore[union-attr]
-        layout.replaceWidget(old, new_legend)
-        old.deleteLater()
+        assert layout is not None
+        old_item = layout.itemAt(0)
+        assert old_item is not None
+        old_widget = old_item.widget()
+        assert old_widget is not None
+        layout.replaceWidget(old_widget, new_legend)
+        old_widget.deleteLater()
         self._legend = new_legend
