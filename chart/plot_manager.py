@@ -25,8 +25,6 @@ Note on pandas:
     not appear anywhere else in the codebase.
 """
 
-from typing import Any, cast
-
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
@@ -99,7 +97,7 @@ class PlotManager:
             )
             # Hollow/solid scheme: bull candles have a white body (hollow)
             # with a green outline and wick; bear candles are fully red.
-            cast(Any, self._candle_plot).colors.update({
+            self._candle_plot.colors.update({  # type: ignore[attr-defined]
                 "bull_body":   BACKGROUND,    # hollow
                 "bull_frame":  CANDLE_UP,
                 "bull_shadow": CANDLE_UP,
@@ -109,8 +107,6 @@ class PlotManager:
             })
 
         unlock_x_pan(self._price_panel.ax)
-        apply_interaction_modes(self._price_panel.ax, self._volume_panel.ax)
-
 
     def draw_volume(self, series: OHLCVSeries) -> None:
         """
@@ -131,7 +127,7 @@ class PlotManager:
                 ax=self._volume_panel.ax,
                 colorfunc=fplt.volume_colorfilter,
             )
-            cast(Any, self._volume_plot).colors.update({
+            self._volume_plot.colors.update({  # type: ignore[attr-defined]
                 "bull_frame": VOLUME_UP,
                 "bull_body":  VOLUME_UP,
                 "bear_frame": VOLUME_DOWN,
@@ -262,15 +258,15 @@ class PlotManager:
         equals 200 so this is a no-op.
         """
         vb = self._price_panel.ax.vb  # type: ignore[attr-defined]
-        datasrc = cast(Any, getattr(vb, "datasrc", None))
+        datasrc = getattr(vb, "datasrc", None)
         if datasrc is None:
             return
-        total: int = datasrc.xlen
+        total: int = datasrc.xlen  # type: ignore[attr-defined]
         if total <= 1:
             return
         init_steps: int = getattr(vb, "init_steps", 200)
         zoom_n = min(init_steps, max(1, total // 2))
-        datasrc.update_init_x(zoom_n)
+        datasrc.update_init_x(zoom_n)  # type: ignore[attr-defined]
 
     def active_series_keys(self) -> list[str]:
         """Return the keys of all currently drawn indicator series."""

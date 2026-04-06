@@ -121,6 +121,18 @@ class _AxisZoomState:
     start_high: float
 
 
+@dataclass(frozen=True)
+class _DragDelta:
+    _x: float
+    _y: float
+
+    def x(self) -> float:
+        return self._x
+
+    def y(self) -> float:
+        return self._y
+
+
 _AXIS_ZOOM_STATES: WeakKeyDictionary[object, _AxisZoomState] = WeakKeyDictionary()
 _FREE_X_PAN_BARS = 1_000_000.0
 
@@ -352,23 +364,6 @@ def _force_x_limits(
 
     limits["xLimits"] = [x_min, x_max]
 
-
-def _finish_pan(
-    viewbox: _ViewBoxLike,
-    event: _DragEventLike,
-    *,
-    allow_vertical_pan: bool,
-) -> None:
-    drag = _drag_delta(event)
-    moved_vertically = allow_vertical_pan and abs(drag.y()) >= max(_MANUAL_Y_DRAG_PIXELS, abs(drag.x()) * 0.25)
-
-    if moved_vertically:
-        viewbox.v_autozoom = False
-        return
-
-    if viewbox.v_autozoom:
-        target_rect = viewbox.targetRect()
-        viewbox.update_y_zoom(target_rect.left(), target_rect.right())
 
 
 def _scale_from_price_axis_drag(viewbox: _ViewBoxLike, event: _DragEventLike) -> None:
@@ -621,18 +616,7 @@ def _is_finite_range(high: float, low: float) -> bool:
 
 
 def _drag_delta(event: _DragEventLike) -> _PointLike:
-    class _Delta:
-        def __init__(self, x_value: float, y_value: float) -> None:
-            self._x = x_value
-            self._y = y_value
-
-        def x(self) -> float:
-            return self._x
-
-        def y(self) -> float:
-            return self._y
-
-    return _Delta(
-        event.pos().x() - event.buttonDownPos().x(),
-        event.pos().y() - event.buttonDownPos().y(),
+    return _DragDelta(
+        _x=event.pos().x() - event.buttonDownPos().x(),
+        _y=event.pos().y() - event.buttonDownPos().y(),
     )
