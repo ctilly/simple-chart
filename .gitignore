@@ -35,6 +35,8 @@ Thumbs.db
 # misc
 bugs.txt
 enhancements.txt
+performance_proposal.md
+specification.txt
 
 
 # Claude Code project settings (local only)
