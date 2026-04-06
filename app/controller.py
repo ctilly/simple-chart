@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, db_path: str, provider_name: str = "yfinance") -> None:
         super().__init__()
-        self.setWindowTitle("SimpleChart")
+        self.setWindowTitle("Simple Chart")
         self.resize(1400, 800)
 
         # ------------------------------------------------------------------
@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
                     name=s.name,
                     params=copy.deepcopy(s.params),
                     visible=s.visible,
+                    series_visibility=copy.deepcopy(s.series_visibility),
                 )
                 for s in self._state.indicators
                 if s.name != "avwap"   # AVWAP state is driven by DB anchors
@@ -351,6 +352,7 @@ class MainWindow(QMainWindow):
                         name=s.name,
                         params=copy.deepcopy(s.params),
                         visible=s.visible,
+                        series_visibility=copy.deepcopy(s.series_visibility),
                     )
                     for s in self._per_symbol_state[series.symbol]
                 ]
@@ -427,6 +429,11 @@ class MainWindow(QMainWindow):
 
         # Track which series keys this indicator owns.
         ind_state.series_keys = list(result.keys())
+        ind_state.series_visibility = {
+            key: ind_state.series_visibility[key]
+            for key in ind_state.series_keys
+            if key in ind_state.series_visibility
+        }
 
         default_color: str = ind_state.params.get("color", "#ffffff")
         pm = self._chart.plot_manager
@@ -444,13 +451,14 @@ class MainWindow(QMainWindow):
             else:
                 color = default_color
 
+            visible = ind_state.series_visibility.get(series_key, ind_state.visible)
             pm.update_indicator(series_key, values, color)
-            pm.set_visible(series_key, ind_state.visible)
+            pm.set_visible(series_key, visible)
 
             display = _series_key_to_label(series_key, ind_state)
             self._chart.legend.add_indicator(series_key, display, color)
             self._chart.legend.update_color(series_key, color)
-            self._chart.legend.set_indicator_visible(series_key, ind_state.visible)
+            self._chart.legend.set_indicator_visible(series_key, visible)
 
     # ------------------------------------------------------------------
     # AVWAP anchor workflow
@@ -577,6 +585,13 @@ class MainWindow(QMainWindow):
         ind_state = self._state.get_indicator_by_series_key(series_key)
         if ind_state is None:
             return
+        if series_key.startswith("avwap_"):
+            visible = not ind_state.series_visibility.get(series_key, ind_state.visible)
+            ind_state.series_visibility[series_key] = visible
+            self._chart.plot_manager.set_visible(series_key, visible)
+            self._chart.legend.set_indicator_visible(series_key, visible)
+            return
+
         ind_state.visible = not ind_state.visible
         pm = self._chart.plot_manager
         for key in ind_state.series_keys:
@@ -661,6 +676,9 @@ class MainWindow(QMainWindow):
             self._state.anchors = [
                 a for a in self._state.anchors if a.anchor_ts != ts_ms
             ]
+            avwap_state = self._state.get_indicator("avwap")
+            if avwap_state is not None:
+                avwap_state.series_visibility.pop(series_key, None)
             self._chart.plot_manager.remove_indicator(series_key)
             self._chart.legend.remove_indicator(series_key)
             if not self._state.anchors:

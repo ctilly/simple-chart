@@ -30,6 +30,8 @@ class IndicatorState:
     visible    — whether the indicator's plot lines are currently shown
     series_keys — the keys last returned by compute(), used to update the
                  PlotManager and legend when params change
+    series_visibility — optional per-series visibility overrides for
+                 indicators that emit multiple independent series
 
     One IndicatorState entry exists per indicator instance on the chart.
     Multiple SMAs (50-day and 200-day) are two separate entries with the
@@ -40,6 +42,7 @@ class IndicatorState:
     params:      dict[str, Any]
     visible:     bool = True
     series_keys: list[str] = field(default_factory=list)
+    series_visibility: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass

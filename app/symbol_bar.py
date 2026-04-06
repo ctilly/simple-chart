@@ -65,7 +65,8 @@ class SymbolBar(QWidget):
         self._symbol_input.setPlaceholderText("Symbol (e.g. QQQ)")
         self._symbol_input.setMaximumWidth(140)
         self._symbol_input.setStyleSheet(
-            "font-size: 13px; padding: 2px 6px; text-transform: uppercase;"
+            "font-size: 13px; padding: 2px 6px; text-transform: uppercase; "
+            "background: #ffffff; border: 1px solid #c6c6c6; border-radius: 3px;"
         )
         self._symbol_input.returnPressed.connect(self._on_symbol_submitted)
         layout.addWidget(self._symbol_input)
@@ -117,10 +118,10 @@ class SymbolBar(QWidget):
             if tf == active:
                 btn.setStyleSheet(
                     "background-color: #00d4d4; color: #000000; "
-                    "font-weight: bold; border: none; border-radius: 3px;"
+                    "font-weight: bold; border: 1px solid #00b8b8; border-radius: 3px;"
                 )
             else:
                 btn.setStyleSheet(
-                    "background-color: transparent; color: #333333; "
+                    "background-color: #f7f7f7; color: #333333; "
                     "border: 1px solid #cccccc; border-radius: 3px;"
                 )

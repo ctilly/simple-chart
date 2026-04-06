@@ -1,7 +1,7 @@
 """
 main.py
 
-SimpleChart entry point.
+Simple Chart entry point.
 
 Run with:
     python main.py
@@ -26,7 +26,7 @@ _DEFAULT_DB = Path(__file__).parent / "simplechart.db"
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="SimpleChart — stock charting app")
+    parser = argparse.ArgumentParser(description="Simple Chart — stock charting app")
     parser.add_argument(
         "--db",
         type=Path,
@@ -48,7 +48,7 @@ def main() -> None:
     args.db.parent.mkdir(parents=True, exist_ok=True)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("SimpleChart")
+    app.setApplicationName("Simple Chart")
 
     window = MainWindow(
         db_path=str(args.db),
