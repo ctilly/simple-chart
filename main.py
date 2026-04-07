@@ -17,15 +17,18 @@ import argparse
 import sys
 from pathlib import Path
 
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication
 
 from app.controller import MainWindow
 
 
-_DEFAULT_DB = Path(__file__).parent / "simplechart.db"
-_ICON_PATH = Path(__file__).parent / "assets" / "simple-chart.svg"
+_DEFAULT_DB = Path.home() / ".simplechart" / "simplechart.db"
+_APP_ROOT = Path(__file__).resolve().parent
+_ICON_PATH = _APP_ROOT / "assets" / "simple-chart.svg"
 _APP_NAME = "Simple Chart"
+_ICON_THEME_NAME = "simplechart"
 _DESKTOP_FILE_ID = "io.simplechart.SimpleChart"
 
 
@@ -46,11 +49,56 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _load_app_icon() -> QIcon:
-    """Load the app icon from the checked-in SVG asset."""
-    icon = QIcon(str(_ICON_PATH))
-    if icon.isNull():
-        raise RuntimeError(f"Failed to load app icon: {_ICON_PATH}")
-    return icon
+    """Load the checked-in icon, then fall back to theme or generated art."""
+    if _ICON_PATH.is_file():
+        icon = QIcon(str(_ICON_PATH))
+        if not icon.isNull():
+            return icon
+
+    theme_icon = QIcon.fromTheme(_ICON_THEME_NAME)
+    if not theme_icon.isNull():
+        return theme_icon
+
+    return _build_fallback_icon()
+
+
+def _build_fallback_icon(size: int = 256) -> QIcon:
+    """Generate a simple chart icon so startup never depends on external files."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+    painter.setPen(QPen(QColor("#6f665c"), 12))
+    painter.setBrush(QColor("#f1eadf"))
+    painter.drawRoundedRect(QRectF(18, 18, size - 36, size - 36), 34, 34)
+
+    painter.setPen(QPen(QColor("#c8beb0"), 4))
+    painter.setBrush(QColor("#fffdfa"))
+    painter.drawRoundedRect(QRectF(42, 42, size - 84, size - 84), 18, 18)
+
+    painter.setPen(QPen(QColor("#5e5850"), 6))
+    for x_pos, top, bottom in (
+        (74, 92, 192),
+        (106, 70, 182),
+        (138, 104, 202),
+        (170, 82, 170),
+    ):
+        painter.drawLine(x_pos, top, x_pos, bottom)
+
+    painter.setPen(Qt.PenStyle.NoPen)
+    for x_pos, y_pos, height, color in (
+        (60, 124, 42, "#d94a4a"),
+        (92, 104, 52, "#00b56a"),
+        (124, 138, 34, "#d94a4a"),
+        (156, 112, 38, "#00b56a"),
+    ):
+        painter.setBrush(QColor(color))
+        painter.drawRoundedRect(QRectF(x_pos, y_pos, 28, height), 5, 5)
+
+    painter.end()
+    return QIcon(pixmap)
 
 
 def main() -> None:

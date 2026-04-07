@@ -2,11 +2,10 @@
 Type=Application
 Name=Simple Chart
 Comment=Simple Chart stock charting app
-TryExec=/home/chucktilly/.pyenv/versions/simple-chart/bin/python
-Exec=/home/chucktilly/.pyenv/versions/simple-chart/bin/python /home/chucktilly/Documents/projects/simple-chart/main.py
-Icon=/home/chucktilly/Documents/projects/simple-chart/assets/simple-chart.svg
+TryExec=simplechart
+Exec=simplechart
+Icon=simplechart
 Terminal=false
-Path=/home/chucktilly/Documents/projects/simple-chart
 Categories=Office;Finance;
 StartupWMClass=io.simplechart.SimpleChart
 StartupNotify=true

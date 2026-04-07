@@ -26,6 +26,9 @@ dev = [
 [project.scripts]
 simplechart = "main:main"
 
+[tool.setuptools]
+py-modules = ["main"]
+
 [tool.setuptools.packages.find]
 include = ["app*", "chart*", "data*", "indicators*", "plugins*"]
 
