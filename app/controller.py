@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QFrame,
     QVBoxLayout,
     QWidget,
 )
@@ -220,10 +221,17 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         # UI
         # ------------------------------------------------------------------
-        central = QWidget()
+        frame = QFrame()
+        frame.setObjectName("appFrame")
+        frame.setStyleSheet(
+            "QFrame#appFrame {"
+            " background: #ffffff;"
+            " border: 5px solid #9d978d;"
+            "}"
+        )
 
         # Top-level layout: watchlist sidebar on the left, chart area on the right.
-        main_layout = QHBoxLayout(central)
+        main_layout = QHBoxLayout(frame)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
@@ -232,7 +240,7 @@ class MainWindow(QMainWindow):
             symbols=self._cache.get_watchlist(),
             on_add=self._on_watchlist_add,
             on_remove=self._on_watchlist_remove,
-            parent=central,
+            parent=frame,
         )
         self._watchlist.symbol_selected.connect(self._on_watchlist_symbol_selected)
         main_layout.addWidget(self._watchlist)
@@ -250,7 +258,7 @@ class MainWindow(QMainWindow):
         chart_layout.addWidget(self._chart)
         main_layout.addWidget(chart_area)
 
-        self.setCentralWidget(central)
+        self.setCentralWidget(frame)
 
         # Wire legend callbacks now that the controller exists.
         self._chart.wire_legend(
