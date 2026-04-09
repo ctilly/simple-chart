@@ -16,6 +16,7 @@ Note: the file is named yfinance_provider.py (not yfinance.py) to avoid
 shadowing the yfinance package on import.
 """
 
+import math
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -81,7 +82,7 @@ class YFinanceProvider(DataProvider):
         if df.empty:
             return []
 
-        return [_row_to_bar(ts, row) for ts, row in df.iterrows()]
+        return _rows_to_bars(df)
 
     def native_timeframes(self) -> list[Timeframe]:
         return [
@@ -98,9 +99,55 @@ class YFinanceProvider(DataProvider):
 # Private helpers
 # ------------------------------------------------------------------
 
-def _row_to_bar(ts: object, row: object) -> Bar:
+def _rows_to_bars(df: pd.DataFrame) -> list[Bar]:
     """
-    Convert a single yfinance DataFrame row to a Bar.
+    Convert a yfinance DataFrame into Bars with validation.
+
+    Providers sometimes return a trailing partial row with missing OHLCV
+    values for the current in-progress period. We drop invalid rows only
+    from the tail of the result. Invalid rows in the middle indicate a
+    corrupted fetch and must fail loudly rather than silently distorting
+    the series.
+    """
+    rows_with_validity = [
+        (_normalize_timestamp(ts), row, _row_is_valid(row))
+        for ts, row in df.iterrows()
+    ]
+
+    last_valid_index = -1
+    for index, (_, _, is_valid) in enumerate(rows_with_validity):
+        if is_valid:
+            last_valid_index = index
+
+    if last_valid_index == -1:
+        return []
+
+    first_invalid_in_kept: tuple[int, datetime] | None = next(
+        (
+            (index, timestamp)
+            for index, (timestamp, _, is_valid) in enumerate(
+                rows_with_validity[: last_valid_index + 1]
+            )
+            if not is_valid
+        ),
+        None,
+    )
+    if first_invalid_in_kept is not None:
+        _, timestamp = first_invalid_in_kept
+        raise ValueError(
+            "Provider returned an invalid interior bar for "
+            f"{timestamp.isoformat()}."
+        )
+
+    return [
+        _row_to_bar(timestamp, row)
+        for timestamp, row, _ in rows_with_validity[: last_valid_index + 1]
+    ]
+
+
+def _normalize_timestamp(ts: object) -> datetime:
+    """
+    Normalize a yfinance row index value to a UTC-aware datetime.
 
     yfinance returns timestamps as pandas Timestamps. For intraday data
     they are timezone-aware (America/New_York); for daily/weekly they may
@@ -113,13 +160,37 @@ def _row_to_bar(ts: object, row: object) -> Bar:
         timestamp = timestamp.tz_localize("UTC")
     else:
         timestamp = timestamp.tz_convert("UTC")
+    return timestamp.to_pydatetime()
 
+
+def _row_to_bar(ts: object, row: object) -> Bar:
+    """Convert one validated yfinance DataFrame row to a Bar."""
     return Bar(
-        timestamp=timestamp.to_pydatetime(),
-        open=float(row["Open"]),
-        high=float(row["High"]),
-        low=float(row["Low"]),
-        close=float(row["Close"]),
-        volume=int(row["Volume"]),
+        timestamp=_normalize_timestamp(ts),
+        open=_coerce_float(row["Open"]),
+        high=_coerce_float(row["High"]),
+        low=_coerce_float(row["Low"]),
+        close=_coerce_float(row["Close"]),
+        volume=_coerce_volume(row["Volume"]),
         vwap=None,  # Yahoo Finance does not provide VWAP
     )
+
+
+def _row_is_valid(row: object) -> bool:
+    required = ("Open", "High", "Low", "Close", "Volume")
+    return all(_is_finite_number(row[column]) for column in required)
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _coerce_float(value: object) -> float:
+    return float(value)
+
+
+def _coerce_volume(value: object) -> int:
+    return int(float(value))
