@@ -8,8 +8,7 @@ chart layer should hardcode a color string inline — reference a constant
 from this module instead. That way the entire theme can be adjusted in
 one place.
 
-Dark background is the default — consistent with professional trading
-platforms and easier on the eyes during long sessions.
+White background matched to Webull.
 """
 
 
@@ -18,8 +17,6 @@ platforms and easier on the eyes during long sessions.
 # ------------------------------------------------------------------
 
 BACKGROUND       = "#ffffff"   # white (matched to Webull)
-GRID_COLOR       = "#eeeeee"   # very light gray grid lines
-AXIS_COLOR       = "#cccccc"   # axis tick marks and border
 AXIS_TEXT_COLOR  = "#333333"   # dark text on white background
 
 
@@ -40,32 +37,14 @@ VOLUME_DOWN      = "#ff3d3d66"   # CANDLE_DOWN at ~40% opacity
 
 
 # ------------------------------------------------------------------
-# Default indicator colors
-# A new indicator instance cycles through this list if the user has
-# not explicitly chosen a color. The controller picks the next unused
-# color from this palette when adding an indicator.
+# AVWAP colors
+# Assigned in order; cycles back to teal after the first two.
 # ------------------------------------------------------------------
 
-INDICATOR_PALETTE: list[str] = [
-    "#00BFFF",   # deep sky blue   — SMA default
-    "#FF8C00",   # dark orange     — EMA default
-    "#00FF88",   # mint green
-    "#FF69B4",   # hot pink
-    "#FFD700",   # gold
-    "#DA70D6",   # orchid
-    "#7FFFD4",   # aquamarine
-    "#FF6347",   # tomato
-]
-
 AVWAP_PALETTE: list[str] = [
-    "#9141ac",   # purple          — first AVWAP
-    "#e01b24",   # red             — second AVWAP
-    "#2190a4",   # teal
-    "#2190a4",   # teal
-    "#2190a4",   # teal
-    "#2190a4",   # teal
-    "#2190a4",   # teal
-    "#2190a4",   # teal
+    "#9141ac",   # purple — first AVWAP
+    "#e01b24",   # red    — second AVWAP
+    "#2190a4",   # teal   — third and beyond (cycles)
 ]
 
 
@@ -73,22 +52,11 @@ AVWAP_PALETTE: list[str] = [
 # Line widths (pixels)
 # ------------------------------------------------------------------
 
-LINE_WIDTH_INDICATOR  = 1.5   # MA lines, AVWAP
-LINE_WIDTH_THIN       = 1.0   # secondary lines
-
-
-# ------------------------------------------------------------------
-# Crosshair
-# ------------------------------------------------------------------
-
-CROSSHAIR_COLOR = "#555555"
-CROSSHAIR_WIDTH = 1
+LINE_WIDTH_INDICATOR = 1.5   # MA lines, AVWAP
 
 
 # ------------------------------------------------------------------
 # Legend / overlay text
 # ------------------------------------------------------------------
 
-LEGEND_BACKGROUND   = "#1a1a1a"
-LEGEND_TEXT_COLOR   = "#cccccc"
-LEGEND_FONT_SIZE    = 10        # points
+LEGEND_FONT_SIZE = 10   # points

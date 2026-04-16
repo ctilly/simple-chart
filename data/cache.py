@@ -178,28 +178,6 @@ class Cache:
         ).fetchone()
         return row[0] if row and row[0] is not None else None
 
-    def oldest_cached_timestamp(
-        self,
-        symbol: str,
-        timeframe: Timeframe,
-    ) -> int | None:
-        """
-        Return the timestamp (UTC ms) of the oldest cached bar for
-        symbol+timeframe, or None if no bars are cached.
-
-        The controller uses this when the user pans left past the loaded
-        window — if the anchor or pan target predates the oldest cached bar,
-        it triggers a historical fetch.
-        """
-        row = self._conn.execute(
-            """
-            SELECT MIN(timestamp) FROM bars
-            WHERE symbol = ? AND timeframe = ?
-            """,
-            (symbol, timeframe.value),
-        ).fetchone()
-        return row[0] if row and row[0] is not None else None
-
     # ------------------------------------------------------------------
     # Watchlist
     # ------------------------------------------------------------------

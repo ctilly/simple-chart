@@ -17,10 +17,6 @@ Signals emitted:
   bar_right_clicked(x_pos: float)
       Same as bar_clicked but for right-click.
 
-  plot_right_clicked(series_key: str)
-      User right-clicked an existing indicator plot line. The controller
-      opens the config dialog for that indicator.
-
 The chart layer emits signals; it does NOT call the controller directly.
 This keeps the dependency one-way: controller imports chart, chart does
 not import controller.
@@ -66,9 +62,8 @@ class ChartInteractions:
         """
         self._price_ax = price_ax
         self._master   = master
-        self._bar_clicked_cb:        Callable[[float], None] | None = None
-        self._bar_right_clicked_cb:  Callable[[float], None] | None = None
-        self._plot_right_clicked_cb: Callable[[str], None] | None = None
+        self._bar_clicked_cb:       Callable[[float], None] | None = None
+        self._bar_right_clicked_cb: Callable[[float], None] | None = None
         self._connect()
 
     def on_bar_clicked(self, callback: Callable[[float], None]) -> None:
@@ -78,10 +73,6 @@ class ChartInteractions:
     def on_bar_right_clicked(self, callback: Callable[[float], None]) -> None:
         """Register a handler for right-click on a bar. Receives bar index."""
         self._bar_right_clicked_cb = callback
-
-    def on_plot_right_clicked(self, callback: Callable[[str], None]) -> None:
-        """Register a handler for right-click on a plot line. Receives series_key."""
-        self._plot_right_clicked_cb = callback
 
     # ------------------------------------------------------------------
     # Internal

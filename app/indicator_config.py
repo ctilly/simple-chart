@@ -208,9 +208,15 @@ class IndicatorConfigDialog(QDialog):
             text = widget.text()
             # Preserve the original type if possible.
             if isinstance(original, int):
-                return int(text)
+                try:
+                    return int(text)
+                except ValueError:
+                    return original
             if isinstance(original, float):
-                return float(text)
+                try:
+                    return float(text)
+                except ValueError:
+                    return original
             return text
         return original
 
