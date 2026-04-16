@@ -514,12 +514,8 @@ class MainWindow(QMainWindow):
             utc_ts_ms / 1000, tz=timezone.utc
         ).strftime("%Y-%m-%d")
 
-        # Cycle through the palette for the color.
-        from chart.styles import INDICATOR_PALETTE
-        color = INDICATOR_PALETTE[len(self._state.anchors) % len(INDICATOR_PALETTE)]
-        # Prefer the AVWAP default color if it's the first anchor.
-        if not self._state.anchors:
-            color = "#00FF88"
+        from chart.styles import AVWAP_PALETTE
+        color = AVWAP_PALETTE[len(self._state.anchors) % len(AVWAP_PALETTE)]
 
         record = AnchorRecord(
             symbol=self._state.symbol,  # type: ignore[arg-type]

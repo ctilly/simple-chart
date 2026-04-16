@@ -1,34 +1,31 @@
-# Agent Setup Notes
+# SimpleChart — Agent Guidelines
 
-This repository is intended to be installed from source, not packaged into a
-native installer during normal setup.
+## Project
 
-## Default Agent Workflow
+Desktop stock charting application. Swing trading focus; no transaction management.
+Intended to replace TradeStation for charting, specifically Anchored VWAP workflows.
 
-1. Clone the repository.
-2. Read `README.md`.
-3. Read `pyproject.toml`.
-4. Create a Python 3.13 virtual environment.
-5. Install with `python -m pip install -e .`.
-6. Launch with `simplechart`.
-7. On Linux only, if the user wants a menu launcher, run:
-   `python scripts/install_linux_desktop.py`
 
-## Agent Rules
+## Domain vocabulary
 
-- Prefer the documented install flow.
-- Do not introduce PyInstaller, py2app, cx_Freeze, or other packaging tools
-  unless the user explicitly asks for packaging work.
-- Do not hard-code user-specific paths into source files.
-- Keep platform-specific changes minimal and explain them before applying them.
-- If setup fails, fix the smallest concrete issue blocking launch on that host.
+- **AVWAP** — Anchored VWAP: volume-weighted average price anchored to a specific bar (UTC ms timestamp, never a bar index)
+- **MAs are day-based** — a 50-day SMA means 50 trading days, converted to bar count per timeframe. The price value stays consistent across all timeframes.
+- **`_fast/` subpackage** — pure numeric kernels eligible for mypyc compilation. Can appear in any layer, not just indicators.
+- **session** — a trading day, not a user login session
 
-## Important Files
+## Engineering philosophy
 
-- `README.md`: human-facing install and troubleshooting instructions
-- `pyproject.toml`: dependencies and the `simplechart` CLI entry point
-- `scripts/install_linux_desktop.py`: optional Linux desktop integration that
-  writes the installed launcher with the active environment's `simplechart`
-  path
-- `io.simplechart.SimpleChart.desktop`: generic desktop entry used by the Linux
-  install helper
+- Build only what is actually needed right now. No speculative abstractions or "just in case" helpers, but build with the highest degree of professional quality.
+- Question every dependency before adding it. Reach for the standard library first.
+- Prefer simple, readable code over clever or defensive code.
+- Do not add error handling for scenarios that cannot happen. Validate at system boundaries only.
+- No docstrings, type hints, or comments on existing code that was not part of the current task; don’t add annotation churn outside the touched area.
+- All new and modified functions must be fully typed (parameters, return values). Full typing is required for mypyc compatibility.
+
+## Collaboration style
+
+- After completing each logical unit of work (typically one module or one layer), stop and explain what was written and why before proceeding.
+- Wait for review and explicit approval before moving to the next piece.
+- Read files before proposing changes to them.
+- Do not make unrequested changes — bug fix means fix the bug, not clean up the surrounding code.
+

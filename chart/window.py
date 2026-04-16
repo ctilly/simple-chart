@@ -123,6 +123,10 @@ class ChartWidget(QWidget):
         # Grid lines — very low alpha for a barely-visible reference grid.
         price_ax.showGrid(x=True, y=True, alpha=0.06)
 
+        price_ax.crosshair.infos.append(
+            lambda x, y, xtext, ytext: (xtext, "%.2f" % y)
+        )
+
         install_viewport_behavior(price_ax, volume_ax)
 
         self._price_panel  = Panel(price_ax,  PanelType.PRICE,  ratio=4)

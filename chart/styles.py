@@ -49,12 +49,23 @@ VOLUME_DOWN      = "#ff3d3d66"   # CANDLE_DOWN at ~40% opacity
 INDICATOR_PALETTE: list[str] = [
     "#00BFFF",   # deep sky blue   — SMA default
     "#FF8C00",   # dark orange     — EMA default
-    "#00FF88",   # mint green      — AVWAP default
+    "#00FF88",   # mint green
     "#FF69B4",   # hot pink
     "#FFD700",   # gold
     "#DA70D6",   # orchid
     "#7FFFD4",   # aquamarine
     "#FF6347",   # tomato
+]
+
+AVWAP_PALETTE: list[str] = [
+    "#9141ac",   # purple          — first AVWAP
+    "#e01b24",   # red             — second AVWAP
+    "#2190a4",   # teal
+    "#2190a4",   # teal
+    "#2190a4",   # teal
+    "#2190a4",   # teal
+    "#2190a4",   # teal
+    "#2190a4",   # teal
 ]
 
 
