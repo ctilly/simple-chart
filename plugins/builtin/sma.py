@@ -16,15 +16,19 @@ Day-based vs period-based:
     whether you are viewing a daily chart or a 5m chart.
 """
 
+import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
 from data.calendar import bars_for_n_days
-from data.models import OHLCVSeries
+from data.models import Bar, OHLCVSeries
 from indicators._fast.ma import sma as _sma_kernel
 from indicators.base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
 from indicators.registry import register
+
+_ET = ZoneInfo("America/New_York")
 
 
 class SMAIndicator(Indicator):
@@ -48,25 +52,45 @@ class SMAIndicator(Indicator):
         series: OHLCVSeries,
         params: dict[str, Any],
     ) -> dict[str, np.ndarray]:
-        """
-        Compute a day-based SMA over the loaded bar series.
-
-        Steps:
-          1. Convert the day count to a bar count for the active timeframe
-          2. Extract closes as a numpy array
-          3. Delegate to the compiled SMA kernel
-          4. Return under a key that encodes the day count
-
-        The series key "sma_{days}" is stable — it does not change when
-        the timeframe changes, only when the user edits the "days" param.
-        The chart layer uses this key to update the existing plot line
-        rather than creating a new one on timeframe switches.
-        """
         days: int = int(params["days"])
         period: int = bars_for_n_days(days, series.timeframe)
-        closes: np.ndarray = np.array([bar.close for bar in series.bars], dtype=float)
+        closes: np.ndarray = np.array([b.close for b in series.bars], dtype=float)
         values: np.ndarray = _sma_kernel(closes, period)
+
+        # Fill the leading NaN zone (where intraday history is too short for
+        # the full warmup) with the daily SMA value for each trading day.
+        # Intraday bars that already have a valid value are not touched.
+        daily_bars: list[Bar] = params.get("_daily_bars") or []
+        if series.timeframe.is_intraday and daily_bars:
+            _fill_warmup_from_daily(series.bars, values, days, daily_bars)
+
         return {f"sma_{days}": values}
 
 
 register(SMAIndicator)
+
+
+def _fill_warmup_from_daily(
+    intraday_bars: list[Bar],
+    values: np.ndarray,
+    days: int,
+    daily_bars: list[Bar],
+) -> None:
+    """
+    Fill NaN slots in `values` (the leading warmup zone) with the daily SMA
+    for the corresponding trading day. Only touches bars where values[i] is
+    NaN — bars with valid intraday SMA values are left unchanged.
+    """
+    daily_closes: np.ndarray = np.array([b.close for b in daily_bars], dtype=float)
+    daily_sma: np.ndarray = _sma_kernel(daily_closes, days)
+
+    by_date: dict[datetime.date, float] = {}
+    for bar, val in zip(daily_bars, daily_sma):
+        if not np.isnan(val):
+            by_date[bar.timestamp.astimezone(_ET).date()] = float(val)
+
+    for i, bar in enumerate(intraday_bars):
+        if np.isnan(values[i]):
+            d = bar.timestamp.astimezone(_ET).date()
+            if d in by_date:
+                values[i] = by_date[d]

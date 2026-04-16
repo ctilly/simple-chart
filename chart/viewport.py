@@ -155,6 +155,7 @@ def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:
     apply_interaction_modes(price_ax, volume_ax)
     volume_vb.master_viewbox = price_vb
     _patch_price_axis_format(price_ax)
+    _patch_volume_axis_format(volume_ax)
 
     _patch_update_y_zoom(price_vb)
     _patch_update_y_zoom(volume_vb)
@@ -552,6 +553,70 @@ def _patch_price_axis_format(price_ax: object) -> None:
     right_axis.fmt_values = _fmt_values
     right_axis._min_decimals = 0
     right_axis._simplechart_fmt_patch = True
+
+
+def fmt_volume(v: float) -> str:
+    """Format a raw volume value as a human-readable string with M/K suffix."""
+    abs_v = abs(v)
+    if abs_v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}M"
+    if abs_v >= 1_000:
+        return f"{v / 1_000:.1f}K"
+    return f"{int(v)}"
+
+
+def _patch_volume_axis_format(volume_ax: object) -> None:
+    axes = getattr(volume_ax, "axes", {})
+    right_axis = axes.get("right", {}).get("item")
+    if right_axis is None or getattr(right_axis, "_simplechart_vol_fmt_patch", False):
+        return
+
+    # Replace tick level generation with a single level of evenly-spaced ticks
+    # so every tick is the same size and labeled. pyqtgraph's default returns
+    # major + minor + sub-minor levels which produces unlabeled clutter ticks.
+    original_tickValues = right_axis.tickValues
+
+    def _vol_tick_values(minVal: float, maxVal: float, size: float) -> list:
+        if maxVal <= minVal:
+            return [(1, [])]
+        span = maxVal - minVal
+        raw_step = span / 6.0
+        exp = 10.0 ** math.floor(math.log10(max(raw_step, 1.0)))
+        mantissa = raw_step / exp
+        if mantissa <= 1.0:
+            step = exp
+        elif mantissa <= 2.0:
+            step = 2.0 * exp
+        elif mantissa <= 5.0:
+            step = 5.0 * exp
+        else:
+            step = 10.0 * exp
+        step = max(step, 1.0)
+        start = math.ceil(minVal / step) * step
+        ticks: list[float] = []
+        v = start
+        while v <= maxVal + step * 0.001:
+            ticks.append(float(v))
+            v += step
+        return [(step, ticks)]
+
+    right_axis.tickValues = _vol_tick_values
+
+    # Format tick labels as M/K strings. finplot's YAxisItem.tickStrings ignores
+    # the `scale` parameter (it uses xform instead), so we do the same — pass
+    # the raw volume value directly to fmt_volume rather than multiplying by
+    # scale, which pyqtgraph may set to a SI prefix factor like 1e-6.
+    right_axis.tickStrings = lambda values, scale, spacing: [
+        fmt_volume(v) for v in values
+    ]
+    right_axis._simplechart_vol_fmt_patch = True
+
+    # Format the crosshair reticle label on the volume panel.
+    crosshair = getattr(volume_ax, "crosshair", None)
+    if crosshair is not None:
+        crosshair.infos.append(
+            lambda x, y, xtext, ytext: (xtext, fmt_volume(y))
+        )
 
 
 def _axis_min_decimals(viewbox: _ViewBoxLike) -> int:

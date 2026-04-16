@@ -34,7 +34,7 @@ Default indicator set:
 """
 
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import finplot as fplt
@@ -57,7 +57,7 @@ from app.watchlist import WatchlistWidget
 from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import AnchorRecord, OHLCVSeries, Timeframe
+from data.models import AnchorRecord, Bar, OHLCVSeries, Timeframe
 from data.provider import get_provider
 from indicators.base import ChoiceParam, LINE_STYLE_OPTIONS
 from indicators.registry import get as get_indicator, all_indicators
@@ -419,7 +419,24 @@ class MainWindow(QMainWindow):
         if avwap_state is not None:
             avwap_state.params["anchors"] = self._state.anchors
 
+        # For intraday timeframes, load cached daily bars and inject them into
+        # each indicator's params so day-based MAs can compute from daily closes
+        # rather than from the limited intraday history yfinance provides.
+        # Daily bars are always cached from the initial daily-chart load (the
+        # default timeframe). Indicators that don't use this key ignore it.
+        daily_bars: list[Bar] = []
+        if series.timeframe.is_intraday:
+            now = datetime.now(tz=timezone.utc)
+            start_ms = int(
+                (now - timedelta(days=_DEFAULT_LOOKBACK_DAYS)).timestamp() * 1000
+            )
+            end_ms = int(now.timestamp() * 1000)
+            daily_bars = self._cache.get_bars(
+                series.symbol, Timeframe.DAILY, start_ms, end_ms
+            )
+
         for ind_state in self._state.indicators:
+            ind_state.params["_daily_bars"] = daily_bars
             self._compute_and_draw(ind_state, series)
 
         fplt.refresh()
@@ -585,7 +602,20 @@ class MainWindow(QMainWindow):
         avwap_state = self._state.get_indicator("avwap")
         if avwap_state is not None:
             avwap_state.params["anchors"] = self._state.anchors
+
+        daily_bars_reload: list[Bar] = []
+        if series.timeframe.is_intraday:
+            now_r = datetime.now(tz=timezone.utc)
+            start_ms_r = int(
+                (now_r - timedelta(days=_DEFAULT_LOOKBACK_DAYS)).timestamp() * 1000
+            )
+            daily_bars_reload = self._cache.get_bars(
+                series.symbol, Timeframe.DAILY, start_ms_r,
+                int(now_r.timestamp() * 1000),
+            )
+
         for ind_state in self._state.indicators:
+            ind_state.params["_daily_bars"] = daily_bars_reload
             self._compute_and_draw(ind_state, series)
         fplt.refresh()
 

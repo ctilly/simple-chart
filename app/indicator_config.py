@@ -115,10 +115,11 @@ class IndicatorConfigDialog(QDialog):
         layout = QVBoxLayout(self)
         form   = QFormLayout()
 
-        # Skip non-editable internal params (e.g. "anchors" in AVWAP).
-        _SKIP_KEYS = {"anchors"}
+        # Skip non-editable internal params. "anchors" is AVWAP's anchor list;
+        # keys starting with "_" are controller-injected runtime data (e.g.
+        # "_daily_bars") that are not user-configurable.
         for key, value in params.items():
-            if key in _SKIP_KEYS:
+            if key == "anchors" or key.startswith("_"):
                 continue
             widget = self._build_field(key, value)
             self._widgets[key] = widget
