@@ -160,11 +160,33 @@ the existing one.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
 from data.models import OHLCVSeries
+
+
+LINE_STYLE_OPTIONS: list[str] = ["solid", "dash", "dot", "dash_dot"]
+
+
+@dataclass
+class ChoiceParam:
+    """
+    A parameter that must be one of a fixed set of string options.
+
+    Indicators put this in their default_params() for any field that maps to
+    a dropdown in the config dialog. The value and choices travel together so
+    the dialog can reconstruct the combo box without knowing anything about
+    the specific indicator.
+
+    Example:
+        "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)
+    """
+
+    value: str
+    options: list[str]
 
 
 class Indicator(ABC):

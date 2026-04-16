@@ -59,6 +59,7 @@ from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import AnchorRecord, OHLCVSeries, Timeframe
 from data.provider import get_provider
+from indicators.base import ChoiceParam, LINE_STYLE_OPTIONS
 from indicators.registry import get as get_indicator, all_indicators
 import plugins  # noqa: F401 — triggers registration of all indicators
 
@@ -69,9 +70,9 @@ import plugins  # noqa: F401 — triggers registration of all indicators
 # Each entry is (indicator_name, params). Adjust to taste.
 
 DEFAULT_INDICATORS: list[tuple[str, dict[str, Any]]] = [
-    ("sma", {"days":  5, "color": "#FFA500"}),  # amber
-    ("sma", {"days": 20, "color": "#00CED1"}),  # teal
-    ("sma", {"days": 50, "color": "#1E90FF"}),  # blue
+    ("sma", {"days":  5, "color": "#FFA500", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # amber
+    ("sma", {"days": 20, "color": "#00CED1", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # teal
+    ("sma", {"days": 50, "color": "#1E90FF", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # blue
 ]
 
 # How many calendar days of bars to load by default.
@@ -444,23 +445,31 @@ class MainWindow(QMainWindow):
         }
 
         default_color: str = ind_state.params.get("color", "#ffffff")
+        default_width: float = float(ind_state.params.get("line_width", 1.0))
+        style_param = ind_state.params.get("line_style", ChoiceParam("solid", LINE_STYLE_OPTIONS))
+        default_style: str = style_param.value if isinstance(style_param, ChoiceParam) else str(style_param)
         pm = self._chart.plot_manager
 
         for series_key, values in result.items():
             # AVWAP series keys encode the anchor timestamp; each anchor has
-            # its own color stored in the AnchorRecord, not in the indicator's
-            # params dict.  Fall back to a default green if not found.
+            # its own color/width/style stored in the AnchorRecord, not in the
+            # indicator's params dict.
             if series_key.startswith("avwap_"):
                 ts_ms = int(series_key[6:])
-                color = next(
-                    (a.color for a in self._state.anchors if a.anchor_ts == ts_ms),
-                    "#00FF88",
+                anchor = next(
+                    (a for a in self._state.anchors if a.anchor_ts == ts_ms),
+                    None,
                 )
+                color = anchor.color      if anchor else "#00FF88"
+                width = anchor.line_width if anchor else 1.0
+                style = anchor.line_style if anchor else "solid"
             else:
                 color = default_color
+                width = default_width
+                style = default_style
 
             visible = ind_state.series_visibility.get(series_key, ind_state.visible)
-            pm.update_indicator(series_key, values, color)
+            pm.update_indicator(series_key, values, color, width, style)
             pm.set_visible(series_key, visible)
 
             display = _series_key_to_label(series_key, ind_state)
@@ -639,16 +648,22 @@ class MainWindow(QMainWindow):
 
         dialog = IndicatorConfigDialog(
             indicator_label=f"AVWAP {anchor.label}",
-            params={"color": anchor.color},
+            params={
+                "color":      anchor.color,
+                "line_width": anchor.line_width,
+                "line_style": ChoiceParam(anchor.line_style, LINE_STYLE_OPTIONS),
+            },
             parent=self,
         )
         if dialog.exec() == IndicatorConfigDialog.DialogCode.Accepted:
-            new_color = dialog.result_params()["color"]
+            result = dialog.result_params()
             updated = AnchorRecord(
                 symbol=anchor.symbol,
                 anchor_ts=anchor.anchor_ts,
                 label=anchor.label,
-                color=new_color,
+                color=result["color"],
+                line_width=result["line_width"],
+                line_style=result["line_style"].value,
                 anchor_id=anchor.anchor_id,
             )
             self._cache.update_anchor(updated)

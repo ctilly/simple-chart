@@ -23,7 +23,7 @@ import numpy as np
 from data.calendar import bars_for_n_days
 from data.models import OHLCVSeries
 from indicators._fast.ma import sma as _sma_kernel
-from indicators.base import Indicator
+from indicators.base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
 from indicators.registry import register
 
 
@@ -39,6 +39,8 @@ class SMAIndicator(Indicator):
         return {
             "days": 50,
             "color": "#00BFFF",
+            "line_width": 1.0,
+            "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
         }
 
     def compute(

@@ -9,11 +9,12 @@ the indicator's current params dict and returns the updated params on
 accept.
 
 Supported param types:
-  int   → QSpinBox
-  float → QDoubleSpinBox
-  str starting with "#" → color picker button (shows hex value, opens
-                          QColorDialog on click)
-  str (other)           → QLineEdit
+  int         → QSpinBox
+  float       → QDoubleSpinBox
+  str "#..."  → color picker button (shows hex value, opens QColorDialog on click)
+  str (other) → QLineEdit
+  ChoiceParam → QComboBox populated from .options; returns ChoiceParam with
+                updated .value
 
 Adding support for a new param type means adding a branch in
 _build_field(). The indicator's default_params() dict is the contract —
@@ -26,6 +27,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -38,6 +40,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from indicators.base import ChoiceParam
 
 
 class ColorButton(QPushButton):
@@ -170,6 +174,14 @@ class IndicatorConfigDialog(QDialog):
             w.setValue(value)
             return w
 
+        if isinstance(value, ChoiceParam):
+            w = QComboBox()
+            for opt in value.options:
+                w.addItem(opt)
+            idx = value.options.index(value.value) if value.value in value.options else 0
+            w.setCurrentIndex(idx)
+            return w
+
         if isinstance(value, str) and value.startswith("#"):
             return ColorButton(value)
 
@@ -188,6 +200,9 @@ class IndicatorConfigDialog(QDialog):
             return widget.value()
         if isinstance(widget, ColorButton):
             return widget.color()
+        if isinstance(widget, QComboBox):
+            assert isinstance(original, ChoiceParam)
+            return ChoiceParam(widget.currentText(), original.options)
         if isinstance(widget, QLineEdit):
             text = widget.text()
             # Preserve the original type if possible.

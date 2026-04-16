@@ -156,4 +156,6 @@ class AnchorRecord:
     anchor_ts: int            # UTC milliseconds
     label: str
     color: str                # hex, e.g. "#00FF88"
+    line_width: float = 1.0
+    line_style: str = "solid"
     anchor_id: int | None = None   # None until persisted

@@ -58,6 +58,19 @@ class Cache:
         """Run schema.sql to create tables if they don't exist yet."""
         ddl = _SCHEMA_PATH.read_text()
         self._conn.executescript(ddl)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns introduced after the initial schema release."""
+        for stmt in (
+            "ALTER TABLE avwap_anchors ADD COLUMN line_width REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE avwap_anchors ADD COLUMN line_style TEXT NOT NULL DEFAULT 'solid'",
+        ):
+            try:
+                self._conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()
@@ -227,7 +240,7 @@ class Cache:
         """
         cursor = self._conn.execute(
             """
-            SELECT anchor_id, symbol, anchor_ts, label, color
+            SELECT anchor_id, symbol, anchor_ts, label, color, line_width, line_style
             FROM avwap_anchors
             WHERE symbol = ?
             ORDER BY anchor_ts ASC
@@ -247,16 +260,19 @@ class Cache:
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO avwap_anchors (symbol, anchor_ts, label, color)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO avwap_anchors (symbol, anchor_ts, label, color, line_width, line_style)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (anchor.symbol, anchor.anchor_ts, anchor.label, anchor.color),
+                (anchor.symbol, anchor.anchor_ts, anchor.label, anchor.color,
+                 anchor.line_width, anchor.line_style),
             )
         return AnchorRecord(
             symbol=anchor.symbol,
             anchor_ts=anchor.anchor_ts,
             label=anchor.label,
             color=anchor.color,
+            line_width=anchor.line_width,
+            line_style=anchor.line_style,
             anchor_id=cursor.lastrowid,
         )
 
@@ -282,10 +298,11 @@ class Cache:
             self._conn.execute(
                 """
                 UPDATE avwap_anchors
-                SET label = ?, color = ?
+                SET label = ?, color = ?, line_width = ?, line_style = ?
                 WHERE anchor_id = ?
                 """,
-                (anchor.label, anchor.color, anchor.anchor_id),
+                (anchor.label, anchor.color, anchor.line_width, anchor.line_style,
+                 anchor.anchor_id),
             )
 
 
@@ -322,4 +339,6 @@ def _row_to_anchor(row: sqlite3.Row) -> AnchorRecord:
         anchor_ts=row["anchor_ts"],
         label=row["label"],
         color=row["color"],
+        line_width=row["line_width"],
+        line_style=row["line_style"],
     )

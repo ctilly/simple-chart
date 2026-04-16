@@ -28,6 +28,7 @@ Note on pandas:
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 
 from chart.panel import Panel
 from chart.styles import (
@@ -40,6 +41,13 @@ from chart.styles import (
 )
 from chart.viewport import apply_interaction_modes, unlock_x_pan
 from data.models import OHLCVSeries
+
+_LINE_STYLES: dict[str, Qt.PenStyle] = {
+    "solid":    Qt.PenStyle.SolidLine,
+    "dash":     Qt.PenStyle.DashLine,
+    "dot":      Qt.PenStyle.DotLine,
+    "dash_dot": Qt.PenStyle.DashDotLine,
+}
 
 
 class PlotManager:
@@ -146,6 +154,8 @@ class PlotManager:
         series_key: str,
         values: np.ndarray,
         color: str,
+        width: float = LINE_WIDTH_INDICATOR,
+        style: str = "solid",
     ) -> None:
         """
         Draw or update a single indicator plot line on the price panel.
@@ -161,6 +171,8 @@ class PlotManager:
         values are not drawn — finplot skips them automatically.
         """
         import finplot as fplt
+
+        pen_style = _LINE_STYLES.get(style, Qt.PenStyle.SolidLine)
 
         # Wrap the numpy array in a pandas Series with the same DatetimeIndex
         # as the candles. Without this, finplot uses integer array positions
@@ -178,7 +190,7 @@ class PlotManager:
             # styleUpdate=True, which reads opts['pen']. Setting the pen first
             # ensures the new color is in opts['pen'] when that re-render runs.
             handle.setPen(  # type: ignore[attr-defined]
-                pg.mkPen(color=color, width=LINE_WIDTH_INDICATOR)
+                pg.mkPen(color=color, width=width, style=pen_style)
             )
             handle.opts["handed_color"] = color  # type: ignore[attr-defined]
             handle.update_data(data)  # type: ignore[attr-defined]
@@ -187,7 +199,10 @@ class PlotManager:
                 data,
                 ax=self._price_panel.ax,
                 color=color,
-                width=LINE_WIDTH_INDICATOR,
+                width=width,
+            )
+            handle.setPen(  # type: ignore[attr-defined]
+                pg.mkPen(color=color, width=width, style=pen_style)
             )
             self._plots[series_key] = handle
 
