@@ -42,5 +42,5 @@ architecture_review.md
 
 
 # Claude Code project settings (local only)
-.claude/
+.claude/settings.local.json
 CLAUDE.md

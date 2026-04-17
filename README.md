@@ -141,6 +141,50 @@ Common causes:
 Try launching from the same terminal where the install was performed so any
 Python traceback remains visible.
 
+## Building Custom Indicators
+
+SimpleChart is designed so you can build your own indicators using an AI agent.
+A skill file walks your agent through the full process — reading the right
+reference code, deciding whether a compiled kernel is needed, implementing each
+piece in order, and verifying the result.
+
+The skill file is located at:
+
+| Agent  | Skill location                    |
+|--------|-----------------------------------|
+| Claude | `.claude/skills/new-indicator.md` |
+| Codex  | `.codex/skills/new-indicator.md`  |
+| Gemini | `.gemini/skills/new-indicator.md` |
+| Grok   | `.grok/skills/new-indicator.md`   |
+
+To use it, tell your agent: *"Use the new-indicator skill."*  
+The agent will read the skill file, ask you a few questions about what the
+indicator should do, and guide you through building it step by step.
+
+### A note on intraday SMA and EMA warmup
+
+A 200-day SMA needs 200 trading days of bar data to produce its first valid
+value. On intraday timeframes (5m, 15m, etc.) that means thousands of bars.
+Free data sources such as yfinance only provide roughly 60 days of intraday
+history, which means the 200-day SMA would show `NaN` (blank) for the entire
+chart on intraday views.
+
+To work around this, SMA and EMA use a warmup fill: the controller passes the
+full daily bar history as `_daily_bars` in the indicator params. For any intraday
+bar that falls in the NaN warmup zone, the indicator substitutes the daily SMA/EMA
+value for that trading day. The result is a continuous line on intraday charts
+even when the intraday history is too short to compute the full warmup from scratch.
+
+With a subscription data source that provides extended intraday history (e.g.
+Alpaca with several years of minute data), the warmup zone shrinks or disappears
+entirely — the intraday bars alone are sufficient to compute the full period.
+In that case `_fill_warmup_from_daily` still runs but finds nothing to fill
+because there are no NaN values left in the warmup range.
+
+New indicators that use day-based periods and are expected to behave correctly
+on intraday charts should follow the same pattern. See `plugins/builtin/sma.py`
+for the implementation.
+
 ## Notes for LLM-Assisted Setup
 
 An agent installing this repository should:

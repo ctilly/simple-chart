@@ -29,3 +29,21 @@ Intended to replace TradeStation for charting, specifically Anchored VWAP workfl
 - Read files before proposing changes to them.
 - Do not make unrequested changes — bug fix means fix the bug, not clean up the surrounding code.
 
+## Building new indicators
+
+A skill file is provided to guide you through building a new indicator correctly.
+It covers the full process: reading the right reference files, deciding whether a
+compiled kernel is needed, implementing each piece in the right order, and verifying
+the result.
+
+Find the skill for your agent:
+
+| Agent  | Skill location                   |
+|--------|----------------------------------|
+| Claude | `.claude/skills/new-indicator.md` |
+| Codex  | `.codex/skills/new-indicator.md`  |
+| Gemini | `.gemini/skills/new-indicator.md` |
+| Grok   | `.grok/skills/new-indicator.md`   |
+
+Read the skill file before starting any indicator work.
+
