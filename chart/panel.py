@@ -3,12 +3,14 @@ chart/panel.py
 
 A Panel wraps one finplot axis — one horizontal region of the chart.
 
-A typical SimpleChart layout has two panels:
-  - Price panel  (candlesticks + overlaid indicators like MA and AVWAP)
+A typical SimpleChart layout has two always-visible panels:
+  - Price panel  (candlesticks + chart indicators like MA and AVWAP)
   - Volume panel (volume bars below the price panel)
 
-Additional panels could be added below volume for standalone indicators
-(e.g. RVOL, RSI) but that is a future concern.
+Up to three indicator panels sit below volume. They are pre-allocated at
+startup with zero height and revealed when a panel indicator is added.
+See chart/window.py for slot management and chart/viewport.py for the
+viewport behavior that is installed on first use.
 
 finplot creates panels by specifying the number of rows when the plot
 window is initialized. Each row is an axis that shares the same x-axis
@@ -18,12 +20,14 @@ chart layer works with Panel objects rather than raw finplot axes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
 
 
 class PanelType(Enum):
-    PRICE  = auto()
-    VOLUME = auto()
+    PRICE     = auto()
+    VOLUME    = auto()
+    INDICATOR = auto()
 
 
 class Panel:
@@ -41,8 +45,8 @@ class Panel:
 
     def __init__(
         self,
-        ax: object,          # finplot axis — typed as object to avoid
-        panel_type: PanelType,  # importing finplot at module level
+        ax: object,
+        panel_type: PanelType,
         ratio: int = 1,
     ) -> None:
         self.ax = ax
@@ -56,3 +60,25 @@ class Panel:
     @property
     def is_volume(self) -> bool:
         return self.panel_type == PanelType.VOLUME
+
+    @property
+    def is_indicator(self) -> bool:
+        return self.panel_type == PanelType.INDICATOR
+
+
+@dataclass
+class IndicatorPanelSlot:
+    """
+    One of three pre-allocated indicator panel slots below the volume panel.
+
+    name is the render_target() string of the indicator currently
+    occupying this slot, or None if the slot is unoccupied.
+
+    behavior_installed tracks whether viewport behavior (y-autoscale patch,
+    drag forwarding to the price viewbox) has been installed on this slot's
+    viewbox. Done once on first assignment; survives axis resets.
+    """
+
+    panel: Panel
+    name: str | None = None
+    behavior_installed: bool = False

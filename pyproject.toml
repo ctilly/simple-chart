@@ -30,7 +30,7 @@ simplechart = "main:main"
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "chart*", "data*", "indicators*", "plugins*"]
+include = ["app*", "chart*", "data*", "indicators*", "simplechart*"]
 
 # ------------------------------------------------------------------
 # mypyc compilation targets
@@ -50,8 +50,8 @@ include = ["app*", "chart*", "data*", "indicators*", "plugins*"]
 
 [tool.simplechart.compile]
 targets = [
-    "indicators._fast.ma",
-    "indicators._fast.avwap",
+    "indicators.ema._kernel",
+    "indicators.avwap._kernel",
 ]
 
 # ------------------------------------------------------------------

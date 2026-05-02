@@ -143,8 +143,26 @@ Python traceback remains visible.
 
 ## Building Custom Indicators
 
-SimpleChart is designed so you can build your own indicators using an AI agent.
-A skill file walks your agent through the full process — reading the right
+SimpleChart has a stable public API for indicator authors. Every import your
+indicator needs comes from one place:
+
+```python
+from simplechart.api import Indicator, register, OHLCVSeries, bars_for_n_days
+# ... and any other names you need
+```
+
+Indicators come in two kinds:
+
+- **Chart indicators** — plot on the price chart, sharing the price y-axis
+  (SMA, EMA, AVWAP). These are the default.
+- **Panel indicators** — draw in a dedicated panel below the chart with their
+  own y-axis (RSI, MACD). Override `render_target()` to return a short
+  lowercase string naming the panel (e.g. `"rsi"`).
+
+Drop a `.py` file (or a directory with `__init__.py`) into `indicators/` and
+it loads automatically on next launch — no manual wiring required.
+
+A skill file walks an AI agent through the full process — reading the right
 reference code, deciding whether a compiled kernel is needed, implementing each
 piece in order, and verifying the result.
 
@@ -182,7 +200,7 @@ In that case `_fill_warmup_from_daily` still runs but finds nothing to fill
 because there are no NaN values left in the warmup range.
 
 New indicators that use day-based periods and are expected to behave correctly
-on intraday charts should follow the same pattern. See `plugins/builtin/sma.py`
+on intraday charts should follow the same pattern. See `indicators/sma.py`
 for the implementation.
 
 ## Notes for LLM-Assisted Setup

@@ -1,28 +1,28 @@
 """
-indicators/registry.py
+indicators/_registry.py
 
 Indicator registry — maps indicator names to Indicator classes.
 
-Built-in indicators are registered when their modules are imported at
-app startup. Plugin authors register their indicators the same way.
+Indicators are registered when their modules are imported at app startup
+by the loader. Plugin authors register their indicators the same way.
 
 Usage:
 
   Registering an indicator (in the indicator's own module):
-      from indicators.registry import register
+      from indicators._registry import register
       register(MyIndicator)
 
   Looking up an indicator by name:
-      from indicators.registry import get
+      from indicators._registry import get
       indicator = get("sma")   # returns an instance of SMAIndicator
 
   Listing all registered indicators:
-      from indicators.registry import all_indicators
+      from indicators._registry import all_indicators
       for name, cls in all_indicators().items():
           print(name, cls.label())
 """
 
-from indicators.base import Indicator
+from indicators._base import Indicator
 
 
 # Internal registry: name -> class (not instance).

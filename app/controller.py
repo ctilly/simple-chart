@@ -59,9 +59,12 @@ from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import AnchorRecord, Bar, OHLCVSeries, Timeframe
 from data.provider import get_provider
-from indicators.base import ChoiceParam, LINE_STYLE_OPTIONS
-from indicators.registry import get as get_indicator, all_indicators
-import plugins  # noqa: F401 — triggers registration of all indicators
+from indicators._base import ChoiceParam, LINE_STYLE_OPTIONS, RENDER_CHART
+from indicators._registry import get as get_indicator, all_indicators
+from indicators._loader import load_indicators as _load_indicators
+from pathlib import Path
+
+_load_indicators(Path(__file__).parent.parent / "indicators")
 
 
 # ------------------------------------------------------------------
@@ -290,6 +293,13 @@ class MainWindow(QMainWindow):
         self._loaded_symbol: str | None = None
         self._per_symbol_state: dict[str, list[IndicatorState]] = {}
 
+        # Load the initial symbol on startup: first watchlist entry, or SPY.
+        watchlist = self._cache.get_watchlist()
+        initial_symbol = watchlist[0] if watchlist else "SPY"
+        self._state.symbol = initial_symbol
+        self._symbol_bar.set_symbol(initial_symbol)
+        self._load()
+
     # ------------------------------------------------------------------
     # Symbol and timeframe loading
     # ------------------------------------------------------------------
@@ -316,7 +326,7 @@ class MainWindow(QMainWindow):
             self._fetch_thread.quit()
             self._fetch_thread.wait()
 
-        self._chart.plot_manager.clear_all()
+        self._chart.clear_all()
         self._chart.legend.clear_all()
 
         worker = _FetchWorker(
@@ -452,6 +462,16 @@ class MainWindow(QMainWindow):
         """
         indicator = get_indicator(ind_state.name)
         result    = indicator.compute(series, ind_state.params)
+        render_target = indicator.render_target()
+
+        # For panel indicators, claim a slot before drawing. If all three
+        # slots are occupied, warn the user and skip this indicator.
+        if render_target != RENDER_CHART:
+            try:
+                self._chart.ensure_indicator_panel(render_target)
+            except RuntimeError as exc:
+                QMessageBox.warning(self, "Panel Limit Reached", str(exc))
+                return
 
         # Track which series keys this indicator owns.
         ind_state.series_keys = list(result.keys())
@@ -468,6 +488,14 @@ class MainWindow(QMainWindow):
         pm = self._chart.plot_manager
 
         for series_key, values in result.items():
+            # Reference lines (e.g. RSI overbought/oversold) are drawn as
+            # thin dashed gray lines and excluded from the legend.
+            if "_ref_" in series_key:
+                visible = ind_state.series_visibility.get(series_key, ind_state.visible)
+                pm.update_indicator(series_key, values, "#AAAAAA", 0.8, "dash", render_target)
+                pm.set_visible(series_key, visible)
+                continue
+
             # AVWAP series keys encode the anchor timestamp; each anchor has
             # its own color/width/style stored in the AnchorRecord, not in the
             # indicator's params dict.
@@ -486,7 +514,7 @@ class MainWindow(QMainWindow):
                 style = default_style
 
             visible = ind_state.series_visibility.get(series_key, ind_state.visible)
-            pm.update_indicator(series_key, values, color, width, style)
+            pm.update_indicator(series_key, values, color, width, style, render_target)
             pm.set_visible(series_key, visible)
 
             display = _series_key_to_label(series_key, ind_state)
@@ -739,12 +767,23 @@ class MainWindow(QMainWindow):
             ind_state = self._state.get_indicator_by_series_key(series_key)
             if ind_state is None:
                 return
+            indicator = get_indicator(ind_state.name)
+            render_target = indicator.render_target()
             for key in ind_state.series_keys:
                 self._chart.plot_manager.remove_indicator(key)
                 self._chart.legend.remove_indicator(key)
             self._state.indicators = [
                 s for s in self._state.indicators if s is not ind_state
             ]
+            # Release the panel slot when no remaining active indicator
+            # shares this render_target.
+            if render_target != RENDER_CHART:
+                still_using = any(
+                    get_indicator(s.name).render_target() == render_target
+                    for s in self._state.indicators
+                )
+                if not still_using:
+                    self._chart.release_indicator_panel(render_target)
 
         fplt.refresh()
 

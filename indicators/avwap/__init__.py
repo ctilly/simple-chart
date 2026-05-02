@@ -1,5 +1,5 @@
 """
-plugins/builtin/avwap.py
+indicators/avwap/__init__.py
 
 Anchored VWAP indicator.
 
@@ -34,7 +34,7 @@ one plot series, keyed by "avwap_{anchor_ts}". Adding a new anchor appends
 to the list and triggers a recompute; removing one removes it from the list.
 
 The avwap_multi() kernel processes all anchors in a single pass over the
-bar arrays, which is more efficient than calling avwap() once per anchor.
+bar arrays, which is more efficient than computing each anchor separately.
 """
 
 from typing import Any
@@ -43,9 +43,9 @@ import numpy as np
 
 from data.calendar import timestamp_ms_to_bar_index
 from data.models import AnchorRecord, OHLCVSeries
-from indicators._fast.avwap import avwap_multi as _avwap_multi_kernel
-from indicators.base import Indicator
-from indicators.registry import register
+from indicators._base import Indicator
+from indicators._registry import register
+from indicators.avwap._kernel import avwap_multi as _avwap_multi_kernel
 
 
 class AVWAPIndicator(Indicator):

@@ -1,11 +1,11 @@
 """
-plugins/builtin/ema.py
+indicators/ema/__init__.py
 
 Exponential Moving Average indicator.
 
 Follows the same day-based convention as SMAIndicator — the "days" param
-is trading days, not bars. See plugins/builtin/sma.py for a full
-explanation of why this matters.
+is trading days, not bars. See indicators/sma.py for a full explanation
+of why this matters.
 
 EMA gives more weight to recent bars than SMA does. The smoothing factor
 k = 2 / (period + 1) means the most recent bar has the highest influence
@@ -20,9 +20,9 @@ import numpy as np
 
 from data.calendar import bars_for_n_days
 from data.models import Bar, OHLCVSeries
-from indicators._fast.ma import ema as _ema_kernel
-from indicators.base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
-from indicators.registry import register
+from indicators._base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
+from indicators._registry import register
+from indicators.ema._kernel import ema as _ema_kernel
 
 _ET = ZoneInfo("America/New_York")
 

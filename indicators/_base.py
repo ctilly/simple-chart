@@ -1,5 +1,5 @@
 """
-indicators/base.py
+indicators/_base.py
 
 Abstract base class for all indicators.
 
@@ -9,131 +9,47 @@ HOW THE INDICATOR SYSTEM WORKS
 
 There are three layers involved in every indicator:
 
-  1. The Indicator subclass (this file / plugins/)
+  1. The Indicator subclass (this file / indicators/*.py)
      - Implements the Indicator ABC
      - Responsible for extracting arrays from OHLCVSeries (e.g. closes,
-       volumes) and delegating to the compiled kernels
+       volumes) and delegating to any compiled kernels
      - Plain Python — not compiled
 
-  2. The compiled kernels (indicators/_fast/)
+  2. Compiled kernels (optional, per-indicator _kernel.py)
      - Pure numeric functions: numpy array(s) in, numpy array out
      - No I/O, no dicts, no strings, no dynamic dispatch
      - Compiled to native extensions via mypyc for maximum speed
-     - See indicators/_fast/ for the actual math
+     - Live alongside the indicator in its directory (e.g. indicators/ema/)
 
-  3. The registry (indicators/registry.py)
+  3. The registry (indicators/_registry.py)
      - Maps indicator names to Indicator classes
-     - Built-in indicators are registered at import time
-     - Plugin authors register their indicators the same way
+     - All indicators are registered at import time via register()
+     - Auto-discovery in _loader.py handles the imports
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 THE MYPYC BOUNDARY
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-mypyc compiles Python source to C extensions. It is not magic — it works
-by requiring strict, static typing with no dynamic dispatch. The rule is:
+mypyc compiles Python source to C extensions. The rule is:
 
-  Code that CAN be compiled lives in indicators/_fast/ (or any _fast/
-  subpackage in any layer). It must:
+  Code that CAN be compiled lives in _kernel.py files inside indicator
+  directories (e.g. indicators/ema/_kernel.py). It must:
     - Use concrete types only (no Any, no Union in hot paths)
     - Accept and return numpy arrays or plain scalars
     - Perform no I/O (no file access, no SQLite, no network)
     - Use no ABCMeta, no dynamic attribute setting
 
-  Code that CANNOT be compiled (this file, registry.py, Indicator
-  subclasses) lives outside _fast/. It handles the "glue": extracting
-  arrays from OHLCVSeries, calling compiled functions, packing results
-  back into dicts.
+  Code that CANNOT be compiled (this file, _registry.py, Indicator
+  subclasses) handles the "glue": extracting arrays from OHLCVSeries,
+  calling compiled functions, packing results back into dicts.
 
-To compile the _fast/ modules, run:
+To compile a kernel, run:
     python scripts/build_compiled.py
 
-During development you can skip compilation entirely — the .py source
-files in _fast/ run as normal Python. The compiled .so extensions are
+During development you can skip compilation entirely — the _kernel.py
+source files run as normal Python. The compiled .so extensions are
 drop-in replacements; Python imports the .so if present, falls back to
 the .py if not.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WRITING A NEW INDICATOR — COMPLETE STEP-BY-STEP
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-See plugins/example_plugin.py for a fully worked example you can copy.
-
-STEP 1 — Create the plugin file
-  Built-in indicators (shipped with the app):
-      plugins/builtin/your_indicator.py
-
-  Third-party / contributed indicators:
-      Any .py file on the Python path that calls register() at import
-      time. No changes to the core codebase needed.
-
-STEP 2 — Subclass Indicator and implement the four methods
-
-  from indicators.base import Indicator
-  from indicators.registry import register
-
-  class MyIndicator(Indicator):
-      def name(self)          -> str:   return "my_indicator"
-      def label(self)         -> str:   return "My Indicator"
-      def default_params(self)-> dict:  return {"days": 14, "color": "#DA70D6"}
-      def compute(self, series, params) -> dict[str, np.ndarray]:
-          ...
-          return {"my_indicator_14": values}
-
-  register(MyIndicator)   # <-- always at the bottom of the file
-
-STEP 3 — If the indicator needs a compiled kernel (optional)
-
-  Only needed if the computation involves a tight loop over thousands
-  of bars. Simple indicators can call numpy directly from compute()
-  without a separate kernel.
-
-  If you do need a kernel, create it in indicators/_fast/your_kernel.py
-  and follow ALL of these rules (required for mypyc to compile it):
-
-    ✓ Every parameter and return value must have an explicit type annotation
-    ✓ Accept numpy arrays (np.ndarray) and plain Python scalars (int, float)
-    ✓ Return np.ndarray (or list[np.ndarray] for multiple outputs)
-    ✓ Use float() and int() to convert numpy scalars in loop bodies —
-      mypyc generates tighter C for Python builtins than numpy scalars
-    ✓ Pre-compute any loop-invariant values outside the loop
-    ✗ No I/O of any kind (no file access, no SQLite, no network, no print)
-    ✗ No Any, no Union in function signatures
-    ✗ No ABCMeta, no dynamic attribute access (no getattr/setattr)
-    ✗ No **kwargs, no default mutable arguments
-
-  Then add the module path to pyproject.toml so the build script picks
-  it up:
-
-    [tool.simplechart.compile]
-    targets = [
-        "indicators._fast.ma",
-        "indicators._fast.avwap",
-        "indicators._fast.your_kernel",   # <-- add this line
-    ]
-
-  Run the build:
-      python scripts/build_compiled.py
-
-  The compiled .so file is placed next to the .py source. Delete the
-  .so at any time to revert to interpreted mode — no other changes needed.
-
-STEP 4 — Register the import (built-ins only)
-
-  Add one line to plugins/builtin/__init__.py:
-      from plugins.builtin import your_indicator  # noqa: F401
-
-  This ensures the register() call at the bottom of your module fires
-  at app startup. Third-party plugins handle their own import — they
-  are not added here.
-
-STEP 5 — Add to DEFAULT_INDICATORS (optional)
-
-  If the indicator should appear on every chart automatically, add it
-  to DEFAULT_INDICATORS in app/controller.py:
-      ("my_indicator", {"days": 14, "color": "#DA70D6"}),
-
-  Otherwise it is available in the registry but not added by default.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 COMPUTE() CONTRACT
@@ -160,7 +76,7 @@ the existing one.
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -169,6 +85,27 @@ from data.models import OHLCVSeries
 
 
 LINE_STYLE_OPTIONS: list[str] = ["solid", "dash", "dot", "dash_dot"]
+
+RENDER_CHART: str = "chart"
+
+
+@dataclass
+class SeriesFill:
+    """
+    Declares a shaded fill between two named series produced by compute().
+
+    series_a and series_b must be keys returned by the indicator's compute()
+    method. The fill is drawn between those two lines using the indicator's
+    color param at the given alpha (0.0 = fully transparent, 1.0 = opaque).
+    Values between 0.1 and 0.3 are typical for chart fills.
+
+    Example (Bollinger Bands):
+        SeriesFill("bb_upper", "bb_lower", alpha=0.15)
+    """
+
+    series_a: str
+    series_b: str
+    alpha: float = 0.15
 
 
 @dataclass
@@ -243,7 +180,34 @@ class Indicator(ABC):
         indicator has no value (e.g. before an MA has accumulated enough
         bars to produce its first valid output).
 
-        Delegate heavy numeric work to the compiled kernels in
-        indicators/_fast/. This method is called on every symbol load
-        and on timeframe switches, so it should return quickly.
+        Delegate heavy numeric work to a _kernel.py module when the
+        computation involves a tight loop over thousands of bars.
         """
+
+    def render_target(self) -> str:
+        """
+        Return the render target for this indicator.
+
+        Chart indicators return RENDER_CHART (the default — no override needed).
+        They draw directly on the price chart, sharing its time × price axes.
+
+        Panel indicators return a short lowercase string naming their panel
+        (e.g. "rsi", "macd"). Each unique string gets its own dedicated panel
+        below the chart, sharing only the x (time) axis. Two instances
+        returning the same string share one panel.
+        """
+        return RENDER_CHART
+
+    def series_fills(self) -> list[SeriesFill]:
+        """
+        Declare shaded fills between pairs of series produced by compute().
+
+        Override this to have the chart draw a translucent fill between two
+        named series (e.g. Bollinger Bands upper and lower). Returns an empty
+        list by default — chart indicators need not override it.
+
+        Note: fill rendering support in PlotManager is planned but not yet
+        implemented. Declaring fills here is forward-compatible; they will
+        be drawn automatically once support is added.
+        """
+        return []

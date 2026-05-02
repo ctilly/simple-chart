@@ -3,14 +3,14 @@
 ## Project
 
 Desktop stock charting application. Swing trading focus; no transaction management.
-Intended to replace TradeStation for charting, specifically Anchored VWAP workflows.
+Inspired by TradStation and Webull for charting, specifically Anchored VWAP workflows.
 
 
 ## Domain vocabulary
 
 - **AVWAP** — Anchored VWAP: volume-weighted average price anchored to a specific bar (UTC ms timestamp, never a bar index)
 - **MAs are day-based** — a 50-day SMA means 50 trading days, converted to bar count per timeframe. The price value stays consistent across all timeframes.
-- **`_fast/` subpackage** — pure numeric kernels eligible for mypyc compilation. Can appear in any layer, not just indicators.
+- **`_kernel.py`** — pure numeric kernel file eligible for mypyc compilation. Lives inside its indicator's directory (e.g. `indicators/ema/_kernel.py`). Accepts and returns numpy arrays; no I/O.
 - **session** — a trading day, not a user login session
 
 ## Engineering philosophy
@@ -28,6 +28,18 @@ Intended to replace TradeStation for charting, specifically Anchored VWAP workfl
 - Wait for review and explicit approval before moving to the next piece.
 - Read files before proposing changes to them.
 - Do not make unrequested changes — bug fix means fix the bug, not clean up the surrounding code.
+
+## Indicator API
+
+`simplechart.api` is the stable public import path for indicator authors. It
+re-exports everything a plugin needs: `Indicator`, `ChoiceParam`,
+`LINE_STYLE_OPTIONS`, `RENDER_CHART`, `SeriesFill`, `register`, `OHLCVSeries`,
+`Bar`, `AnchorRecord`, `bars_for_n_days`, and `timestamp_ms_to_bar_index`.
+
+Internal package paths (`indicators._base`, `indicators._registry`, etc.) are
+not part of the public contract — they may change. External plugins must import
+only from `simplechart.api`. Internal code (app layer, built-in indicators) may
+import from internals directly.
 
 ## Building new indicators
 

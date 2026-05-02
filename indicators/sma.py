@@ -1,5 +1,5 @@
 """
-plugins/builtin/sma.py
+indicators/sma.py
 
 Simple Moving Average indicator.
 
@@ -24,9 +24,8 @@ import numpy as np
 
 from data.calendar import bars_for_n_days
 from data.models import Bar, OHLCVSeries
-from indicators._fast.ma import sma as _sma_kernel
-from indicators.base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
-from indicators.registry import register
+from indicators._base import ChoiceParam, Indicator, LINE_STYLE_OPTIONS
+from indicators._registry import register
 
 _ET = ZoneInfo("America/New_York")
 
@@ -55,7 +54,7 @@ class SMAIndicator(Indicator):
         days: int = int(params["days"])
         period: int = bars_for_n_days(days, series.timeframe)
         closes: np.ndarray = np.array([b.close for b in series.bars], dtype=float)
-        values: np.ndarray = _sma_kernel(closes, period)
+        values: np.ndarray = _sma(closes, period)
 
         # Fill the leading NaN zone (where intraday history is too short for
         # the full warmup) with the daily SMA value for each trading day.
@@ -70,6 +69,30 @@ class SMAIndicator(Indicator):
 register(SMAIndicator)
 
 
+def _sma(closes: np.ndarray, period: int) -> np.ndarray:
+    """
+    Simple Moving Average using the cumulative sum trick — O(n) overall.
+
+    result[i] = mean of closes[i - period + 1 : i + 1]
+
+    The first valid value is at index period - 1. All prior values are NaN.
+    """
+    n: int = len(closes)
+    result: np.ndarray = np.full(n, np.nan)
+
+    if period < 1 or period > n:
+        return result
+
+    # Prepend 0.0 so cumsum[i] = sum of closes[0 : i].
+    # Window sum for bar i (i >= period-1):
+    #   sum(closes[i-period+1 : i+1]) = cumsum[i+1] - cumsum[i+1-period]
+    padded: np.ndarray = np.concatenate(([0.0], closes.astype(float)))
+    cumsum: np.ndarray = np.cumsum(padded)
+    result[period - 1:] = (cumsum[period:] - cumsum[:n - period + 1]) / period
+
+    return result
+
+
 def _fill_warmup_from_daily(
     intraday_bars: list[Bar],
     values: np.ndarray,
@@ -82,7 +105,7 @@ def _fill_warmup_from_daily(
     NaN — bars with valid intraday SMA values are left unchanged.
     """
     daily_closes: np.ndarray = np.array([b.close for b in daily_bars], dtype=float)
-    daily_sma: np.ndarray = _sma_kernel(daily_closes, days)
+    daily_sma: np.ndarray = _sma(daily_closes, days)
 
     by_date: dict[datetime.date, float] = {}
     for bar, val in zip(daily_bars, daily_sma):

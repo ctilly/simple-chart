@@ -30,7 +30,7 @@ import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 
-from chart.panel import Panel
+from chart.panel import IndicatorPanelSlot, Panel
 from chart.styles import (
     BACKGROUND,
     CANDLE_DOWN,
@@ -58,9 +58,15 @@ class PlotManager:
     methods whenever data or indicator state changes.
     """
 
-    def __init__(self, price_panel: Panel, volume_panel: Panel) -> None:
-        self._price_panel  = price_panel
-        self._volume_panel = volume_panel
+    def __init__(
+        self,
+        price_panel: Panel,
+        volume_panel: Panel,
+        indicator_slots: list[IndicatorPanelSlot],
+    ) -> None:
+        self._price_panel     = price_panel
+        self._volume_panel    = volume_panel
+        self._indicator_slots = indicator_slots
 
         # Maps series_key -> finplot plot handle.
         # Keys follow the same naming convention as compute() output:
@@ -156,16 +162,18 @@ class PlotManager:
         color: str,
         width: float = LINE_WIDTH_INDICATOR,
         style: str = "solid",
+        render_target: str = "chart",
     ) -> None:
         """
-        Draw or update a single indicator plot line on the price panel.
+        Draw or update a single indicator plot line.
+
+        render_target routes the draw to the correct axis:
+          "chart"      → price panel (default, chart indicators)
+          any other str → the indicator panel slot assigned that name
 
         If a plot for series_key already exists, its data is updated in
-        place — finplot redraws the existing line without creating a new
-        one. If it does not exist, a new line is created.
-
-        series_key must match the key returned by the indicator's compute()
-        method (e.g. "sma_50", "avwap_1704067200000").
+        place. If it does not exist, a new line is created on the
+        appropriate axis.
 
         values is a numpy array aligned to the current bar series. NaN
         values are not drawn — finplot skips them automatically.
@@ -176,8 +184,9 @@ class PlotManager:
 
         # Wrap the numpy array in a pandas Series with the same DatetimeIndex
         # as the candles. Without this, finplot uses integer array positions
-        # as x-coordinates, which causes MA lines to drift during pan/zoom
-        # because finplot's x-indexed mode can't reconcile the two datasrcs.
+        # as x-coordinates, which causes indicator lines to drift during
+        # pan/zoom because finplot's x-indexed mode can't reconcile the two
+        # datasrcs.
         if self._bar_index is not None:
             data: object = pd.Series(values, index=self._bar_index)
         else:
@@ -195,9 +204,10 @@ class PlotManager:
             handle.opts["handed_color"] = color  # type: ignore[attr-defined]
             handle.update_data(data)  # type: ignore[attr-defined]
         else:
+            target_ax = self._resolve_ax(render_target)
             handle = fplt.plot(
                 data,
-                ax=self._price_panel.ax,
+                ax=target_ax,
                 color=color,
                 width=width,
             )
@@ -205,6 +215,15 @@ class PlotManager:
                 pg.mkPen(color=color, width=width, style=pen_style)
             )
             self._plots[series_key] = handle
+
+    def _resolve_ax(self, render_target: str) -> object:
+        """Return the finplot axis for the given render_target string."""
+        if render_target == "chart":
+            return self._price_panel.ax
+        for slot in self._indicator_slots:
+            if slot.name == render_target:
+                return slot.panel.ax
+        raise KeyError(f"No indicator panel slot assigned for target {render_target!r}")
 
     def remove_indicator(self, series_key: str) -> None:
         """

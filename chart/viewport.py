@@ -137,6 +137,56 @@ _AXIS_ZOOM_STATES: WeakKeyDictionary[object, _AxisZoomState] = WeakKeyDictionary
 _FREE_X_PAN_BARS = 1_000_000.0
 
 
+def install_indicator_panel_behavior(panel_ax: object, price_ax: object) -> None:
+    """
+    Patch an indicator panel viewbox to follow the price panel's x-range
+    and auto-scale its own y-range.
+
+    Called once per slot on first assignment. Mirrors the volume panel
+    pattern: drag events forward to the price viewbox so the full chart
+    pans as a unit.
+    """
+    panel_vb = cast(_ViewBoxLike, getattr(panel_ax, "vb"))
+    price_vb = cast(_ViewBoxLike, getattr(price_ax, "vb"))
+
+    panel_vb.master_viewbox = price_vb
+    panel_vb.setMouseEnabled(x=True, y=False)
+    # Explicit x-link ensures _linked_x_viewboxes() finds this panel when
+    # walking from the price viewbox, so _persist_current_x_range() keeps
+    # the indicator datasrc's init_x0/init_x1 in sync with the price panel.
+    panel_vb.setXLink(price_vb)  # type: ignore[attr-defined]
+    _patch_update_y_zoom(panel_vb)
+    _patch_mouse_drag(panel_vb, allow_vertical_pan=False)
+    _patch_indicator_axis_format(panel_ax)
+
+
+def _patch_indicator_axis_format(indicator_ax: object) -> None:
+    """
+    Reduce tick density on an indicator panel's y-axis.
+
+    pyqtgraph's default tick density is tuned for price charts with many
+    decimal places. Indicator panels (e.g. RSI 0–100) need fewer, more
+    widely spaced ticks so labels don't overlap.
+    """
+    axes = getattr(indicator_ax, "axes", {})
+    right_axis = axes.get("right", {}).get("item")
+    if right_axis is None or getattr(right_axis, "_simplechart_ind_fmt_patch", False):
+        return
+
+    set_tick_density = getattr(right_axis, "setTickDensity", None)
+    if callable(set_tick_density):
+        set_tick_density(0.4)
+
+    set_style = getattr(right_axis, "setStyle", None)
+    if callable(set_style):
+        set_style(
+            maxTickLevel=1,          # major ticks only, no sub-levels
+            textFillLimits=[(0, 0.6)],  # stop adding labels above 60% fill
+        )
+
+    right_axis._simplechart_ind_fmt_patch = True
+
+
 def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:
     """
     Patch the chart viewboxes to allow Webull-style viewport interaction.

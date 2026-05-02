@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from indicators.base import ChoiceParam
+from indicators._base import ChoiceParam
 
 
 class ColorButton(QPushButton):

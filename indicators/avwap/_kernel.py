@@ -1,10 +1,10 @@
 """
-indicators/_fast/avwap.py
+indicators/avwap/_kernel.py
 
 Compiled AVWAP (Anchored Volume Weighted Average Price) kernel.
 
-This module is compiled to a native C extension by mypyc. The same rules
-apply as in ma.py: strict types, no I/O, no dynamic dispatch, Python
+This module is eligible for mypyc compilation. The same rules apply as
+in ema/_kernel.py: strict types, no I/O, no dynamic dispatch, Python
 scalars preferred in loop bodies.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -30,59 +30,12 @@ ANCHOR INDEX vs. ANCHOR TIMESTAMP
 
 This kernel works with integer array indexes, not timestamps. The
 translation from UTC millisecond timestamp (as stored in AnchorRecord)
-to the bar index in the current array is done by the AVWAPIndicator
-class (in plugins/builtin/avwap.py) before calling this function.
-
-This keeps the kernel free of any awareness of dates, timeframes, or
-the calendar — it only sees numbers.
+to the bar index in the current array is done by AVWAPIndicator before
+calling this function. This keeps the kernel free of any awareness of
+dates, timeframes, or the calendar — it only sees numbers.
 """
 
 import numpy as np
-
-
-def avwap(
-    highs: np.ndarray,
-    lows: np.ndarray,
-    closes: np.ndarray,
-    volumes: np.ndarray,
-    anchor_index: int,
-) -> np.ndarray:
-    """
-    Compute Anchored VWAP starting from anchor_index.
-
-    Bars before anchor_index are NaN. The AVWAP value at anchor_index
-    itself equals the typical price of that bar (cumulative volume is
-    just that one bar's volume, so the ratio is simply typical price).
-
-    Args:
-        highs:        array of high prices, oldest-first
-        lows:         array of low prices, oldest-first
-        closes:       array of closing prices, oldest-first
-        volumes:      array of bar volumes, oldest-first
-        anchor_index: bar index where accumulation begins (inclusive)
-
-    Returns:
-        Array of the same length as closes. Values before anchor_index
-        are NaN. Returns all-NaN if anchor_index >= len(closes).
-    """
-    n: int = len(closes)
-    result: np.ndarray = np.full(n, np.nan)
-
-    if anchor_index >= n:
-        return result
-
-    cum_tp_vol: float = 0.0
-    cum_vol: float = 0.0
-
-    for i in range(anchor_index, n):
-        tp: float = (float(highs[i]) + float(lows[i]) + float(closes[i])) / 3.0
-        vol: float = float(volumes[i])
-        cum_tp_vol += tp * vol
-        cum_vol += vol
-        if cum_vol > 0.0:
-            result[i] = cum_tp_vol / cum_vol
-
-    return result
 
 
 def avwap_multi(
@@ -95,9 +48,8 @@ def avwap_multi(
     """
     Compute AVWAP for multiple anchor points in a single pass over the bars.
 
-    More efficient than calling avwap() once per anchor when there are
-    several anchors on the same chart — the bar arrays are traversed once
-    rather than once per anchor.
+    More efficient than computing each anchor separately — the bar arrays
+    are traversed once rather than once per anchor.
 
     Args:
         highs, lows, closes, volumes: price/volume arrays, oldest-first
