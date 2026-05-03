@@ -61,8 +61,9 @@ CREATE TABLE IF NOT EXISTS avwap_anchors (
     anchor_ts   INTEGER NOT NULL,   -- UTC milliseconds
     label       TEXT    NOT NULL,
     color       TEXT    NOT NULL,   -- hex, e.g. "#00FF88"
-    line_width  REAL    NOT NULL DEFAULT 1.0,
-    line_style  TEXT    NOT NULL DEFAULT 'solid'
+    line_width  REAL    NOT NULL DEFAULT 2.0,
+    line_style  TEXT    NOT NULL DEFAULT 'solid',
+    show_anchor INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_avwap_anchors_symbol

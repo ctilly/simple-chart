@@ -38,6 +38,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import finplot as fplt
+import numpy as np
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
@@ -55,6 +56,7 @@ from app.state import IndicatorState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
 from chart.window import ChartWidget
+from data.calendar import timestamp_ms_to_bar_index
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import AnchorRecord, Bar, OHLCVSeries, Timeframe
@@ -275,6 +277,10 @@ class MainWindow(QMainWindow):
         # Wire chart interactions.
         self._chart.interactions.on_bar_clicked(self._on_bar_clicked)
         self._chart.interactions.on_bar_right_clicked(self._on_bar_right_clicked)
+        self._chart.interactions.on_anchor_drag_start(self._on_anchor_drag_start)
+        self._chart.interactions.on_anchor_drag_move(self._on_anchor_drag_move)
+        self._chart.interactions.on_anchor_drag_finish(self._on_anchor_drag_finish)
+        self._chart.interactions.on_anchor_drag_cancel(self._on_anchor_drag_cancel)
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
@@ -292,6 +298,10 @@ class MainWindow(QMainWindow):
         # Used to save/restore per-symbol indicator state on symbol switch.
         self._loaded_symbol: str | None = None
         self._per_symbol_state: dict[str, list[IndicatorState]] = {}
+
+        self._drag_anchor_original: AnchorRecord | None = None
+        self._drag_anchor_current_ts: int | None = None
+        self._drag_anchor_series_key: str | None = None
 
         # Load the initial symbol on startup: first watchlist entry, or SPY.
         watchlist = self._cache.get_watchlist()
@@ -484,7 +494,11 @@ class MainWindow(QMainWindow):
         default_color: str = ind_state.params.get("color", "#ffffff")
         default_width: float = float(ind_state.params.get("line_width", 1.0))
         style_param = ind_state.params.get("line_style", ChoiceParam("solid", LINE_STYLE_OPTIONS))
-        default_style: str = style_param.value if isinstance(style_param, ChoiceParam) else str(style_param)
+        default_style: str = (
+            style_param.value
+            if isinstance(style_param, ChoiceParam)
+            else str(style_param)
+        )
         pm = self._chart.plot_manager
 
         for series_key, values in result.items():
@@ -516,6 +530,19 @@ class MainWindow(QMainWindow):
             visible = ind_state.series_visibility.get(series_key, ind_state.visible)
             pm.update_indicator(series_key, values, color, width, style, render_target)
             pm.set_visible(series_key, visible)
+            if series_key.startswith("avwap_") and anchor and anchor.show_anchor:
+                valid_indexes = np.flatnonzero(~np.isnan(values))
+                if len(valid_indexes) > 0:
+                    marker_idx = int(valid_indexes[0])
+                    pm.update_anchor_marker(
+                        series_key,
+                        marker_idx,
+                        float(values[marker_idx]),
+                        color,
+                    )
+                    pm.set_visible(series_key, visible)
+            elif series_key.startswith("avwap_"):
+                pm.remove_anchor_marker(series_key)
 
             display = _series_key_to_label(series_key, ind_state)
             self._chart.legend.add_indicator(series_key, display, color)
@@ -540,9 +567,136 @@ class MainWindow(QMainWindow):
         idx = max(0, min(int(x_pos), len(bars) - 1))
         return int(bars[idx].timestamp.timestamp() * 1000)
 
+    def _nearest_bar_index(self, x_pos: float) -> int | None:
+        if self._current_series is None or not self._current_series.bars:
+            return None
+        bars = self._current_series.bars
+        idx = int(x_pos + 0.5)
+        if idx < 0 or idx >= len(bars):
+            return None
+        return idx
+
+    def _bar_index_to_exact_ts_ms(self, idx: int) -> int | None:
+        if self._current_series is None or not self._current_series.bars:
+            return None
+        if idx < 0 or idx >= len(self._current_series.bars):
+            return None
+        return int(self._current_series.bars[idx].timestamp.timestamp() * 1000)
+
+    def _anchor_bar_index(self, anchor: AnchorRecord) -> int | None:
+        if self._current_series is None or not self._current_series.bars:
+            return None
+        bar_ts_ms = [
+            int(bar.timestamp.timestamp() * 1000)
+            for bar in self._current_series.bars
+        ]
+        idx = int(timestamp_ms_to_bar_index(anchor.anchor_ts, bar_ts_ms))
+        if idx >= len(bar_ts_ms):
+            return None
+        return idx
+
+    def _visible_anchor_at_bar_index(self, idx: int) -> AnchorRecord | None:
+        avwap_state = self._state.get_indicator("avwap")
+        if avwap_state is None:
+            return None
+        for anchor in self._state.anchors:
+            series_key = f"avwap_{anchor.anchor_ts}"
+            visible = avwap_state.series_visibility.get(series_key, avwap_state.visible)
+            if visible and self._anchor_bar_index(anchor) == idx:
+                return anchor
+        return None
+
+    def _anchor_target_is_duplicate(
+        self,
+        target_idx: int,
+        moving_anchor_id: int | None,
+    ) -> bool:
+        for anchor in self._state.anchors:
+            if anchor.anchor_id == moving_anchor_id:
+                continue
+            if self._anchor_bar_index(anchor) == target_idx:
+                return True
+        return False
+
     def _on_bar_clicked(self, x_pos: float) -> None:
         """Left-click: reserved for future use (e.g. bar detail). No action."""
         pass
+
+    def _on_anchor_drag_start(self, x_pos: float, y_pos: float) -> bool:
+        idx = self._nearest_bar_index(x_pos)
+        if idx is None:
+            return False
+        if not self._point_is_inside_candle(idx, x_pos, y_pos):
+            return False
+        anchor = self._visible_anchor_at_bar_index(idx)
+        if anchor is None:
+            return False
+        self._drag_anchor_original = AnchorRecord(
+            symbol=anchor.symbol,
+            anchor_ts=anchor.anchor_ts,
+            label=anchor.label,
+            color=anchor.color,
+            line_width=anchor.line_width,
+            line_style=anchor.line_style,
+            show_anchor=anchor.show_anchor,
+            anchor_id=anchor.anchor_id,
+        )
+        self._drag_anchor_current_ts = anchor.anchor_ts
+        self._drag_anchor_series_key = f"avwap_{anchor.anchor_ts}"
+        return True
+
+    def _point_is_inside_candle(self, idx: int, x_pos: float, y_pos: float) -> bool:
+        if self._current_series is None or not self._current_series.bars:
+            return False
+        if idx < 0 or idx >= len(self._current_series.bars):
+            return False
+        if abs(x_pos - idx) > 0.5:
+            return False
+        bar = self._current_series.bars[idx]
+        return bar.low <= y_pos <= bar.high
+
+    def _on_anchor_drag_move(self, x_pos: float) -> None:
+        self._move_drag_anchor_to_x(x_pos)
+
+    def _on_anchor_drag_finish(self, x_pos: float) -> None:
+        if not self._move_drag_anchor_to_x(x_pos):
+            self._on_anchor_drag_cancel()
+            return
+        if self._drag_anchor_current_ts is None:
+            self._on_anchor_drag_cancel()
+            return
+        anchor = self._drag_anchor()
+        if anchor is None:
+            self._on_anchor_drag_cancel()
+            return
+        self._cache.update_anchor(anchor)
+        self._finalize_drag_anchor_key(anchor)
+        self._drag_anchor_original = None
+        self._drag_anchor_current_ts = None
+        self._drag_anchor_series_key = None
+
+    def _on_anchor_drag_cancel(self) -> None:
+        original = self._drag_anchor_original
+        if original is None:
+            return
+        current_key = self._drag_anchor_series_key
+        original_key = f"avwap_{original.anchor_ts}"
+        if current_key is not None and current_key != original_key:
+            self._chart.plot_manager.remove_indicator(current_key)
+            self._chart.legend.remove_indicator(current_key)
+            avwap_state = self._state.get_indicator("avwap")
+            if avwap_state is not None and current_key in avwap_state.series_visibility:
+                avwap_state.series_visibility[original_key] = (
+                    avwap_state.series_visibility.pop(current_key)
+                )
+        self._state.anchors = [
+            original if a.anchor_id == original.anchor_id else a
+            for a in self._state.anchors
+        ]
+        self._drag_anchor_original = None
+        self._drag_anchor_current_ts = None
+        self._drag_anchor_series_key = None
+        self._reload_indicators(draw_bars=False)
 
     def _on_bar_right_clicked(self, x_pos: float) -> None:
         """Right-click on a bar: show context menu."""
@@ -555,6 +709,114 @@ class MainWindow(QMainWindow):
         if action == add_avwap:
             self._add_avwap_anchor(utc_ts_ms)
 
+    def _drag_anchor(self) -> AnchorRecord | None:
+        original = self._drag_anchor_original
+        if original is None:
+            return None
+        return next(
+            (a for a in self._state.anchors if a.anchor_id == original.anchor_id),
+            None,
+        )
+
+    def _move_drag_anchor_to_x(self, x_pos: float) -> bool:
+        original = self._drag_anchor_original
+        anchor = self._drag_anchor()
+        if original is None or anchor is None:
+            return False
+        idx = self._nearest_bar_index(x_pos)
+        if idx is None:
+            return False
+        if self._anchor_target_is_duplicate(idx, anchor.anchor_id):
+            return False
+        target_ts = self._bar_index_to_exact_ts_ms(idx)
+        if target_ts is None:
+            return False
+        if target_ts == anchor.anchor_ts:
+            return True
+
+        updated = AnchorRecord(
+            symbol=anchor.symbol,
+            anchor_ts=target_ts,
+            label=datetime.fromtimestamp(target_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+            color=anchor.color,
+            line_width=anchor.line_width,
+            line_style=anchor.line_style,
+            show_anchor=anchor.show_anchor,
+            anchor_id=anchor.anchor_id,
+        )
+        self._state.anchors = [
+            updated if a.anchor_id == anchor.anchor_id else a
+            for a in self._state.anchors
+        ]
+        self._drag_anchor_current_ts = target_ts
+        self._reload_drag_anchor()
+        return True
+
+    def _reload_drag_anchor(self) -> None:
+        anchor = self._drag_anchor()
+        series_key = self._drag_anchor_series_key
+        series = self._current_series
+        if anchor is None or series_key is None or series is None:
+            return
+
+        avwap_state = self._state.get_indicator("avwap")
+        if avwap_state is None:
+            return
+
+        indicator = get_indicator("avwap")
+        result = indicator.compute(series, {"anchors": [anchor]})
+        values = next(iter(result.values()), None)
+        if values is None:
+            return
+
+        visible = avwap_state.series_visibility.get(series_key, avwap_state.visible)
+        price_vb = self._chart.plot_manager.price_viewbox()
+        target_rect = price_vb.targetRect()  # type: ignore[attr-defined]
+        left = float(target_rect.left())
+        right = float(target_rect.right())
+        top = float(target_rect.top())
+        bottom = float(target_rect.bottom())
+        price_vb.win._isMouseLeftDrag = True  # type: ignore[attr-defined]
+        self._chart.plot_manager.update_indicator(
+            series_key,
+            values,
+            anchor.color,
+            anchor.line_width,
+            anchor.line_style,
+            RENDER_CHART,
+        )
+        self._chart.plot_manager.set_visible(series_key, visible)
+        if anchor.show_anchor:
+            valid_indexes = np.flatnonzero(~np.isnan(values))
+            if len(valid_indexes) > 0:
+                marker_idx = int(valid_indexes[0])
+                self._chart.plot_manager.update_anchor_marker(
+                    series_key,
+                    marker_idx,
+                    float(values[marker_idx]),
+                    anchor.color,
+                )
+                self._chart.plot_manager.set_visible(series_key, visible)
+        else:
+            self._chart.plot_manager.remove_anchor_marker(series_key)
+        price_vb.set_range(left, top, right, bottom)  # type: ignore[attr-defined]
+
+    def _finalize_drag_anchor_key(self, anchor: AnchorRecord) -> None:
+        old_key = self._drag_anchor_series_key
+        new_key = f"avwap_{anchor.anchor_ts}"
+        if old_key is None or old_key == new_key:
+            self._reload_indicators(draw_bars=False)
+            return
+
+        avwap_state = self._state.get_indicator("avwap")
+        if avwap_state is not None:
+            visible = avwap_state.series_visibility.pop(old_key, avwap_state.visible)
+            avwap_state.series_visibility[new_key] = visible
+
+        self._chart.plot_manager.rename_indicator(old_key, new_key)
+        self._chart.legend.remove_indicator(old_key)
+        self._reload_indicators(draw_bars=False)
+
     def _add_avwap_anchor(self, utc_ts_ms: int) -> None:
         """
         Create, persist, and draw a new AVWAP anchor.
@@ -564,6 +826,15 @@ class MainWindow(QMainWindow):
         3. Add it to state.anchors.
         4. Ensure the avwap IndicatorState exists, then recompute.
         """
+        if self._current_series is not None and self._current_series.bars:
+            bar_ts_ms = [
+                int(bar.timestamp.timestamp() * 1000)
+                for bar in self._current_series.bars
+            ]
+            target_idx = timestamp_ms_to_bar_index(utc_ts_ms, bar_ts_ms)
+            if target_idx < len(bar_ts_ms) and self._anchor_target_is_duplicate(target_idx, None):
+                return
+
         label = datetime.fromtimestamp(
             utc_ts_ms / 1000, tz=timezone.utc
         ).strftime("%Y-%m-%d")
@@ -571,8 +842,11 @@ class MainWindow(QMainWindow):
         from chart.styles import AVWAP_PALETTE
         color = AVWAP_PALETTE[len(self._state.anchors) % len(AVWAP_PALETTE)]
 
+        if self._state.symbol is None:
+            return
+
         record = AnchorRecord(
-            symbol=self._state.symbol,  # type: ignore[arg-type]
+            symbol=self._state.symbol,
             anchor_ts=utc_ts_ms,
             label=label,
             color=color,
@@ -590,7 +864,7 @@ class MainWindow(QMainWindow):
         # We need the current series — re-read it from the cache.
         self._reload_indicators()
 
-    def _reload_indicators(self) -> None:
+    def _reload_indicators(self, *, draw_bars: bool = True) -> None:
         """
         Re-read bars from cache and recompute all indicators.
         Used after anchor add/remove or param changes — does not re-fetch
@@ -598,22 +872,25 @@ class MainWindow(QMainWindow):
         """
         if self._state.symbol is None:
             return
-        now = datetime.now(tz=timezone.utc)
-        lookback_ms = int(
-            (now.timestamp() - _lookback_days(self._state.timeframe) * 86_400) * 1000
-        )
-        bars = self._cache.get_bars(
-            self._state.symbol,
-            self._state.timeframe,
-            lookback_ms,
-            int(now.timestamp() * 1000),
-        )
-        series = OHLCVSeries(
-            symbol=self._state.symbol,
-            timeframe=self._state.timeframe,
-            bars=bars,
-        )
-        self._current_series = series
+        if not draw_bars and self._current_series is not None:
+            series = self._current_series
+        else:
+            now = datetime.now(tz=timezone.utc)
+            lookback_ms = int(
+                (now.timestamp() - _lookback_days(self._state.timeframe) * 86_400) * 1000
+            )
+            bars = self._cache.get_bars(
+                self._state.symbol,
+                self._state.timeframe,
+                lookback_ms,
+                int(now.timestamp() * 1000),
+            )
+            series = OHLCVSeries(
+                symbol=self._state.symbol,
+                timeframe=self._state.timeframe,
+                bars=bars,
+            )
+            self._current_series = series
 
         # Keep candle/volume data and _bar_index in sync with the reloaded
         # bar slice. If the bar count has changed since the last full render
@@ -623,8 +900,9 @@ class MainWindow(QMainWindow):
         # _bar_index aligned, which also ensures indicator color changes
         # (which call update_data) take effect without a timeframe reload.
         pm = self._chart.plot_manager
-        pm.draw_candles(series)
-        pm.draw_volume(series)
+        if draw_bars:
+            pm.draw_candles(series)
+            pm.draw_volume(series)
 
         # Inject anchors and recompute.
         avwap_state = self._state.get_indicator("avwap")
@@ -710,6 +988,7 @@ class MainWindow(QMainWindow):
                 "color":      anchor.color,
                 "line_width": anchor.line_width,
                 "line_style": ChoiceParam(anchor.line_style, LINE_STYLE_OPTIONS),
+                "show_anchor": anchor.show_anchor,
             },
             parent=self,
         )
@@ -722,6 +1001,7 @@ class MainWindow(QMainWindow):
                 color=result["color"],
                 line_width=result["line_width"],
                 line_style=result["line_style"].value,
+                show_anchor=result["show_anchor"],
                 anchor_id=anchor.anchor_id,
             )
             self._cache.update_anchor(updated)
@@ -749,7 +1029,9 @@ class MainWindow(QMainWindow):
             )
             if anchor is None:
                 return
-            self._cache.delete_anchor(anchor.anchor_id)  # type: ignore[arg-type]
+            if anchor.anchor_id is None:
+                return
+            self._cache.delete_anchor(anchor.anchor_id)
             self._state.anchors = [
                 a for a in self._state.anchors if a.anchor_ts != ts_ms
             ]
@@ -848,7 +1130,7 @@ class MainWindow(QMainWindow):
             )
             self._reload_indicators()
 
-    def closeEvent(self, event: object) -> None:  # type: ignore[override]
+    def closeEvent(self, event: object) -> None:
         """Clean up on close."""
         if self._fetch_thread and self._fetch_thread.isRunning():
             self._fetch_thread.quit()

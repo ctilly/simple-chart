@@ -182,6 +182,10 @@ class ChartWidget(QWidget):
         reset_shortcut.activated.connect(self.reset_viewport)
         self._reset_shortcut = reset_shortcut
 
+        cancel_drag_shortcut = QShortcut(QKeySequence("Esc"), self)
+        cancel_drag_shortcut.activated.connect(self._cancel_anchor_drag)
+        self._cancel_drag_shortcut = cancel_drag_shortcut
+
     # ------------------------------------------------------------------
     # Public interface for the controller
     # ------------------------------------------------------------------
@@ -201,6 +205,9 @@ class ChartWidget(QWidget):
     def reset_viewport(self) -> None:
         reset_viewports(self._price_panel.ax, self._volume_panel.ax)
         fplt.refresh()
+
+    def _cancel_anchor_drag(self) -> None:
+        self._interactions.cancel_anchor_drag()
 
     def ensure_indicator_panel(self, name: str) -> Panel:
         """

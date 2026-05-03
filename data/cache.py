@@ -63,8 +63,9 @@ class Cache:
     def _migrate(self) -> None:
         """Add columns introduced after the initial schema release."""
         for stmt in (
-            "ALTER TABLE avwap_anchors ADD COLUMN line_width REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE avwap_anchors ADD COLUMN line_width REAL NOT NULL DEFAULT 2.0",
             "ALTER TABLE avwap_anchors ADD COLUMN line_style TEXT NOT NULL DEFAULT 'solid'",
+            "ALTER TABLE avwap_anchors ADD COLUMN show_anchor INTEGER NOT NULL DEFAULT 0",
         ):
             try:
                 self._conn.execute(stmt)
@@ -218,7 +219,7 @@ class Cache:
         """
         cursor = self._conn.execute(
             """
-            SELECT anchor_id, symbol, anchor_ts, label, color, line_width, line_style
+            SELECT anchor_id, symbol, anchor_ts, label, color, line_width, line_style, show_anchor
             FROM avwap_anchors
             WHERE symbol = ?
             ORDER BY anchor_ts ASC
@@ -238,11 +239,14 @@ class Cache:
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO avwap_anchors (symbol, anchor_ts, label, color, line_width, line_style)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO avwap_anchors (
+                    symbol, anchor_ts, label, color,
+                    line_width, line_style, show_anchor
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (anchor.symbol, anchor.anchor_ts, anchor.label, anchor.color,
-                 anchor.line_width, anchor.line_style),
+                 anchor.line_width, anchor.line_style, int(anchor.show_anchor)),
             )
         return AnchorRecord(
             symbol=anchor.symbol,
@@ -251,6 +255,7 @@ class Cache:
             color=anchor.color,
             line_width=anchor.line_width,
             line_style=anchor.line_style,
+            show_anchor=anchor.show_anchor,
             anchor_id=cursor.lastrowid,
         )
 
@@ -264,11 +269,12 @@ class Cache:
 
     def update_anchor(self, anchor: AnchorRecord) -> None:
         """
-        Update the label and color of an existing anchor.
+        Update an existing anchor.
 
         Called when the user changes display properties via the indicator
-        config dialog. anchor.anchor_id must be set (i.e. the anchor was
-        previously returned by put_anchor or get_anchors).
+        config dialog or drags the anchor to a different candle.
+        anchor.anchor_id must be set (i.e. the anchor was previously
+        returned by put_anchor or get_anchors).
         """
         if anchor.anchor_id is None:
             raise ValueError("Cannot update an anchor that has not been persisted.")
@@ -276,10 +282,16 @@ class Cache:
             self._conn.execute(
                 """
                 UPDATE avwap_anchors
-                SET label = ?, color = ?, line_width = ?, line_style = ?
+                SET anchor_ts = ?,
+                    label = ?,
+                    color = ?,
+                    line_width = ?,
+                    line_style = ?,
+                    show_anchor = ?
                 WHERE anchor_id = ?
                 """,
-                (anchor.label, anchor.color, anchor.line_width, anchor.line_style,
+                (anchor.anchor_ts, anchor.label, anchor.color, anchor.line_width,
+                 anchor.line_style, int(anchor.show_anchor),
                  anchor.anchor_id),
             )
 
@@ -319,4 +331,5 @@ def _row_to_anchor(row: sqlite3.Row) -> AnchorRecord:
         color=row["color"],
         line_width=row["line_width"],
         line_style=row["line_style"],
+        show_anchor=bool(row["show_anchor"]),
     )

@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
 
 from chart.panel import IndicatorPanelSlot, Panel
 from chart.styles import (
@@ -72,6 +73,7 @@ class PlotManager:
         # Keys follow the same naming convention as compute() output:
         # "sma_50", "avwap_1704067200000", etc.
         self._plots: dict[str, object] = {}
+        self._anchor_markers: dict[str, object] = {}
 
         # Candle and volume handles are separate — they are always present
         # and replaced entirely on symbol load rather than updated in place.
@@ -235,6 +237,7 @@ class PlotManager:
         if series_key in self._plots:
             handle = self._plots.pop(series_key)
             handle.ax.removeItem(handle)  # type: ignore[attr-defined]
+        self.remove_anchor_marker(series_key)
 
     def set_visible(self, series_key: str, visible: bool) -> None:
         """
@@ -245,6 +248,8 @@ class PlotManager:
         """
         if series_key in self._plots:
             self._plots[series_key].setVisible(visible)  # type: ignore[attr-defined]
+        if series_key in self._anchor_markers:
+            self._anchor_markers[series_key].setVisible(visible)  # type: ignore[attr-defined]
 
     def clear_indicators(self) -> None:
         """
@@ -256,6 +261,9 @@ class PlotManager:
         for handle in self._plots.values():
             handle.ax.removeItem(handle)  # type: ignore[attr-defined]
         self._plots.clear()
+        for handle in self._anchor_markers.values():
+            self._price_panel.ax.removeItem(handle)  # type: ignore[attr-defined]
+        self._anchor_markers.clear()
 
     def clear_all(self) -> None:
         """Remove everything including candles and volume."""
@@ -267,6 +275,7 @@ class PlotManager:
         self._volume_panel.ax.reset()  # type: ignore[attr-defined]
 
         self._plots.clear()
+        self._anchor_markers.clear()
         self._candle_plot = None
         self._volume_plot = None
         self._bar_index   = None
@@ -305,6 +314,47 @@ class PlotManager:
     def active_series_keys(self) -> list[str]:
         """Return the keys of all currently drawn indicator series."""
         return list(self._plots.keys())
+
+    def price_viewbox(self) -> object:
+        return self._price_panel.ax.vb  # type: ignore[attr-defined]
+
+    def update_anchor_marker(
+        self,
+        series_key: str,
+        x_index: int,
+        y_value: float,
+        color: str,
+    ) -> None:
+        self.remove_anchor_marker(series_key)
+        x_value = float(x_index)
+        is_x_indexed = self._price_panel.ax.vb.x_indexed  # type: ignore[attr-defined]
+        if not is_x_indexed and self._bar_index is not None:
+            x_value = float(self._bar_index[x_index].timestamp())
+        marker = pg.TextItem(
+            text="⚓️",
+            color=color,
+            anchor=(0.5, 0.72),
+        )
+        font = QFont()
+        font.setPointSize(14)
+        marker.setFont(font)
+        marker.setPos(x_value, y_value)
+        marker.setZValue(20)
+        self._price_panel.ax.addItem(marker)  # type: ignore[attr-defined]
+        self._anchor_markers[series_key] = marker
+
+    def remove_anchor_marker(self, series_key: str) -> None:
+        if series_key in self._anchor_markers:
+            handle = self._anchor_markers.pop(series_key)
+            self._price_panel.ax.removeItem(handle)  # type: ignore[attr-defined]
+
+    def rename_indicator(self, old_key: str, new_key: str) -> None:
+        if old_key == new_key:
+            return
+        if old_key in self._plots:
+            self._plots[new_key] = self._plots.pop(old_key)
+        if old_key in self._anchor_markers:
+            self._anchor_markers[new_key] = self._anchor_markers.pop(old_key)
 
 
 # ------------------------------------------------------------------

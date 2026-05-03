@@ -35,7 +35,10 @@ price panel's scene. The callback receives a Qt MouseClickEvent; we
 map the scene x-coordinate to a bar index via the price viewbox.
 """
 
-from typing import Callable
+import types
+from typing import Callable, cast
+
+from PyQt6.QtCore import Qt
 
 
 class ChartInteractions:
@@ -64,7 +67,13 @@ class ChartInteractions:
         self._master   = master
         self._bar_clicked_cb:       Callable[[float], None] | None = None
         self._bar_right_clicked_cb: Callable[[float], None] | None = None
+        self._anchor_drag_start_cb:  Callable[[float, float], bool] | None = None
+        self._anchor_drag_move_cb:   Callable[[float], None] | None = None
+        self._anchor_drag_finish_cb: Callable[[float], None] | None = None
+        self._anchor_drag_cancel_cb: Callable[[], None] | None = None
+        self._anchor_drag_active = False
         self._connect()
+        self._patch_drag_handler()
 
     def on_bar_clicked(self, callback: Callable[[float], None]) -> None:
         """Register a handler for left-click on a bar. Receives bar index."""
@@ -73,6 +82,26 @@ class ChartInteractions:
     def on_bar_right_clicked(self, callback: Callable[[float], None]) -> None:
         """Register a handler for right-click on a bar. Receives bar index."""
         self._bar_right_clicked_cb = callback
+
+    def on_anchor_drag_start(self, callback: Callable[[float, float], bool]) -> None:
+        self._anchor_drag_start_cb = callback
+
+    def on_anchor_drag_move(self, callback: Callable[[float], None]) -> None:
+        self._anchor_drag_move_cb = callback
+
+    def on_anchor_drag_finish(self, callback: Callable[[float], None]) -> None:
+        self._anchor_drag_finish_cb = callback
+
+    def on_anchor_drag_cancel(self, callback: Callable[[], None]) -> None:
+        self._anchor_drag_cancel_cb = callback
+
+    def cancel_anchor_drag(self) -> None:
+        if not self._anchor_drag_active:
+            return
+        self._anchor_drag_active = False
+        self._price_ax.vb.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
+        if self._anchor_drag_cancel_cb is not None:
+            self._anchor_drag_cancel_cb()
 
     # ------------------------------------------------------------------
     # Internal
@@ -89,6 +118,68 @@ class ChartInteractions:
         """
         scene = self._master.scene()  # type: ignore[attr-defined]
         scene.sigMouseClicked.connect(self._on_scene_clicked)
+
+    def _patch_drag_handler(self) -> None:
+        viewbox = self._price_ax.vb  # type: ignore[attr-defined]
+        original_mouse_drag = cast(
+            Callable[[object, object | None], None],
+            viewbox.mouseDragEvent,
+        )
+
+        def _mouse_drag_event(self_vb: object, event: object, axis: object | None = None) -> None:
+            button = event.button()  # type: ignore[attr-defined]
+            modifiers = event.modifiers()  # type: ignore[attr-defined]
+            if button != Qt.MouseButton.LeftButton or modifiers != Qt.KeyboardModifier.NoModifier:
+                original_mouse_drag(event, axis)
+                return
+
+            if self._anchor_drag_active:
+                viewbox.win._isMouseLeftDrag = True  # type: ignore[attr-defined]
+                if event.isFinish():  # type: ignore[attr-defined]
+                    if (
+                        self._scene_pos_in_price_panel(event)
+                        and self._anchor_drag_finish_cb is not None
+                    ):
+                        pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
+                        self._anchor_drag_finish_cb(pos.x())
+                    else:
+                        self.cancel_anchor_drag()
+                    self._anchor_drag_active = False
+                    viewbox.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
+                    event.accept()  # type: ignore[attr-defined]
+                    return
+
+                if self._scene_pos_in_price_panel(event):
+                    if self._anchor_drag_move_cb is not None:
+                        pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
+                        self._anchor_drag_move_cb(pos.x())
+                else:
+                    self.cancel_anchor_drag()
+                event.accept()  # type: ignore[attr-defined]
+                return
+
+            if event.isFinish():  # type: ignore[attr-defined]
+                original_mouse_drag(event, axis)
+                return
+
+            if self._anchor_drag_start_cb is not None and self._scene_pos_in_price_panel(event):
+                start_pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
+                if self._anchor_drag_start_cb(start_pos.x(), start_pos.y()):
+                    self._anchor_drag_active = True
+                    viewbox.win._isMouseLeftDrag = True  # type: ignore[attr-defined]
+                    if self._anchor_drag_move_cb is not None:
+                        pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
+                        self._anchor_drag_move_cb(pos.x())
+                    event.accept()  # type: ignore[attr-defined]
+                    return
+
+            original_mouse_drag(event, axis)
+
+        viewbox.mouseDragEvent = types.MethodType(_mouse_drag_event, viewbox)
+
+    def _scene_pos_in_price_panel(self, event: object) -> bool:
+        rect = self._price_ax.vb.sceneBoundingRect()  # type: ignore[attr-defined]
+        return bool(rect.contains(event.scenePos()))  # type: ignore[attr-defined]
 
     def _on_scene_clicked(self, event: object) -> None:
         """
