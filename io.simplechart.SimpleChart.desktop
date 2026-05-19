@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Simple Chart
+Comment=Simple Chart stock charting app
+TryExec=simplechart
+Exec=simplechart
+Icon=simplechart
+Terminal=false
+Categories=Trading;Finance;
+StartupWMClass=io.simplechart.SimpleChart
+StartupNotify=true

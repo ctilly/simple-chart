@@ -35,6 +35,7 @@ Thumbs.db
 
 # misc
 notes/
+__.git-backup
 
 # Claude Code project settings (local only)
 .claude/settings.local.json
