@@ -1,9 +1,10 @@
-![The Simple-Chart UI](img/simple-chart.png)
+![The Simple Chart UI](img/simple-chart.png)
+
 # Simple Chart
 
-Simple Chart is a desktop stock charting application for swing traders. It comes
-with an extensible API for custom indicators built using your AI agent of choice
-(see [Building Custom Indicators](#building-custom-indicators)).
+Simple Chart is a desktop stock charting application for swing traders. It is
+focused on chart review, watchlists, cached market data, and technical
+indicators. It is not a brokerage app and does not manage trades.
 
 Included indicators:
 
@@ -14,173 +15,226 @@ Included indicators:
 - Fibonacci Retracement
 - RSI
 
-The repository is structured for source-based local installation on Linux,
-macOS, and Windows. The intended flow is:
+The app runs locally from this source repository on Windows, macOS, and Linux.
+It uses Python 3.13, PyQt6, finplot, yfinance, numpy, and a local SQLite cache.
 
-1. Clone the repo.
-2. Create a Python 3.13 virtual environment.
-3. Install with `pip install -e .`.
-4. Launch with `simplechart`.
+## Quick Start
 
-No hard-coded personal paths are required.
+The setup process has four basic steps:
 
-## Requirements
+1. Install or select Python 3.13.
+2. Clone this repository.
+3. Install the app into a virtual environment.
+4. Launch Simple Chart.
 
-- Python 3.13
-- `pip`
-- A desktop environment capable of running PyQt6 applications
-- Internet access if dependencies need to be downloaded during install
+Windows users can use `setup.bat`. macOS and Linux users can use `setup.sh`.
+Manual setup commands are also included below.
 
-## Fast Path
+## Windows Setup
 
-### Linux and macOS
+For Windows, the easiest path is the included `setup.bat` file. It installs
+`uv` if needed, creates a Python 3.13 virtual environment, and installs Simple
+Chart in that environment.
+
+1. Clone or download this repository.
+2. Open the project folder in File Explorer.
+3. Double-click `setup.bat`.
+4. Wait until it says setup is complete.
+
+To launch the app after setup, open PowerShell in the project folder and run:
+
+```powershell
+.\.venv\Scripts\simplechart.exe
+```
+
+If you prefer to activate the environment first:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+simplechart
+```
+
+If PowerShell blocks activation scripts, use the direct launch command instead:
+
+```powershell
+.\.venv\Scripts\simplechart.exe
+```
+
+## macOS and Linux Setup
+
+For macOS and Linux, the easiest path is the included `setup.sh` file. It
+installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
+Simple Chart in that environment.
+
+From the project folder, run:
+
+```bash
+sh setup.sh
+```
+
+To launch the app after setup:
+
+```bash
+. .venv/bin/activate
+simplechart
+```
+
+## Manual Setup
+
+Use this path if you prefer managing the environment yourself.
+
+First, create and activate a Python 3.13 virtual environment.
+
+macOS and Linux:
 
 ```bash
 python3.13 -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-simplechart
 ```
 
-If `python3.13` is not available, use whichever command on the machine resolves
-to Python 3.13 and verify with:
-
-```bash
-python --version
-```
-
-### Windows PowerShell
+Windows PowerShell:
 
 ```powershell
 py -3.13 -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+```
+
+Then install and launch the app:
+
+```bash
 python -m pip install --upgrade pip
 python -m pip install -e .
 simplechart
 ```
 
-If `py -3.13` is unavailable, install Python 3.13 first or use an equivalent
-launcher that targets Python 3.13.
+If `python3.13` or `py -3.13` is not available, install Python 3.13 first or use
+a Python version manager such as `pyenv` or `uv`.
 
-## What Gets Installed
+With `uv`, the setup can be as short as:
 
-`pip install -e .` installs:
+```bash
+uv venv --python 3.13
+uv pip install -e .
+```
 
-- Python dependencies from `pyproject.toml`
-- the `simplechart` command defined by the project entry point
+Then activate the environment and launch:
 
-The application stores its local SQLite database in a per-user location by
-default:
+```bash
+. .venv/bin/activate
+simplechart
+```
 
-- Linux and macOS: `~/.simplechart/simplechart.db`
+On Windows, you can launch the `uv` environment directly:
+
+```powershell
+.\.venv\Scripts\simplechart.exe
+```
+
+## Launch Options
+
+By default, Simple Chart stores its local database here:
+
+- macOS and Linux: `~/.simplechart/simplechart.db`
 - Windows: `%USERPROFILE%\.simplechart\simplechart.db`
 
-You can override that location:
+To use a different database file:
 
 ```bash
 simplechart --db /path/to/simplechart.db
 ```
 
-## Linux Desktop Launcher
+The default data provider is `yfinance`:
+
+```bash
+simplechart --provider yfinance
+```
+
+## Optional Linux Launcher
 
 Running from a terminal after `pip install -e .` is enough to use the app.
 
-If you also want a desktop launcher and icon in Linux application menus:
+On Linux, you can also install a desktop menu launcher:
 
 ```bash
 python scripts/install_linux_desktop.py
 ```
 
-That script installs:
-
-- `io.simplechart.SimpleChart.desktop`
-- `assets/simple-chart.svg`
-
-into the current user's XDG data directories. It also rewrites the installed
-desktop file so `Exec` and `TryExec` point at the `simplechart` executable from
-the environment where the script was run.
-
-## Platform Notes
-
-### Linux
-
-- Use the fast path above.
-- If a launcher icon does not appear immediately after installing the desktop
-  entry, log out and back in or restart the shell session for the desktop.
-
-### macOS
-
-- Use the fast path above.
-- This repo currently targets source-based execution, not a native `.app`
-  bundle.
-- If a future release needs a native app bundle, use PyInstaller or py2app.
-
-### Windows
-
-- Use the PowerShell fast path above.
-- This repo currently targets source-based execution, not a native installer.
-- If a future release needs a native installer or shortcut setup, use
-  PyInstaller or another Windows packaging tool.
+Run that command from the same virtual environment where Simple Chart was
+installed. If the launcher does not appear immediately, log out and back in or
+restart the desktop shell.
 
 ## Troubleshooting
 
 ### `simplechart` command not found
 
-The virtual environment is probably not active, or the editable install did not
-complete successfully. Activate the venv and rerun:
+The virtual environment is probably not active, or the install did not finish.
+Activate the environment and reinstall:
 
 ```bash
 python -m pip install -e .
 ```
 
+On Windows, you can also launch directly without activating:
+
+```powershell
+.\.venv\Scripts\simplechart.exe
+```
+
 ### Wrong Python version
 
-This project requires Python 3.13. Check with:
+Simple Chart requires Python 3.13. Check the active Python version:
 
 ```bash
 python --version
 ```
 
-### GUI does not launch
+If the version is not 3.13, create a new virtual environment using Python 3.13
+and reinstall the app.
 
-Common causes:
+### The chart window does not open
 
-- running in a headless environment
-- missing desktop GUI support
-- dependency install failure earlier in the setup flow
+Launch the app from a terminal so any error message stays visible. Common causes
+are an incomplete dependency install, running outside a desktop environment, or
+using the wrong Python environment.
 
-Try launching from the same terminal where the install was performed so any
-Python traceback remains visible.
+### Windows setup cannot install `uv`
 
-## Building Custom Indicators
+The setup script downloads `uv` using PowerShell. If that step fails, the most
+common causes are no internet connection, antivirus quarantine, or organization
+policy blocking PowerShell downloads. The script prints manual install options
+when this happens.
 
-SimpleChart has a stable public API for indicator authors and is designed to be
-extended with the help of an AI agent. Indicators come in two flavors:
+## Custom Indicators
 
-- **Compute** — chart overlays or panel indicators that convert OHLCV data into
-  arrays (SMA, EMA, RSI).
-- **Interactive** — indicators with context-menu actions, drag handles,
-  persistent drawing state, or custom render output (Anchored VWAP).
+Simple Chart includes a public indicator API at `simplechart.api`. Custom
+indicators can be added as project plugins under `indicators/` or as user
+plugins under `~/.simplechart/plugins/`.
 
-To build one:
+For indicator development, install the development extras:
 
-1. Use the development install so tests, type checks, and compiled kernels
-   work:
+```bash
+python -m pip install -e ".[dev]"
+```
 
-   ```bash
-   python -m pip install -e ".[dev]"
-   ```
+Then read:
 
-   Full environment setup details are in [`AGENT-SETUP.md`](AGENT-SETUP.md).
+- `AGENTS.md` for project conventions and the public indicator API contract
+- `docs/skills/compute-indicator.md` for standard computed indicators
+- `docs/skills/interactive-indicator.md` for drawing tools, drag handles,
+  context actions, and persistent indicator state
 
-2. Tell your AI agent which kind of indicator you want, then prompt:
+## Development Notes
 
-   > Read `AGENTS.md` and the appropriate file in `docs/skills/` before
-   > building this indicator.
+This repository is intentionally source-installed. It does not currently ship
+native installers, a macOS `.app` bundle, or a Windows shortcut installer.
 
-   The agent will read the project conventions, ask the right questions, and
-   guide the work step by step.
+Useful commands:
 
-Project conventions, the `simplechart.api` contract, and the full
-indicator-building entry point live in [`AGENTS.md`](AGENTS.md).
+```bash
+python -m pytest
+python -m compileall app chart data indicators simplechart tests
+python scripts/build_compiled.py
+```
+
+Compiled `.so` extension files are build artifacts generated by mypyc for hot
+numeric indicator kernels. The Python source files remain the source of truth.
