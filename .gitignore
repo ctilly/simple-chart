@@ -11,6 +11,7 @@ build/
 .eggs/
 
 # Virtual environments
+.python-version
 .venv/
 venv/
 env/
