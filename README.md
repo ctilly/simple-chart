@@ -1,4 +1,4 @@
-![The Simple Chart UI](img/simple-chart.png)
+![The Simple Chart UI](img/simple-chart.png?v=1)
 
 # Simple Chart
 
