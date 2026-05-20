@@ -2,9 +2,11 @@
 
 # Simple Chart
 
-Simple Chart is a desktop stock charting application for swing traders. It is
-focused on chart review, watchlists, cached market data, and technical
-indicators. It is not a brokerage app and does not manage trades.
+Simple Chart is a free desktop stock charting application for swing traders with a 
+clean and intuitive UI.  No more paying for a subscription to use Anchored VWAP or 
+limited configuration indicators. The app comes with a set of core indicators that
+are fully customizable, along with a robust API for creating [custom indicators](#custom-indicators) 
+using the AI agent of your choice. 
 
 Included indicators:
 
@@ -15,19 +17,20 @@ Included indicators:
 - Fibonacci Retracement
 - RSI
 
-The app runs locally from this source repository on Windows, macOS, and Linux.
-It uses Python 3.13, PyQt6, finplot, yfinance, numpy, and a local SQLite cache.
+The app runs locally from this source repository on Linux, MacOS, and Windows.
+It uses Python 3.13, and was built natively on Linux and seems to work well on
+both MacOS and Windows.
 
 ## Quick Start
 
 The setup process has four basic steps:
 
-1. Install or select Python 3.13.
+1. Create a virtual environment with Python 3.13.
 2. Clone this repository.
-3. Install the app into a virtual environment.
+3. Install the app into the virtual environment.
 4. Launch Simple Chart.
 
-Windows users can use `setup.bat`. macOS and Linux users can use `setup.sh`.
+Windows users can use `setup.bat`. MacOS and Linux users can use `setup.sh`.
 Manual setup commands are also included below.
 
 ## Windows Setup
@@ -60,7 +63,7 @@ If PowerShell blocks activation scripts, use the direct launch command instead:
 .\.venv\Scripts\simplechart.exe
 ```
 
-## macOS and Linux Setup
+## MacOS and Linux Setup
 
 For macOS and Linux, the easiest path is the included `setup.sh` file. It
 installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
