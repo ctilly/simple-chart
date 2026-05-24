@@ -12,12 +12,16 @@ from indicators.avwap import (
 from indicators.avwap.models import AnchorRecord
 from indicators.pivot_points import PivotPointsIndicator
 from indicators._base import (
+    DrawingSession,
+    DrawingToolResult,
     HorizontalSegmentRender,
+    Indicator,
     IndicatorAddMode,
     IndicatorConfig,
     IndicatorRender,
     MarkerRender,
     SeriesRender,
+    VerticalLineRender,
 )
 from indicators._base import ChartEvent, DragSession, HitTestResult
 from indicators._base import IndicatorAction, IndicatorMutation
@@ -25,8 +29,9 @@ from indicators._store_registry import register_store_handler
 from indicators.rsi import RSIIndicator
 from indicators._registry import register_indicator
 from simplechart.api import (
-    IndicatorRender as PublicIndicatorRender,
     ChartEvent as PublicChartEvent,
+    DrawingSession as PublicDrawingSession,
+    DrawingToolResult as PublicDrawingToolResult,
     DragSession as PublicDragSession,
     HorizontalSegmentRender as PublicHorizontalSegmentRender,
     HitTestResult as PublicHitTestResult,
@@ -34,8 +39,10 @@ from simplechart.api import (
     IndicatorAddMode as PublicIndicatorAddMode,
     IndicatorConfig as PublicIndicatorConfig,
     IndicatorMutation as PublicIndicatorMutation,
+    IndicatorRender as PublicIndicatorRender,
     MarkerRender as PublicMarkerRender,
     SeriesRender as PublicSeriesRender,
+    VerticalLineRender as PublicVerticalLineRender,
     register_indicator as public_register_indicator,
     register_store_handler as public_register_store_handler,
 )
@@ -46,7 +53,10 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicHorizontalSegmentRender is HorizontalSegmentRender
     assert PublicMarkerRender is MarkerRender
     assert PublicSeriesRender is SeriesRender
+    assert PublicVerticalLineRender is VerticalLineRender
     assert PublicChartEvent is ChartEvent
+    assert PublicDrawingSession is DrawingSession
+    assert PublicDrawingToolResult is DrawingToolResult
     assert PublicDragSession is DragSession
     assert PublicHitTestResult is HitTestResult
     assert PublicIndicatorAddMode is IndicatorAddMode
@@ -55,6 +65,43 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicIndicatorMutation is IndicatorMutation
     assert public_register_indicator is register_indicator
     assert public_register_store_handler is register_store_handler
+
+
+class _NoOpIndicator(Indicator):
+
+    def name(self) -> str:
+        return "noop"
+
+    def label(self) -> str:
+        return "Noop"
+
+    def default_params(self) -> dict[str, object]:
+        return {}
+
+    def compute(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, object],
+    ) -> dict[str, np.ndarray]:
+        return {}
+
+
+def test_drawing_lifecycle_defaults_are_noops() -> None:
+    indicator = _NoOpIndicator()
+    series = _series()
+    event = ChartEvent(x=1.0, y=100.0, bar_index=1, timestamp_ms=1_700_086_400_000)
+    session = DrawingSession(
+        indicator_name="noop",
+        tool_key="noop",
+        original_params={},
+        working_params={},
+    )
+
+    assert indicator.start_drawing(series, {}, event) == DrawingToolResult()
+    assert indicator.preview_drawing(series, session, event) is None
+    result = indicator.advance_drawing(series, session, event)
+    assert result == DrawingToolResult(session=session)
+    assert indicator.cancel_drawing(session) is None
 
 
 def test_legacy_compute_output_adapts_to_indicator_render() -> None:

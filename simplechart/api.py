@@ -82,12 +82,15 @@ EXPORTS
   SeriesFill                Declares a shaded fill between two series
   SeriesRender              Render description for a line series
   HorizontalSegmentRender   Render description for a horizontal line segment
+  VerticalLineRender        Render description for a full-height vertical line
   MarkerRender              Render description for a chart marker
   IndicatorRender           Render output produced by an indicator
   ChartEvent                Generic chart interaction event
   IndicatorAction           User-triggered indicator action
   IndicatorMutation         Requested indicator state mutation
   IndicatorConfig           Indicator-owned config form for a render series
+  DrawingSession            Active toolbar drawing-tool state
+  DrawingToolResult         Result of advancing a toolbar drawing tool
   IndicatorStoreRecord      Opaque plugin-owned persistence record
   IndicatorStoreContext     Store-handler access to app persistence/state services
   IndicatorStoreHandler     Store-handler protocol
@@ -108,6 +111,8 @@ from indicators._base import (  # noqa: F401
     RENDER_CHART,               # "chart" — default render_target() return value
     ChartEvent,                 # generic chart interaction event
     ChoiceParam,                # dropdown param: ChoiceParam(value, options)
+    DrawingSession,             # active toolbar drawing-tool state
+    DrawingToolResult,          # drawing-tool advance result
     DragSession,                # active indicator drag state
     HitTestResult,              # interactive handle hit-test result
     HorizontalSegmentRender,    # horizontal line segment render primitive
@@ -123,6 +128,7 @@ from indicators._base import (  # noqa: F401
     MarkerRender,               # chart marker render primitive
     SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
     SeriesRender,               # line series render primitive
+    VerticalLineRender,         # full-height vertical line render primitive
 )
 from indicators._registry import (  # noqa: F401
     all_indicators,
@@ -146,6 +152,8 @@ __all__: list[str] = [
     "Bar",
     "ChartEvent",
     "ChoiceParam",
+    "DrawingSession",
+    "DrawingToolResult",
     "DragSession",
     "HitTestResult",
     "HorizontalSegmentRender",
@@ -164,6 +172,7 @@ __all__: list[str] = [
     "RENDER_CHART",
     "SeriesFill",
     "SeriesRender",
+    "VerticalLineRender",
     "bars_for_n_days",
     "register",
     "register_indicator",

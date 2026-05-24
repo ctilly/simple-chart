@@ -60,8 +60,12 @@ from data.cache import Cache
 from data.models import OHLCVSeries, Timeframe
 from data.provider import get_provider
 from simplechart.api import (
+    ChartEvent,
     ChoiceParam,
+    DrawingSession,
+    DrawingToolResult,
     IndicatorAddMode,
+    IndicatorRender,
     LINE_STYLE_OPTIONS,
     RENDER_CHART,
     all_indicators,
@@ -258,6 +262,9 @@ class MainWindow(QMainWindow):
             self._indicator_store,
             _DEFAULT_LOOKBACK_DAYS,
         )
+        self._active_drawing_tool: str | None = None
+        self._drawing_session: DrawingSession | None = None
+        self._preview_keys: set[str] = set()
         for name, params in INITIAL_INDICATORS:
             self._state.indicators.append(
                 IndicatorState(name=name, params=dict(params))
@@ -311,15 +318,19 @@ class MainWindow(QMainWindow):
             on_configure=self._on_indicator_configure,
             on_remove=self._on_indicator_remove,
             on_add=self._on_add_indicator,
+            on_drawing_tool=self._on_drawing_tool_selected,
+            drawing_tools=self._drawing_tool_entries(),
         )
 
         # Wire chart interactions.
         self._chart.interactions.on_bar_clicked(self._on_bar_clicked)
         self._chart.interactions.on_bar_right_clicked(self._on_bar_right_clicked)
+        self._chart.interactions.on_mouse_move(self._on_mouse_move)
         self._chart.interactions.on_drag_start(self._on_drag_start)
         self._chart.interactions.on_drag_move(self._on_drag_move)
         self._chart.interactions.on_drag_finish(self._on_drag_finish)
         self._chart.interactions.on_drag_cancel(self._on_drag_cancel)
+        self._chart.on_cancel(self._on_cancel_shortcut)
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
@@ -530,6 +541,11 @@ class MainWindow(QMainWindow):
             self._chart.legend.update_color(segment.key, segment.color)
             self._chart.legend.set_indicator_visible(segment.key, visible)
 
+        for line in render.vertical_lines:
+            visible = ind_state.series_visibility.get(line.key, ind_state.visible)
+            line.visible = visible and line.visible
+            pm.update_vertical_line(line)
+
         marker_keys = {marker.key for marker in render.markers}
         for marker in render.markers:
             visible = ind_state.series_visibility.get(marker.key, ind_state.visible)
@@ -579,6 +595,12 @@ class MainWindow(QMainWindow):
                 self._chart.legend.update_color(segment.key, segment.color)
                 self._chart.legend.set_indicator_visible(segment.key, visible)
 
+            for line in render_pass.render.vertical_lines:
+                rendered_keys.add(line.key)
+                visible = ind_state.series_visibility.get(line.key, ind_state.visible)
+                line.visible = visible and line.visible
+                pm.update_vertical_line(line)
+
             marker_keys = {marker.key for marker in render_pass.render.markers}
             for marker in render_pass.render.markers:
                 visible = ind_state.series_visibility.get(marker.key, ind_state.visible)
@@ -588,13 +610,116 @@ class MainWindow(QMainWindow):
                 if series_key not in marker_keys:
                     pm.remove_marker(series_key)
 
+    def _draw_preview_render(self, render_pass: IndicatorRenderPass) -> None:
+        pm = self._chart.plot_manager
+        new_keys = self._render_keys(render_pass.render)
+        for stale_key in self._preview_keys - new_keys:
+            pm.remove_indicator(stale_key)
+            pm.remove_marker(stale_key)
+
+        with pm.preserving_viewport():
+            for series_render in render_pass.render.series:
+                pm.update_indicator(
+                    series_render.key,
+                    series_render.values,
+                    series_render.color,
+                    series_render.line_width,
+                    series_render.line_style,
+                    series_render.render_target,
+                )
+                pm.set_visible(series_render.key, series_render.visible)
+            for segment in render_pass.render.segments:
+                pm.update_horizontal_segment(segment)
+            for line in render_pass.render.vertical_lines:
+                pm.update_vertical_line(line)
+            for marker in render_pass.render.markers:
+                pm.update_marker(marker)
+        self._preview_keys = new_keys
+        pm.refresh(preserve_view=True)
+
+    def _clear_preview_render(self) -> None:
+        if not self._preview_keys:
+            return
+        pm = self._chart.plot_manager
+        with pm.preserving_viewport():
+            for key in self._preview_keys:
+                pm.remove_indicator(key)
+                pm.remove_marker(key)
+        self._preview_keys.clear()
+        pm.refresh(preserve_view=True)
+
+    def _render_keys(self, render: IndicatorRender) -> set[str]:
+        keys = {series.key for series in render.series}
+        keys.update(segment.key for segment in render.segments)
+        keys.update(line.key for line in render.vertical_lines)
+        keys.update(marker.key for marker in render.markers)
+        return keys
+
     # ------------------------------------------------------------------
     # Chart interaction workflow
     # ------------------------------------------------------------------
 
-    def _on_bar_clicked(self, x_pos: float) -> None:
-        """Left-click: reserved for future use (e.g. bar detail). No action."""
-        pass
+    def _on_bar_clicked(self, x_pos: float, y_pos: float) -> None:
+        if self._current_series is None or self._active_drawing_tool is None:
+            return
+        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
+        if self._drawing_session is None:
+            result = self._indicator_runtime.start_drawing(
+                self._active_drawing_tool,
+                self._current_series,
+                event,
+            )
+            self._handle_drawing_result(result)
+            return
+        result = self._indicator_runtime.advance_drawing(
+            self._current_series,
+            self._drawing_session,
+            event,
+        )
+        self._handle_drawing_result(result)
+
+    def _on_mouse_move(self, x_pos: float, y_pos: float) -> None:
+        if self._current_series is None or self._drawing_session is None:
+            return
+        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
+        render_pass = self._indicator_runtime.preview_drawing(
+            self._current_series,
+            self._drawing_session,
+            event,
+        )
+        if render_pass is not None:
+            self._draw_preview_render(render_pass)
+
+    def _handle_drawing_result(self, result: DrawingToolResult) -> None:
+        if result.render is not None and self._current_series is not None:
+            render_pass = IndicatorRenderPass(
+                state=IndicatorState(
+                    name=self._drawing_session.indicator_name if self._drawing_session else "",
+                    params=self._drawing_session.working_params if self._drawing_session else {},
+                    series_keys=list(self._render_keys(result.render)),
+                ),
+                render=result.render,
+                render_target=RENDER_CHART,
+            )
+            self._draw_preview_render(render_pass)
+        if result.cancel or result.done:
+            self._drawing_session = None
+            self._clear_preview_render()
+            if result.deactivate_tool:
+                self._active_drawing_tool = None
+            if result.mutation is not None:
+                self._reload_indicators(draw_bars=False, preserve_view=True)
+            return
+        self._drawing_session = result.session
+
+    def _on_cancel_shortcut(self) -> None:
+        if self._drawing_session is None:
+            return
+        mutation = self._indicator_runtime.cancel_drawing(self._drawing_session)
+        self._drawing_session = None
+        self._clear_preview_render()
+        if mutation is not None:
+            self._reload_indicators(draw_bars=False, preserve_view=True)
 
     def _on_drag_start(self, x_pos: float, y_pos: float) -> bool:
         if self._current_series is None:
@@ -628,15 +753,18 @@ class MainWindow(QMainWindow):
         self._indicator_runtime.cancel_drag()
         self._reload_indicators(draw_bars=False, preserve_view=True)
 
-    def _on_bar_right_clicked(self, x_pos: float) -> None:
+    def _on_bar_right_clicked(self, x_pos: float, y_pos: float) -> None:
         """Right-click on a bar: show context menu."""
         if self._current_series is None:
             return
         event = self._indicator_runtime.chart_event(
             self._current_series,
             x_pos,
+            y_pos,
             button="right",
         )
+        if self._drawing_session is None and self._show_drawing_context_menu(event):
+            return
         actions = self._indicator_runtime.context_actions(self._current_series, event)
         if not actions:
             return
@@ -655,6 +783,28 @@ class MainWindow(QMainWindow):
                 )
                 self._reload_indicators()
                 return
+
+    def _show_drawing_context_menu(self, event: ChartEvent) -> bool:
+        if self._current_series is None:
+            return False
+        hit = self._indicator_runtime.drawing_hit_test(self._current_series, event)
+        if hit is None:
+            return False
+
+        menu = QMenu(self)
+        configure_action = None
+        if self._indicator_runtime.config_request(hit.handle_key) is not None:
+            configure_action = menu.addAction("Configure...")
+        remove_action = menu.addAction("Remove")
+        selected = menu.exec(QCursor.pos())
+
+        if configure_action is not None and selected == configure_action:
+            self._on_indicator_configure(hit.handle_key)
+            return True
+        if selected == remove_action:
+            self._on_indicator_remove(hit.handle_key)
+            return True
+        return True
 
     def _reload_indicators(
         self,
@@ -741,6 +891,11 @@ class MainWindow(QMainWindow):
             segment.key
             for render_pass in render_passes
             for segment in render_pass.render.segments
+        )
+        active_series_keys.update(
+            line.key
+            for render_pass in render_passes
+            for line in render_pass.render.vertical_lines
         )
         active_marker_keys: set[str] = {
             marker.key
@@ -860,6 +1015,21 @@ class MainWindow(QMainWindow):
                 IndicatorState(name=name, params=dialog.result_params())
             )
             self._reload_indicators()
+
+    def _drawing_tool_entries(self) -> list[tuple[str, str]]:
+        registry = all_indicators()
+        return [
+            (name, cls().label())
+            for name, cls in sorted(registry.items())
+            if cls().add_mode() == IndicatorAddMode.TOOLBAR
+        ]
+
+    def _on_drawing_tool_selected(self, indicator_name: str) -> None:
+        if self._drawing_session is not None:
+            self._indicator_runtime.cancel_drawing(self._drawing_session)
+            self._drawing_session = None
+            self._clear_preview_render()
+        self._active_drawing_tool = indicator_name
 
     def closeEvent(self, event: object) -> None:
         """Clean up on close."""

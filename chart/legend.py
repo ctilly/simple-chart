@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QToolButton,
     QWidget,
 )
 
@@ -109,6 +110,8 @@ class ChartLegend(QWidget):
         on_configure: Callable[[str], None],
         on_remove:    Callable[[str], None],
         on_add:       Callable[[], None],
+        on_drawing_tool: Callable[[str], None],
+        drawing_tools: list[tuple[str, str]],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -135,6 +138,42 @@ class ChartLegend(QWidget):
         add_btn.clicked.connect(on_add)
         layout.addWidget(add_btn)
 
+        self._tool_palette = QWidget(self)
+        palette_layout = QHBoxLayout(self._tool_palette)
+        palette_layout.setContentsMargins(0, 0, 0, 0)
+        palette_layout.setSpacing(3)
+        self._tool_palette.setLayout(palette_layout)
+        for tool_name, tool_label in drawing_tools:
+            tool_btn = QPushButton(tool_label)
+            tool_btn.setFixedHeight(20)
+            tool_btn.setToolTip(tool_label)
+            tool_btn.setStyleSheet(
+                "QPushButton { color: #555555; background: transparent; "
+                "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 6px; }"
+                "QPushButton:hover { background: #eeeeee; }"
+            )
+            tool_btn.clicked.connect(
+                lambda checked=False, name=tool_name: on_drawing_tool(name)
+            )
+            palette_layout.addWidget(tool_btn)
+        self._tool_palette.setVisible(False)
+
+        layout.addStretch(1)
+        layout.addWidget(self._tool_palette)
+
+        tools_btn = QToolButton()
+        tools_btn.setText("Tools")
+        tools_btn.setFixedHeight(20)
+        tools_btn.setToolTip("Drawing tools")
+        tools_btn.setEnabled(bool(drawing_tools))
+        tools_btn.setStyleSheet(
+            "QToolButton { color: #555555; background: transparent; "
+            "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 6px; }"
+            "QToolButton:hover { background: #eeeeee; }"
+        )
+        tools_btn.clicked.connect(self._toggle_tool_palette)
+        layout.addWidget(tools_btn)
+
     def add_indicator(
         self,
         series_key: str,
@@ -153,7 +192,9 @@ class ChartLegend(QWidget):
             self._on_remove,
         )
         self._labels[series_key] = label
-        self.layout().addWidget(label)  # type: ignore[union-attr]
+        layout = self.layout()
+        assert layout is not None
+        layout.insertWidget(max(1, layout.count() - 3), label)
 
     def remove_indicator(self, series_key: str) -> None:
         """Remove an indicator label from the legend."""
@@ -177,3 +218,6 @@ class ChartLegend(QWidget):
         """Update the color of an existing label (no-op if key not present)."""
         if series_key in self._labels:
             self._labels[series_key].set_color(color)
+
+    def _toggle_tool_palette(self) -> None:
+        self._tool_palette.setVisible(not self._tool_palette.isVisible())

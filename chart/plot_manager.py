@@ -49,7 +49,7 @@ from chart.viewport import (
     unlock_x_pan,
 )
 from data.models import OHLCVSeries
-from simplechart.api import HorizontalSegmentRender, MarkerRender
+from simplechart.api import HorizontalSegmentRender, MarkerRender, VerticalLineRender
 
 _LINE_STYLES: dict[str, Qt.PenStyle] = {
     "solid":    Qt.PenStyle.SolidLine,
@@ -80,6 +80,7 @@ class PlotManager:
         # Keys follow the render keys produced by indicators.
         self._plots: dict[str, object] = {}
         self._segments: dict[str, tuple[object, object]] = {}
+        self._vertical_lines: dict[str, tuple[object, object]] = {}
         self._markers: dict[str, object] = {}
 
         # Candle and volume handles are separate — they are always present
@@ -244,6 +245,25 @@ class PlotManager:
         target_ax.addItem(item)  # type: ignore[attr-defined]
         self._segments[segment.key] = (item, target_ax)
 
+    def update_vertical_line(self, line: VerticalLineRender) -> None:
+        self.remove_vertical_line(line.key)
+        target_ax = self._resolve_ax(line.render_target)
+        x_value = self._x_value_for_index(line.x_index)
+        pen_style = _LINE_STYLES.get(line.line_style, Qt.PenStyle.SolidLine)
+        item = pg.InfiniteLine(
+            pos=x_value,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(
+                color=line.color,
+                width=line.line_width,
+                style=pen_style,
+            ),
+        )
+        item.setVisible(line.visible)
+        target_ax.addItem(item)  # type: ignore[attr-defined]
+        self._vertical_lines[line.key] = (item, target_ax)
+
     @contextmanager
     def preserving_viewport(self) -> Iterator[None]:
         snapshot = snapshot_viewports(self._viewport_axes())
@@ -284,6 +304,7 @@ class PlotManager:
             handle = self._plots.pop(series_key)
             handle.ax.removeItem(handle)  # type: ignore[attr-defined]
         self.remove_horizontal_segment(series_key)
+        self.remove_vertical_line(series_key)
         self.remove_marker(series_key)
 
     def set_visible(self, series_key: str, visible: bool) -> None:
@@ -297,6 +318,8 @@ class PlotManager:
             self._plots[series_key].setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._segments:
             self._segments[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
+        if series_key in self._vertical_lines:
+            self._vertical_lines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._markers:
             self._markers[series_key].setVisible(visible)  # type: ignore[attr-defined]
 
@@ -313,6 +336,9 @@ class PlotManager:
         for item, target_ax in self._segments.values():
             target_ax.removeItem(item)  # type: ignore[attr-defined]
         self._segments.clear()
+        for item, target_ax in self._vertical_lines.values():
+            target_ax.removeItem(item)  # type: ignore[attr-defined]
+        self._vertical_lines.clear()
         for handle in self._markers.values():
             self._price_panel.ax.removeItem(handle)
         self._markers.clear()
@@ -328,6 +354,7 @@ class PlotManager:
 
         self._plots.clear()
         self._segments.clear()
+        self._vertical_lines.clear()
         self._markers.clear()
         self._candle_plot = None
         self._volume_plot = None
@@ -366,7 +393,11 @@ class PlotManager:
 
     def active_series_keys(self) -> list[str]:
         """Return the keys of all currently drawn indicator series."""
-        return list(self._plots.keys()) + list(self._segments.keys())
+        return (
+            list(self._plots.keys())
+            + list(self._segments.keys())
+            + list(self._vertical_lines.keys())
+        )
 
     def active_marker_keys(self) -> list[str]:
         return list(self._markers.keys())
@@ -408,6 +439,11 @@ class PlotManager:
     def remove_horizontal_segment(self, segment_key: str) -> None:
         if segment_key in self._segments:
             item, target_ax = self._segments.pop(segment_key)
+            target_ax.removeItem(item)  # type: ignore[attr-defined]
+
+    def remove_vertical_line(self, line_key: str) -> None:
+        if line_key in self._vertical_lines:
+            item, target_ax = self._vertical_lines.pop(line_key)
             target_ax.removeItem(item)  # type: ignore[attr-defined]
 
     def remove_marker(self, marker_key: str) -> None:

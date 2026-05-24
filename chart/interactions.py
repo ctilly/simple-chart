@@ -8,13 +8,12 @@ input. It translates raw finplot/Qt events into meaningful signals that
 the controller can act on.
 
 Signals emitted:
-  bar_clicked(x_pos: float)
+  bar_clicked(x_pos: float, y_pos: float)
       User left-clicked a bar. x_pos is finplot's raw x coordinate, which
       is a bar index (0, 1, 2, ...) when x_indexed=True (the default).
-      The controller resolves the bar index to a UTC timestamp using the
-      currently loaded series.
+      y_pos is the price-axis coordinate.
 
-  bar_right_clicked(x_pos: float)
+  bar_right_clicked(x_pos: float, y_pos: float)
       Same as bar_clicked but for right-click.
 
 The chart layer emits signals; it does NOT call the controller directly.
@@ -49,8 +48,8 @@ class ChartInteractions:
     controller registers its handler functions via on_bar_clicked() and
     on_bar_right_clicked() before the chart is shown.
 
-    Callbacks receive a float bar index. The controller converts this to
-    a UTC millisecond timestamp using the currently loaded series.
+    Callbacks receive chart coordinates. The controller converts x to a
+    UTC millisecond timestamp using the currently loaded series.
     """
 
     def __init__(self, price_ax: object, master: object) -> None:
@@ -65,21 +64,22 @@ class ChartInteractions:
         """
         self._price_ax = price_ax
         self._master   = master
-        self._bar_clicked_cb:       Callable[[float], None] | None = None
-        self._bar_right_clicked_cb: Callable[[float], None] | None = None
+        self._bar_clicked_cb:       Callable[[float, float], None] | None = None
+        self._bar_right_clicked_cb: Callable[[float, float], None] | None = None
         self._drag_start_cb:  Callable[[float, float], bool] | None = None
         self._drag_move_cb:   Callable[[float, float], None] | None = None
         self._drag_finish_cb: Callable[[float, float], None] | None = None
         self._drag_cancel_cb: Callable[[], None] | None = None
+        self._mouse_move_cb:  Callable[[float, float], None] | None = None
         self._drag_active = False
         self._connect()
         self._patch_drag_handler()
 
-    def on_bar_clicked(self, callback: Callable[[float], None]) -> None:
+    def on_bar_clicked(self, callback: Callable[[float, float], None]) -> None:
         """Register a handler for left-click on a bar. Receives bar index."""
         self._bar_clicked_cb = callback
 
-    def on_bar_right_clicked(self, callback: Callable[[float], None]) -> None:
+    def on_bar_right_clicked(self, callback: Callable[[float, float], None]) -> None:
         """Register a handler for right-click on a bar. Receives bar index."""
         self._bar_right_clicked_cb = callback
 
@@ -95,14 +95,18 @@ class ChartInteractions:
     def on_drag_cancel(self, callback: Callable[[], None]) -> None:
         self._drag_cancel_cb = callback
 
-    def cancel_drag(self) -> None:
+    def on_mouse_move(self, callback: Callable[[float, float], None]) -> None:
+        self._mouse_move_cb = callback
+
+    def cancel_drag(self) -> bool:
         if not self._drag_active:
-            return
+            return False
         self._drag_active = False
         self._set_indicator_drag_locked(False)
         self._price_ax.vb.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
         if self._drag_cancel_cb is not None:
             self._drag_cancel_cb()
+        return True
 
     # ------------------------------------------------------------------
     # Internal
@@ -119,6 +123,7 @@ class ChartInteractions:
         """
         scene = self._master.scene()  # type: ignore[attr-defined]
         scene.sigMouseClicked.connect(self._on_scene_clicked)
+        scene.sigMouseMoved.connect(self._on_scene_mouse_moved)
 
     def _patch_drag_handler(self) -> None:
         viewbox = self._price_ax.vb  # type: ignore[attr-defined]
@@ -217,13 +222,23 @@ class ChartInteractions:
         # pos.x() is a bar index float (e.g. 147.3), not a Unix timestamp.
         pos = self._price_ax.vb.mapSceneToView(event.scenePos())  # type: ignore[attr-defined]
         x_pos: float = pos.x()
+        y_pos: float = pos.y()
 
         button = event.button()  # type: ignore[attr-defined]
 
         if button == Qt.MouseButton.LeftButton:
             if self._bar_clicked_cb is not None:
-                self._bar_clicked_cb(x_pos)
+                self._bar_clicked_cb(x_pos, y_pos)
 
         elif button == Qt.MouseButton.RightButton:
             if self._bar_right_clicked_cb is not None:
-                self._bar_right_clicked_cb(x_pos)
+                self._bar_right_clicked_cb(x_pos, y_pos)
+
+    def _on_scene_mouse_moved(self, scene_pos: object) -> None:
+        if self._mouse_move_cb is None:
+            return
+        rect = self._price_ax.vb.sceneBoundingRect()  # type: ignore[attr-defined]
+        if not rect.contains(scene_pos):  # type: ignore[attr-defined]
+            return
+        pos = self._price_ax.vb.mapSceneToView(scene_pos)  # type: ignore[attr-defined]
+        self._mouse_move_cb(pos.x(), pos.y())

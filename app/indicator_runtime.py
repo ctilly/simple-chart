@@ -9,9 +9,13 @@ from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 from simplechart.api import (
     ChartEvent,
+    DrawingSession,
+    DrawingToolResult,
     DragSession,
+    HitTestResult,
     IndicatorAction,
     IndicatorConfig,
+    IndicatorAddMode,
     IndicatorMutation,
     IndicatorRender,
     all_indicators,
@@ -74,6 +78,8 @@ class IndicatorRuntime:
             series_render.key for series_render in render.series
         ] + [
             segment.key for segment in render.segments
+        ] + [
+            line.key for line in render.vertical_lines
         ]
         ind_state.series_visibility = {
             key: ind_state.series_visibility[key]
@@ -208,6 +214,103 @@ class IndicatorRuntime:
             self.apply_mutation(mutation)
         return mutation
 
+    def start_drawing(
+        self,
+        indicator_name: str,
+        series: OHLCVSeries,
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        indicator = get_indicator(indicator_name)
+        ind_state = self._state.get_indicator(indicator_name)
+        params = ind_state.params if ind_state is not None else indicator.default_params()
+        params = self._indicator_store.params_for(indicator_name, params)
+        result = indicator.start_drawing(series, params, event)
+        if result.mutation is not None:
+            self.apply_mutation(result.mutation)
+        return result
+
+    def hit_test(
+        self,
+        series: OHLCVSeries,
+        event: ChartEvent,
+    ) -> HitTestResult | None:
+        best_hit = None
+        for ind_state in self._state.indicators:
+            indicator = get_indicator(ind_state.name)
+            params = self._params_for_state(ind_state)
+            visible_keys = {
+                key
+                for key in ind_state.series_keys
+                if ind_state.series_visibility.get(key, ind_state.visible)
+            }
+            hit = indicator.hit_test(series, params, event, visible_keys)
+            if hit is None:
+                continue
+            if best_hit is None or hit.priority > best_hit.priority:
+                best_hit = hit
+        return best_hit
+
+    def drawing_hit_test(
+        self,
+        series: OHLCVSeries,
+        event: ChartEvent,
+    ) -> HitTestResult | None:
+        best_hit = None
+        for ind_state in self._state.indicators:
+            indicator = get_indicator(ind_state.name)
+            if indicator.add_mode() != IndicatorAddMode.TOOLBAR:
+                continue
+            params = self._params_for_state(ind_state)
+            visible_keys = {
+                key
+                for key in ind_state.series_keys
+                if ind_state.series_visibility.get(key, ind_state.visible)
+            }
+            hit = indicator.hit_test(series, params, event, visible_keys)
+            if hit is None:
+                continue
+            if best_hit is None or hit.priority > best_hit.priority:
+                best_hit = hit
+        return best_hit
+
+    def preview_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> IndicatorRenderPass | None:
+        indicator = get_indicator(session.indicator_name)
+        render = indicator.preview_drawing(series, session, event)
+        if render is None:
+            return None
+        return IndicatorRenderPass(
+            state=self._drawing_state(session, render),
+            render=render,
+            render_target=indicator.render_target(),
+        )
+
+    def advance_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        indicator = get_indicator(session.indicator_name)
+        result = indicator.advance_drawing(series, session, event)
+        if result.mutation is not None:
+            self.apply_mutation(result.mutation)
+        return result
+
+    def cancel_drawing(
+        self,
+        session: DrawingSession,
+    ) -> IndicatorMutation | None:
+        indicator = get_indicator(session.indicator_name)
+        mutation = indicator.cancel_drawing(session)
+        if mutation is not None:
+            self.apply_mutation(mutation)
+        return mutation
+
     def apply_mutation(self, mutation: IndicatorMutation) -> None:
         self._indicator_store.apply(mutation)
 
@@ -290,6 +393,24 @@ class IndicatorRuntime:
 
     def _params_for_state(self, ind_state: IndicatorState) -> dict[str, Any]:
         return self._indicator_store.params_for(ind_state.name, ind_state.params)
+
+    def _drawing_state(
+        self,
+        session: DrawingSession,
+        render: IndicatorRender,
+    ) -> IndicatorState:
+        keys = [
+            series_render.key for series_render in render.series
+        ] + [
+            segment.key for segment in render.segments
+        ] + [
+            line.key for line in render.vertical_lines
+        ]
+        return IndicatorState(
+            name=session.indicator_name,
+            params=session.working_params,
+            series_keys=keys,
+        )
 
     def _daily_bars_for(self, series: OHLCVSeries) -> list[Bar]:
         if not series.timeframe.is_intraday:

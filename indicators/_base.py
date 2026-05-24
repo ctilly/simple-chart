@@ -161,6 +161,18 @@ class HorizontalSegmentRender:
 
 
 @dataclass
+class VerticalLineRender:
+    key: str
+    x_index: float
+    label: str
+    color: str
+    line_width: float
+    line_style: str = "solid"
+    render_target: str = RENDER_CHART
+    visible: bool = True
+
+
+@dataclass
 class MarkerRender:
     key: str
     x_index: int
@@ -176,6 +188,7 @@ class MarkerRender:
 class IndicatorRender:
     series: list[SeriesRender] = field(default_factory=list)
     segments: list[HorizontalSegmentRender] = field(default_factory=list)
+    vertical_lines: list[VerticalLineRender] = field(default_factory=list)
     markers: list[MarkerRender] = field(default_factory=list)
 
 
@@ -223,6 +236,24 @@ class DragSession:
     handle_key: str
     original_params: dict[str, Any]
     working_params: dict[str, Any]
+
+
+@dataclass
+class DrawingSession:
+    indicator_name: str
+    tool_key: str
+    original_params: dict[str, Any]
+    working_params: dict[str, Any]
+
+
+@dataclass
+class DrawingToolResult:
+    session: DrawingSession | None = None
+    render: IndicatorRender | None = None
+    mutation: IndicatorMutation | None = None
+    done: bool = False
+    cancel: bool = False
+    deactivate_tool: bool = False
 
 
 class IndicatorStoreContext(Protocol):
@@ -406,6 +437,36 @@ class Indicator(ABC):
     def cancel_drag(
         self,
         session: DragSession,
+    ) -> IndicatorMutation | None:
+        return None
+
+    def start_drawing(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        return DrawingToolResult()
+
+    def preview_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> IndicatorRender | None:
+        return None
+
+    def advance_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        return DrawingToolResult(session=session)
+
+    def cancel_drawing(
+        self,
+        session: DrawingSession,
     ) -> IndicatorMutation | None:
         return None
 

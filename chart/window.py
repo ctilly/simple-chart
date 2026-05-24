@@ -146,6 +146,7 @@ class ChartWidget(QWidget):
             IndicatorPanelSlot(Panel(axes[i + 2], PanelType.INDICATOR, ratio=0))
             for i in range(3)
         ]
+        self._cancel_cb: Callable[[], None] | None = None
 
         # Hide all indicator slots — they become visible only when assigned.
         for slot in self._indicator_slots:
@@ -166,6 +167,8 @@ class ChartWidget(QWidget):
             on_configure=lambda _: None,
             on_remove=lambda _: None,
             on_add=lambda: None,
+            on_drawing_tool=lambda _: None,
+            drawing_tools=[],
             parent=self,
         )
 
@@ -210,7 +213,10 @@ class ChartWidget(QWidget):
         fplt.refresh()
 
     def _cancel_drag(self) -> None:
-        self._interactions.cancel_drag()
+        if self._interactions.cancel_drag():
+            return
+        if self._cancel_cb is not None:
+            self._cancel_cb()
 
     def _all_axes(self) -> list[object]:
         return [self._price_panel.ax, self._volume_panel.ax] + [
@@ -290,6 +296,8 @@ class ChartWidget(QWidget):
         on_configure: Callable[[str], None],
         on_remove:    Callable[[str], None],
         on_add:       Callable[[], None],
+        on_drawing_tool: Callable[[str], None],
+        drawing_tools: list[tuple[str, str]],
     ) -> None:
         """
         Replace the placeholder legend callbacks with real ones from the
@@ -300,6 +308,8 @@ class ChartWidget(QWidget):
             on_configure=on_configure,
             on_remove=on_remove,
             on_add=on_add,
+            on_drawing_tool=on_drawing_tool,
+            drawing_tools=drawing_tools,
             parent=self,
         )
         layout = self.layout()
@@ -311,3 +321,6 @@ class ChartWidget(QWidget):
         layout.replaceWidget(old_widget, new_legend)
         old_widget.deleteLater()
         self._legend = new_legend
+
+    def on_cancel(self, callback: Callable[[], None]) -> None:
+        self._cancel_cb = callback

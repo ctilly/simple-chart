@@ -12,10 +12,15 @@ from data.models import Bar, OHLCVSeries, Timeframe
 import indicators.avwap  # noqa: F401
 import indicators.sma  # noqa: F401
 from simplechart.api import (
+    ChartEvent,
+    DrawingSession,
+    DrawingToolResult,
     HorizontalSegmentRender,
     Indicator,
+    IndicatorAddMode,
     IndicatorMutation,
     IndicatorRender,
+    VerticalLineRender,
     register_indicator,
 )
 from indicators.avwap.anchor_store import AvwapAnchorStore
@@ -61,6 +66,152 @@ class SegmentOnlyIndicator(Indicator):
 
 
 register_indicator(SegmentOnlyIndicator)
+
+
+class VerticalLineOnlyIndicator(Indicator):
+
+    def name(self) -> str:
+        return "test_vertical_line_only"
+
+    def label(self) -> str:
+        return "Test Vertical Line Only"
+
+    def default_params(self) -> dict[str, Any]:
+        return {}
+
+    def compute(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+    ) -> dict[str, np.ndarray]:
+        return {}
+
+    def render(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+    ) -> IndicatorRender:
+        return IndicatorRender(
+            vertical_lines=[
+                VerticalLineRender(
+                    key="test_vertical_line_only_line",
+                    x_index=1.0,
+                    label="Test Vertical Line Only",
+                    color="#ffffff",
+                    line_width=1.0,
+                )
+            ]
+        )
+
+
+register_indicator(VerticalLineOnlyIndicator)
+
+
+class DrawingFixtureIndicator(Indicator):
+
+    def name(self) -> str:
+        return "test_drawing_fixture"
+
+    def label(self) -> str:
+        return "Test Drawing Fixture"
+
+    def default_params(self) -> dict[str, Any]:
+        return {"starts": 0}
+
+    def add_mode(self) -> IndicatorAddMode:
+        return IndicatorAddMode.TOOLBAR
+
+    def compute(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+    ) -> dict[str, np.ndarray]:
+        return {}
+
+    def start_drawing(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        return DrawingToolResult(
+            session=DrawingSession(
+                indicator_name=self.name(),
+                tool_key="line",
+                original_params=dict(params),
+                working_params={"start_x": event.x, "start_y": event.y},
+            )
+        )
+
+    def preview_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> IndicatorRender | None:
+        return IndicatorRender(
+            segments=[
+                HorizontalSegmentRender(
+                    key="test_drawing_preview",
+                    x_start=float(session.working_params["start_x"]),
+                    x_end=event.x,
+                    y_value=event.y,
+                    label="Preview",
+                    color="#00ff00",
+                    line_width=1.0,
+                )
+            ]
+        )
+
+    def advance_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+        event: ChartEvent,
+    ) -> DrawingToolResult:
+        return DrawingToolResult(
+            mutation=IndicatorMutation(
+                indicator_name=self.name(),
+                operation="commit",
+                payload={"x": event.x, "y": event.y},
+            ),
+            done=True,
+        )
+
+    def cancel_drawing(
+        self,
+        session: DrawingSession,
+    ) -> IndicatorMutation | None:
+        return IndicatorMutation(
+            indicator_name=self.name(),
+            operation="cancel",
+            payload={"tool_key": session.tool_key},
+        )
+
+
+register_indicator(DrawingFixtureIndicator)
+
+
+class RecordingStore:
+
+    def __init__(self) -> None:
+        self.mutations: list[IndicatorMutation] = []
+
+    def load_for_symbol(self, symbol: str) -> None:
+        pass
+
+    def apply(self, mutation: IndicatorMutation) -> None:
+        self.mutations.append(mutation)
+
+    def prepare_active_indicators(self) -> None:
+        pass
+
+    def params_for(
+        self,
+        indicator_name: str,
+        base_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        return base_params
 
 
 def test_runtime_adds_avwap_state_when_anchors_exist(tmp_path: Path) -> None:
@@ -127,6 +278,82 @@ def test_runtime_tracks_horizontal_segment_keys_and_visibility(
     assert len(passes) == 1
     assert state.indicators[0].series_keys == ["test_segment_only_line"]
     assert state.indicators[0].series_visibility == {"test_segment_only_line": False}
+
+
+def test_runtime_tracks_vertical_line_keys_and_visibility(tmp_path: Path) -> None:
+    state = State(symbol="SPY")
+    state.indicators = [
+        IndicatorState(
+            name="test_vertical_line_only",
+            params={},
+            series_visibility={"test_vertical_line_only_line": False, "stale": True},
+        )
+    ]
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        runtime = _runtime(state, cache)
+        passes = runtime.render_all(_series())
+
+    assert len(passes) == 1
+    assert state.indicators[0].series_keys == ["test_vertical_line_only_line"]
+    assert state.indicators[0].series_visibility == {"test_vertical_line_only_line": False}
+
+
+def test_runtime_routes_toolbar_drawing_lifecycle(tmp_path: Path) -> None:
+    state = State(symbol="SPY")
+    series = _series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = RecordingStore()
+        runtime = _runtime(state, cache, store)
+        start = runtime.start_drawing(
+            "test_drawing_fixture",
+            series,
+            runtime.chart_event(series, 1.0, 100.0),
+        )
+        session = start.session
+        assert session is not None
+        assert session.working_params == {"start_x": 1.0, "start_y": 100.0}
+
+        preview = runtime.preview_drawing(
+            series,
+            session,
+            runtime.chart_event(series, 2.0, 101.0),
+        )
+        assert preview is not None
+        assert preview.state.name == "test_drawing_fixture"
+        assert preview.state.series_keys == ["test_drawing_preview"]
+        assert preview.render.segments[0].x_start == 1.0
+        assert preview.render.segments[0].x_end == 2.0
+        assert store.mutations == []
+
+        result = runtime.advance_drawing(
+            series,
+            session,
+            runtime.chart_event(series, 3.0, 102.0),
+        )
+        assert result.done
+        assert len(store.mutations) == 1
+        assert store.mutations[0].operation == "commit"
+
+
+def test_runtime_applies_toolbar_drawing_cancel_mutation(tmp_path: Path) -> None:
+    state = State(symbol="SPY")
+    session = DrawingSession(
+        indicator_name="test_drawing_fixture",
+        tool_key="line",
+        original_params={},
+        working_params={},
+    )
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = RecordingStore()
+        runtime = _runtime(state, cache, store)
+        mutation = runtime.cancel_drawing(session)
+
+    assert mutation is not None
+    assert mutation.operation == "cancel"
+    assert [stored.operation for stored in store.mutations] == ["cancel"]
 
 
 def test_runtime_chart_event_resolves_timestamp_x(tmp_path: Path) -> None:
@@ -358,7 +585,7 @@ def _series() -> OHLCVSeries:
 def _runtime(
     state: State,
     cache: Cache,
-    store: AvwapAnchorStore | None = None,
+    store: AvwapAnchorStore | RecordingStore | None = None,
 ) -> IndicatorRuntime:
     handlers = [store] if store is not None else None
     indicator_store = IndicatorStore(state, cache, handlers)
