@@ -31,7 +31,7 @@ simplechart = "main:main"
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "chart*", "data*", "indicators*", "simplechart*"]
+include = ["app*", "chart*", "data*", "indicators*", "simplechart*", "tools*"]
 
 # ------------------------------------------------------------------
 # mypyc compilation targets

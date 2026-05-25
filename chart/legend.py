@@ -17,14 +17,26 @@ reflect the new state.
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QCursor, QFont
+from PyQt6.QtCore import QEvent, QPoint, QSize, Qt
+from PyQt6.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QIcon,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
     QPushButton,
+    QStyle,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -96,6 +108,154 @@ class IndicatorLabel(QLabel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
 
+class DrawingToolPalette(QWidget):
+
+    def __init__(
+        self,
+        tools: list[tuple[str, str]],
+        on_drawing_tool: Callable[[str], None],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tools")
+        self.setObjectName("drawingToolPalette")
+        self._drag_offset: QPoint | None = None
+        self.hide()
+
+        frame = QFrame(self)
+        frame.setObjectName("drawingToolPaletteFrame")
+        frame.setStyleSheet(
+            "QFrame#drawingToolPaletteFrame {"
+            " background: #eeeeee;"
+            " border: 1px solid #b8bcc5;"
+            "}"
+        )
+        frame.installEventFilter(self)
+
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(0, 0, 0, 6)
+        frame_layout.setSpacing(5)
+
+        title_bar = QFrame(frame)
+        title_bar.setObjectName("drawingToolPaletteTitleBar")
+        title_bar.setCursor(Qt.CursorShape.SizeAllCursor)
+        title_bar.setStyleSheet(
+            "QFrame#drawingToolPaletteTitleBar {"
+            " background: #dddddd;"
+            " border-bottom: 1px solid #c4c4c4;"
+            "}"
+        )
+        title_bar.installEventFilter(self)
+
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(6, 3, 5, 3)
+        title_layout.setSpacing(4)
+
+        title = QLabel("Tools", title_bar)
+        title.setObjectName("drawingToolPaletteTitle")
+        title.setStyleSheet("color: #555555;")
+        title.setCursor(Qt.CursorShape.SizeAllCursor)
+        title.installEventFilter(self)
+        title_layout.addWidget(title)
+        title_layout.addStretch(1)
+
+        close_button = QToolButton(title_bar)
+        close_button.setObjectName("drawingToolPaletteClose")
+        close_button.setText("x")
+        close_button.setToolTip("Close")
+        close_button.setFixedSize(18, 18)
+        close_button.setStyleSheet(
+            "QToolButton { color: #555555; background: #dddddd; "
+            "border: 1px solid #c4c4c4; border-radius: 3px; }"
+            "QToolButton:hover { background: #d0d0d0; }"
+        )
+        close_button.clicked.connect(self.hide)
+        title_layout.addWidget(close_button)
+        frame_layout.addWidget(title_bar)
+
+        tool_row = QFrame(frame)
+        tool_row.setObjectName("drawingToolPaletteToolRow")
+        tool_row.setStyleSheet("QFrame#drawingToolPaletteToolRow { background: #eeeeee; }")
+
+        tool_layout = QHBoxLayout(tool_row)
+        tool_layout.setContentsMargins(6, 0, 6, 0)
+        tool_layout.setSpacing(4)
+
+        for tool_name, tool_label in tools:
+            button = QToolButton(tool_row)
+            button.setObjectName(f"drawingToolButton_{tool_name}")
+            button.setIcon(_tool_icon(tool_name, button))
+            button.setIconSize(QSize(20, 20))
+            button.setToolTip(tool_label)
+            button.setFixedSize(28, 28)
+            button.setStyleSheet(
+                "QToolButton { color: #555555; background: #f7f7f7; "
+                "border: 1px solid #cccccc; border-radius: 3px; }"
+                "QToolButton:hover { background: #ffffff; }"
+            )
+            button.clicked.connect(
+                lambda checked=False, name=tool_name: on_drawing_tool(name)
+            )
+            tool_layout.addWidget(button)
+        frame_layout.addWidget(tool_row)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.addWidget(frame)
+
+    def eventFilter(self, watched: object, event: object) -> bool:
+        if isinstance(event, QMouseEvent):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                self._begin_drag(event)
+                return True
+            if event.type() == QEvent.Type.MouseMove:
+                self._continue_drag(event)
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                self._end_drag(event)
+                return True
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event: object) -> None:
+        if not isinstance(event, QMouseEvent):
+            return
+        self._begin_drag(event)
+
+    def mouseMoveEvent(self, event: object) -> None:
+        if not isinstance(event, QMouseEvent):
+            return
+        self._continue_drag(event)
+
+    def mouseReleaseEvent(self, event: object) -> None:
+        if not isinstance(event, QMouseEvent):
+            return
+        self._end_drag(event)
+
+    def _begin_drag(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (
+                event.globalPosition().toPoint()
+                - self.mapToGlobal(QPoint(0, 0))
+            )
+            event.accept()
+
+    def _continue_drag(self, event: QMouseEvent) -> None:
+        if self._drag_offset is None:
+            return
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            position = event.globalPosition().toPoint() - self._drag_offset
+            parent = self.parentWidget()
+            if parent is not None:
+                position = parent.mapFromGlobal(position)
+            self.move(position)
+            event.accept()
+
+    def _end_drag(self, event: QMouseEvent) -> None:
+        if isinstance(event, QMouseEvent) and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = None
+            event.accept()
+
+
 class ChartLegend(QWidget):
     """
     Horizontal strip of indicator labels displayed above the chart.
@@ -119,6 +279,14 @@ class ChartLegend(QWidget):
         self._on_configure = on_configure
         self._on_remove    = on_remove
         self._labels: dict[str, IndicatorLabel] = {}
+        palette_parent = parent if parent is not None else self
+        self._tool_palette = DrawingToolPalette(
+            drawing_tools,
+            on_drawing_tool,
+            palette_parent,
+        )
+        self.destroyed.connect(self._tool_palette.deleteLater)
+        self._tools_button: QToolButton | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -138,28 +306,7 @@ class ChartLegend(QWidget):
         add_btn.clicked.connect(on_add)
         layout.addWidget(add_btn)
 
-        self._tool_palette = QWidget(self)
-        palette_layout = QHBoxLayout(self._tool_palette)
-        palette_layout.setContentsMargins(0, 0, 0, 0)
-        palette_layout.setSpacing(3)
-        self._tool_palette.setLayout(palette_layout)
-        for tool_name, tool_label in drawing_tools:
-            tool_btn = QPushButton(tool_label)
-            tool_btn.setFixedHeight(20)
-            tool_btn.setToolTip(tool_label)
-            tool_btn.setStyleSheet(
-                "QPushButton { color: #555555; background: transparent; "
-                "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 6px; }"
-                "QPushButton:hover { background: #eeeeee; }"
-            )
-            tool_btn.clicked.connect(
-                lambda checked=False, name=tool_name: on_drawing_tool(name)
-            )
-            palette_layout.addWidget(tool_btn)
-        self._tool_palette.setVisible(False)
-
         layout.addStretch(1)
-        layout.addWidget(self._tool_palette)
 
         tools_btn = QToolButton()
         tools_btn.setText("Tools")
@@ -173,6 +320,7 @@ class ChartLegend(QWidget):
         )
         tools_btn.clicked.connect(self._toggle_tool_palette)
         layout.addWidget(tools_btn)
+        self._tools_button = tools_btn
 
     def add_indicator(
         self,
@@ -194,7 +342,7 @@ class ChartLegend(QWidget):
         self._labels[series_key] = label
         layout = self.layout()
         assert layout is not None
-        layout.insertWidget(max(1, layout.count() - 3), label)
+        layout.insertWidget(max(1, layout.count() - 2), label)
 
     def remove_indicator(self, series_key: str) -> None:
         """Remove an indicator label from the legend."""
@@ -220,4 +368,52 @@ class ChartLegend(QWidget):
             self._labels[series_key].set_color(color)
 
     def _toggle_tool_palette(self) -> None:
-        self._tool_palette.setVisible(not self._tool_palette.isVisible())
+        if self._tool_palette.isVisible():
+            self._tool_palette.hide()
+            return
+        if self._tools_button is not None:
+            self._tool_palette.adjustSize()
+        self._tool_palette.show()
+        self._position_tool_palette()
+        self._tool_palette.raise_()
+
+    def _position_tool_palette(self) -> None:
+        self._tool_palette.adjustSize()
+        self._tool_palette.move(self._tool_palette_position())
+
+    def _tool_palette_position(self) -> QPoint:
+        if self._tools_button is None:
+            global_position = self.mapToGlobal(QPoint(0, self.height()))
+        else:
+            x = self._tools_button.mapToGlobal(
+                QPoint(-self._tool_palette.width() - 12, 0)
+            ).x()
+            legend_bottom = self.mapToGlobal(QPoint(0, self.height())).y()
+            y = legend_bottom - (self._tool_palette.height() // 4)
+            global_position = QPoint(x, y)
+        parent = self._tool_palette.parentWidget()
+        if parent is None:
+            return global_position
+        return parent.mapFromGlobal(global_position)
+
+
+def _tool_icon(tool_name: str, widget: QWidget) -> QIcon:
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#555555"), 2)
+    painter.setPen(pen)
+    if tool_name == "vertical_line":
+        painter.drawLine(12, 4, 12, 20)
+        painter.drawLine(7, 4, 17, 4)
+        painter.drawLine(7, 20, 17, 20)
+    elif tool_name == "fib_retracement":
+        for y, length in ((5, 18), (9, 14), (14, 11), (19, 18)):
+            painter.drawLine(3, y, 3 + length, y)
+    else:
+        icon = widget.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+        painter.end()
+        return icon
+    painter.end()
+    return QIcon(pixmap)
