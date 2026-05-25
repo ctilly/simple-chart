@@ -227,19 +227,29 @@ class PlotManager:
             self._plots[series_key] = handle
 
     def update_horizontal_segment(self, segment: HorizontalSegmentRender) -> None:
-        self.remove_horizontal_segment(segment.key)
         target_ax = self._resolve_ax(segment.render_target)
         x_start = self._x_value_for_index(segment.x_start)
         x_end = self._x_value_for_index(segment.x_end)
         pen_style = _LINE_STYLES.get(segment.line_style, Qt.PenStyle.SolidLine)
+        pen = pg.mkPen(
+            color=segment.color,
+            width=segment.line_width,
+            style=pen_style,
+        )
+        if segment.key in self._segments:
+            item, current_ax = self._segments[segment.key]
+            if current_ax is target_ax:
+                handle = cast(Any, item)
+                handle.setPen(pen)
+                handle.setData([x_start, x_end], [segment.y_value, segment.y_value])
+                handle.setVisible(segment.visible)
+                return
+            self.remove_horizontal_segment(segment.key)
+
         item = pg.PlotDataItem(
             [x_start, x_end],
             [segment.y_value, segment.y_value],
-            pen=pg.mkPen(
-                color=segment.color,
-                width=segment.line_width,
-                style=pen_style,
-            ),
+            pen=pen,
         )
         item.setVisible(segment.visible)
         target_ax.addItem(item)  # type: ignore[attr-defined]
@@ -415,12 +425,23 @@ class PlotManager:
         return axes
 
     def update_marker(self, marker: MarkerRender) -> None:
-        self.remove_marker(marker.key)
         x_value = _x_value_for_index(
             float(marker.x_index),
             self._bar_index,
             bool(self._price_panel.ax.vb.x_indexed),
         )
+        if marker.key in self._markers:
+            item = cast(Any, self._markers[marker.key])
+            item.setText(marker.text, color=marker.color)
+            font = QFont()
+            font.setPointSize(marker.font_size)
+            item.setFont(font)
+            item.setPos(x_value, marker.y_value)
+            item.setZValue(marker.z)
+            item.setVisible(marker.visible)
+            return
+
+        self.remove_marker(marker.key)
         item = pg.TextItem(
             text=marker.text,
             color=marker.color,

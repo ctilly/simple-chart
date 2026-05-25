@@ -956,7 +956,7 @@ class MainWindow(QMainWindow):
             if removal.release_panel:
                 self._chart.release_indicator_panel(removal.render_target)
 
-        pm.refresh(preserve_view=True)
+        self._reload_indicators(draw_bars=False, preserve_view=True)
 
     # ------------------------------------------------------------------
     # Watchlist
