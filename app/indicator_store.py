@@ -1,27 +1,27 @@
 from collections.abc import Sequence
 from typing import Any, cast
 
-from app.state import IndicatorState
+from app.state import ChartExtensionState
 from app.state import State
 from data.cache import Cache
-from indicators._store_registry import all_store_handlers
+from simplechart.extensions._store_registry import all_store_handlers
 from simplechart.api import (
-    IndicatorMutation,
-    IndicatorStoreContext,
-    IndicatorStoreHandler,
+    ChartExtensionMutation,
+    ChartExtensionStoreContext,
+    ChartExtensionStoreHandler,
     IndicatorStoreRecord,
 )
 
 
-class IndicatorStore:
+class ChartExtensionStore:
 
     def __init__(
         self,
         state: State,
         cache: Cache,
-        handlers: Sequence[IndicatorStoreHandler] | None = None,
+        handlers: Sequence[ChartExtensionStoreHandler] | None = None,
     ) -> None:
-        context = AppIndicatorStoreContext(state, cache)
+        context = AppChartExtensionStoreContext(state, cache)
         if handlers is not None:
             self._handlers = list(handlers)
         else:
@@ -34,7 +34,7 @@ class IndicatorStore:
         for handler in self._handlers:
             handler.load_for_symbol(symbol)
 
-    def apply(self, mutation: IndicatorMutation) -> None:
+    def apply(self, mutation: ChartExtensionMutation) -> None:
         for handler in self._handlers:
             handler.apply(mutation)
 
@@ -53,7 +53,7 @@ class IndicatorStore:
         return params
 
 
-class AppIndicatorStoreContext:
+class AppChartExtensionStoreContext:
 
     def __init__(self, state: State, cache: Cache) -> None:
         self._state = state
@@ -95,7 +95,7 @@ class AppIndicatorStoreContext:
         params: dict[str, Any],
     ) -> None:
         if self._state.get_indicator(name) is None:
-            self._state.indicators.append(IndicatorState(name=name, params=params))
+            self._state.indicators.append(ChartExtensionState(name=name, params=params))
 
     def remove_indicator_state(self, name: str) -> None:
         self._state.indicators = [
@@ -111,3 +111,10 @@ class AppIndicatorStoreContext:
         ind_state = self._state.get_indicator(indicator_name)
         if ind_state is not None:
             ind_state.series_visibility.pop(series_key, None)
+
+
+IndicatorStore = ChartExtensionStore
+AppIndicatorStoreContext = AppChartExtensionStoreContext
+IndicatorMutation = ChartExtensionMutation
+IndicatorStoreContext = ChartExtensionStoreContext
+IndicatorStoreHandler = ChartExtensionStoreHandler

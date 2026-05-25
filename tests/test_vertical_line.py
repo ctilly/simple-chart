@@ -1,15 +1,24 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.indicator_runtime import IndicatorRuntime
-from app.indicator_store import AppIndicatorStoreContext, IndicatorStore
+from app.indicator_runtime import ChartExtensionRuntime
+from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
-import indicators.vertical_line  # noqa: F401
-from indicators.vertical_line import VerticalLineIndicator
-from indicators.vertical_line.session_store import VerticalLineSessionStore
+from indicators.vertical_line import VerticalLineIndicator as LegacyVerticalLineIndicator
+from indicators.vertical_line.session_store import (
+    VerticalLineSessionStore as LegacyVerticalLineSessionStore,
+)
+import tools.vertical_line  # noqa: F401
+from tools.vertical_line import VerticalLineIndicator
+from tools.vertical_line.session_store import VerticalLineSessionStore
 from simplechart.api import ChoiceParam, IndicatorAddMode
+
+
+def test_vertical_line_legacy_indicator_import_aliases_tool_package() -> None:
+    assert LegacyVerticalLineIndicator is VerticalLineIndicator
+    assert LegacyVerticalLineSessionStore is VerticalLineSessionStore
 
 
 def test_vertical_line_declares_toolbar_add_mode() -> None:
@@ -21,7 +30,7 @@ def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
     series = _daily_series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppIndicatorStoreContext(state, cache))
+        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
 
@@ -47,7 +56,7 @@ def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path)
     intraday = _intraday_series(daily.bars[2].timestamp)
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppIndicatorStoreContext(state, cache))
+        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         runtime.start_drawing(
@@ -65,7 +74,7 @@ def test_vertical_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None:
     series = _daily_series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppIndicatorStoreContext(state, cache))
+        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         runtime.start_drawing(
@@ -144,10 +153,10 @@ def _runtime(
     state: State,
     cache: Cache,
     store: VerticalLineSessionStore,
-) -> IndicatorRuntime:
-    return IndicatorRuntime(
+) -> ChartExtensionRuntime:
+    return ChartExtensionRuntime(
         state,
         cache,
-        IndicatorStore(state, cache, [store]),
+        ChartExtensionStore(state, cache, [store]),
         lookback_days=600,
     )

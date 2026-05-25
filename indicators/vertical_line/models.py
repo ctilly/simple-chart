@@ -1,11 +1,3 @@
-from dataclasses import dataclass
+"""Compatibility re-exports for vertical line models."""
 
-
-@dataclass(frozen=True)
-class VerticalLineRecord:
-    symbol: str
-    timestamp_ms: int
-    color: str = "#7a7f8c"
-    line_width: float = 1.0
-    line_style: str = "solid"
-    line_id: int | None = None
+from tools.vertical_line.models import *  # noqa: F401,F403

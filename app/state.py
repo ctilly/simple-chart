@@ -20,7 +20,7 @@ from data.models import Timeframe
 
 
 @dataclass
-class IndicatorState:
+class ChartExtensionState:
     """
     The active configuration for one indicator instance.
 
@@ -33,7 +33,7 @@ class IndicatorState:
     series_visibility — optional per-series visibility overrides for
                  indicators that emit multiple independent series
 
-    One IndicatorState entry exists per indicator instance on the chart.
+    One ChartExtensionState entry exists per chart extension instance on the chart.
     Multiple SMAs (50-day and 200-day) are two separate entries with the
     same name but different params.
     """
@@ -61,15 +61,18 @@ class State:
 
     symbol:     str | None = None
     timeframe:  Timeframe  = Timeframe.DAILY
-    indicators: list[IndicatorState] = field(default_factory=list)
+    indicators: list[ChartExtensionState] = field(default_factory=list)
 
-    def get_indicator(self, name: str) -> IndicatorState | None:
+    def get_indicator(self, name: str) -> ChartExtensionState | None:
         """Return the first indicator instance with the given name, or None."""
         return next((i for i in self.indicators if i.name == name), None)
 
-    def get_indicator_by_series_key(self, series_key: str) -> IndicatorState | None:
+    def get_indicator_by_series_key(self, series_key: str) -> ChartExtensionState | None:
         """Return the indicator that owns a given series key, or None."""
         return next(
             (i for i in self.indicators if series_key in i.series_keys),
             None,
         )
+
+
+IndicatorState = ChartExtensionState

@@ -49,9 +49,9 @@ from PyQt6.QtWidgets import (
 )
 
 from app.indicator_config import IndicatorConfigDialog
-from app.indicator_runtime import IndicatorRenderPass, IndicatorRuntime
-from app.indicator_store import IndicatorStore
-from app.state import IndicatorState, State
+from app.indicator_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
+from app.indicator_store import ChartExtensionStore
+from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
 from chart.window import ChartWidget
@@ -255,8 +255,8 @@ class MainWindow(QMainWindow):
         # App state
         # ------------------------------------------------------------------
         self._state = State()
-        self._indicator_store = IndicatorStore(self._state, self._cache)
-        self._indicator_runtime = IndicatorRuntime(
+        self._indicator_store = ChartExtensionStore(self._state, self._cache)
+        self._indicator_runtime = ChartExtensionRuntime(
             self._state,
             self._cache,
             self._indicator_store,
@@ -267,7 +267,7 @@ class MainWindow(QMainWindow):
         self._preview_keys: set[str] = set()
         for name, params in INITIAL_INDICATORS:
             self._state.indicators.append(
-                IndicatorState(name=name, params=dict(params))
+                ChartExtensionState(name=name, params=dict(params))
             )
 
         # ------------------------------------------------------------------
@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
         # The symbol for which self._state.indicators currently holds state.
         # Used to save/restore per-symbol indicator state on symbol switch.
         self._loaded_symbol: str | None = None
-        self._per_symbol_state: dict[str, list[IndicatorState]] = {}
+        self._per_symbol_state: dict[str, list[ChartExtensionState]] = {}
 
         # Load the initial symbol on startup: first watchlist entry, or SPY.
         watchlist = self._cache.get_watchlist()
@@ -409,7 +409,7 @@ class MainWindow(QMainWindow):
         # Save indicator state for the symbol we're leaving.
         if self._loaded_symbol is not None and self._loaded_symbol != series.symbol:
             self._per_symbol_state[self._loaded_symbol] = [
-                IndicatorState(
+                ChartExtensionState(
                     name=s.name,
                     params=copy.deepcopy(s.params),
                     visible=s.visible,
@@ -423,7 +423,7 @@ class MainWindow(QMainWindow):
         if self._loaded_symbol != series.symbol:
             if series.symbol in self._per_symbol_state:
                 self._state.indicators = [
-                    IndicatorState(
+                    ChartExtensionState(
                         name=s.name,
                         params=copy.deepcopy(s.params),
                         visible=s.visible,
@@ -433,7 +433,7 @@ class MainWindow(QMainWindow):
                 ]
             else:
                 self._state.indicators = [
-                    IndicatorState(name=name, params=dict(params))
+                    ChartExtensionState(name=name, params=dict(params))
                     for name, params in INITIAL_INDICATORS
                 ]
 
@@ -479,7 +479,7 @@ class MainWindow(QMainWindow):
 
     def _draw_indicator_render(
         self,
-        render_pass: IndicatorRenderPass,
+        render_pass: ChartExtensionRenderPass,
     ) -> None:
         """
         Push one runtime render result to the PlotManager and legend.
@@ -555,7 +555,7 @@ class MainWindow(QMainWindow):
             if series_key not in marker_keys:
                 pm.remove_marker(series_key)
 
-    def _draw_drag_render(self, render_pass: IndicatorRenderPass) -> None:
+    def _draw_drag_render(self, render_pass: ChartExtensionRenderPass) -> None:
         pm = self._chart.plot_manager
         price_vb: Any = pm.price_viewbox()
         price_vb.win._isMouseLeftDrag = True
@@ -610,7 +610,7 @@ class MainWindow(QMainWindow):
                 if series_key not in marker_keys:
                     pm.remove_marker(series_key)
 
-    def _draw_preview_render(self, render_pass: IndicatorRenderPass) -> None:
+    def _draw_preview_render(self, render_pass: ChartExtensionRenderPass) -> None:
         pm = self._chart.plot_manager
         new_keys = self._render_keys(render_pass.render)
         for stale_key in self._preview_keys - new_keys:
@@ -692,8 +692,8 @@ class MainWindow(QMainWindow):
 
     def _handle_drawing_result(self, result: DrawingToolResult) -> None:
         if result.render is not None and self._current_series is not None:
-            render_pass = IndicatorRenderPass(
-                state=IndicatorState(
+            render_pass = ChartExtensionRenderPass(
+                state=ChartExtensionState(
                     name=self._drawing_session.indicator_name if self._drawing_session else "",
                     params=self._drawing_session.working_params if self._drawing_session else {},
                     series_keys=list(self._render_keys(result.render)),
@@ -880,7 +880,7 @@ class MainWindow(QMainWindow):
 
     def _remove_stale_indicator_renders(
         self,
-        render_passes: list[IndicatorRenderPass],
+        render_passes: list[ChartExtensionRenderPass],
     ) -> None:
         active_series_keys: set[str] = {
             series_render.key
@@ -1012,7 +1012,7 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() == IndicatorConfigDialog.DialogCode.Accepted:
             self._state.indicators.append(
-                IndicatorState(name=name, params=dialog.result_params())
+                ChartExtensionState(name=name, params=dialog.result_params())
             )
             self._reload_indicators()
 

@@ -107,9 +107,17 @@ EXPORTS
   timestamp_ms_to_bar_index Convert a UTC ms timestamp to a bar index
 """
 
-from indicators._base import (  # noqa: F401
+from simplechart.extensions._base import (  # noqa: F401
     RENDER_CHART,               # "chart" — default render_target() return value
     ChartEvent,                 # generic chart interaction event
+    ChartExtension,             # ABC: subclass this for chart extensions
+    ChartExtensionAction,       # user-triggered extension action
+    ChartExtensionAddMode,      # declares where/how an extension can be added
+    ChartExtensionConfig,       # extension-owned config form
+    ChartExtensionMutation,     # requested extension state mutation
+    ChartExtensionRender,       # render output produced by an extension
+    ChartExtensionStoreContext, # store-handler access to app persistence/state services
+    ChartExtensionStoreHandler, # store-handler protocol
     ChoiceParam,                # dropdown param: ChoiceParam(value, options)
     DrawingSession,             # active toolbar drawing-tool state
     DrawingToolResult,          # drawing-tool advance result
@@ -130,13 +138,16 @@ from indicators._base import (  # noqa: F401
     SeriesRender,               # line series render primitive
     VerticalLineRender,         # full-height vertical line render primitive
 )
-from indicators._registry import (  # noqa: F401
+from simplechart.extensions._registry import (  # noqa: F401
+    all_extensions,
     all_indicators,
+    get_extension,
     get_indicator,
     register,
+    register_extension,
     register_indicator,
 )
-from indicators._store_registry import register_store_handler  # noqa: F401
+from simplechart.extensions._store_registry import register_store_handler  # noqa: F401
 from data.models import (      # noqa: F401
     Bar,                       # single OHLCV bar
     IndicatorStoreRecord,      # opaque plugin-owned persistence record
@@ -151,6 +162,14 @@ from data.calendar import (    # noqa: F401
 __all__: list[str] = [
     "Bar",
     "ChartEvent",
+    "ChartExtension",
+    "ChartExtensionAction",
+    "ChartExtensionAddMode",
+    "ChartExtensionConfig",
+    "ChartExtensionMutation",
+    "ChartExtensionRender",
+    "ChartExtensionStoreContext",
+    "ChartExtensionStoreHandler",
     "ChoiceParam",
     "DrawingSession",
     "DrawingToolResult",
@@ -175,9 +194,12 @@ __all__: list[str] = [
     "VerticalLineRender",
     "bars_for_n_days",
     "register",
+    "register_extension",
     "register_indicator",
     "register_store_handler",
+    "all_extensions",
     "all_indicators",
+    "get_extension",
     "get_indicator",
     "timestamp_ms_to_bar_index",
 ]

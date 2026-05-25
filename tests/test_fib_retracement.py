@@ -1,15 +1,26 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.indicator_runtime import IndicatorRuntime
-from app.indicator_store import AppIndicatorStoreContext, IndicatorStore
+from app.indicator_runtime import ChartExtensionRuntime
+from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
-import indicators.fib_retracement  # noqa: F401
-from indicators.fib_retracement import FibonacciRetracementIndicator
-from indicators.fib_retracement.session_store import FibRetracementSessionStore
+from indicators.fib_retracement import (
+    FibonacciRetracementIndicator as LegacyFibonacciRetracementIndicator,
+)
+from indicators.fib_retracement.session_store import (
+    FibRetracementSessionStore as LegacyFibRetracementSessionStore,
+)
+import tools.fib_retracement  # noqa: F401
+from tools.fib_retracement import FibonacciRetracementIndicator
+from tools.fib_retracement.session_store import FibRetracementSessionStore
 from simplechart.api import ChoiceParam, IndicatorAddMode
+
+
+def test_fib_legacy_indicator_import_aliases_tool_package() -> None:
+    assert LegacyFibonacciRetracementIndicator is FibonacciRetracementIndicator
+    assert LegacyFibRetracementSessionStore is FibRetracementSessionStore
 
 
 def test_fib_declares_toolbar_add_mode() -> None:
@@ -102,7 +113,7 @@ def test_fib_commit_deactivates_and_scopes_to_exact_timeframe(tmp_path: Path) ->
     series = _series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = FibRetracementSessionStore(AppIndicatorStoreContext(state, cache))
+        store = FibRetracementSessionStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing(
@@ -130,7 +141,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
     series = _series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = FibRetracementSessionStore(AppIndicatorStoreContext(state, cache))
+        store = FibRetracementSessionStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing(
@@ -237,10 +248,10 @@ def _runtime(
     state: State,
     cache: Cache,
     store: FibRetracementSessionStore,
-) -> IndicatorRuntime:
-    return IndicatorRuntime(
+) -> ChartExtensionRuntime:
+    return ChartExtensionRuntime(
         state,
         cache,
-        IndicatorStore(state, cache, [store]),
+        ChartExtensionStore(state, cache, [store]),
         lookback_days=600,
     )

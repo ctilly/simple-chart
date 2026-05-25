@@ -11,7 +11,16 @@ from indicators.avwap import (
 )
 from indicators.avwap.models import AnchorRecord
 from indicators.pivot_points import PivotPointsIndicator
-from indicators._base import (
+from indicators._base import ChartExtension as LegacyChartExtension
+from indicators._registry import register_indicator as legacy_register_indicator
+from indicators._store_registry import register_store_handler as legacy_register_store_handler
+from simplechart.extensions._base import (
+    ChartExtension,
+    ChartExtensionAction,
+    ChartExtensionAddMode,
+    ChartExtensionConfig,
+    ChartExtensionMutation,
+    ChartExtensionRender,
     DrawingSession,
     DrawingToolResult,
     HorizontalSegmentRender,
@@ -23,13 +32,19 @@ from indicators._base import (
     SeriesRender,
     VerticalLineRender,
 )
-from indicators._base import ChartEvent, DragSession, HitTestResult
-from indicators._base import IndicatorAction, IndicatorMutation
-from indicators._store_registry import register_store_handler
+from simplechart.extensions._base import ChartEvent, DragSession, HitTestResult
+from simplechart.extensions._base import IndicatorAction, IndicatorMutation
+from simplechart.extensions._store_registry import register_store_handler
 from indicators.rsi import RSIIndicator
-from indicators._registry import register_indicator
+from simplechart.extensions._registry import register_indicator
 from simplechart.api import (
     ChartEvent as PublicChartEvent,
+    ChartExtension as PublicChartExtension,
+    ChartExtensionAction as PublicChartExtensionAction,
+    ChartExtensionAddMode as PublicChartExtensionAddMode,
+    ChartExtensionConfig as PublicChartExtensionConfig,
+    ChartExtensionMutation as PublicChartExtensionMutation,
+    ChartExtensionRender as PublicChartExtensionRender,
     DrawingSession as PublicDrawingSession,
     DrawingToolResult as PublicDrawingToolResult,
     DragSession as PublicDragSession,
@@ -43,12 +58,21 @@ from simplechart.api import (
     MarkerRender as PublicMarkerRender,
     SeriesRender as PublicSeriesRender,
     VerticalLineRender as PublicVerticalLineRender,
+    all_extensions as public_all_extensions,
+    get_extension as public_get_extension,
+    register_extension as public_register_extension,
     register_indicator as public_register_indicator,
     register_store_handler as public_register_store_handler,
 )
 
 
 def test_render_primitives_are_public_api() -> None:
+    assert PublicChartExtension is ChartExtension
+    assert PublicChartExtensionRender is ChartExtensionRender
+    assert PublicChartExtensionAddMode is ChartExtensionAddMode
+    assert PublicChartExtensionAction is ChartExtensionAction
+    assert PublicChartExtensionConfig is ChartExtensionConfig
+    assert PublicChartExtensionMutation is ChartExtensionMutation
     assert PublicIndicatorRender is IndicatorRender
     assert PublicHorizontalSegmentRender is HorizontalSegmentRender
     assert PublicMarkerRender is MarkerRender
@@ -63,8 +87,14 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicIndicatorAction is IndicatorAction
     assert PublicIndicatorConfig is IndicatorConfig
     assert PublicIndicatorMutation is IndicatorMutation
+    assert public_register_extension is public_register_indicator
+    assert public_get_extension("rsi").name() == "rsi"
+    assert "rsi" in public_all_extensions()
     assert public_register_indicator is register_indicator
     assert public_register_store_handler is register_store_handler
+    assert LegacyChartExtension is ChartExtension
+    assert legacy_register_indicator is register_indicator
+    assert legacy_register_store_handler is register_store_handler
 
 
 class _NoOpIndicator(Indicator):

@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 import bisect
 from typing import Any, cast
 
-from app.indicator_store import IndicatorStore
-from app.state import IndicatorState, State
+from app.indicator_store import ChartExtensionStore
+from app.state import ChartExtensionState, State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 from simplechart.api import (
@@ -24,40 +24,40 @@ from simplechart.api import (
 
 
 @dataclass
-class IndicatorRenderPass:
-    state: IndicatorState
+class ChartExtensionRenderPass:
+    state: ChartExtensionState
     render: IndicatorRender
     render_target: str
 
 
 @dataclass
-class IndicatorRemoval:
+class ChartExtensionRemoval:
     series_keys: list[str]
     render_target: str
     release_panel: bool = False
 
 
-class IndicatorRuntime:
+class ChartExtensionRuntime:
 
     def __init__(
         self,
         state: State,
         cache: Cache,
-        indicator_store: IndicatorStore,
+        indicator_store: ChartExtensionStore,
         lookback_days: int,
     ) -> None:
         self._state = state
         self._cache = cache
         self._indicator_store = indicator_store
         self._lookback_days = lookback_days
-        self._drag_state: IndicatorState | None = None
+        self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
 
-    def render_all(self, series: OHLCVSeries) -> list[IndicatorRenderPass]:
+    def render_all(self, series: OHLCVSeries) -> list[ChartExtensionRenderPass]:
         self._indicator_store.prepare_active_indicators()
         daily_bars = self._daily_bars_for(series)
 
-        passes: list[IndicatorRenderPass] = []
+        passes: list[ChartExtensionRenderPass] = []
         for ind_state in self._state.indicators:
             ind_state.params["_daily_bars"] = daily_bars
             ind_state.params = self._indicator_store.params_for(
@@ -69,9 +69,9 @@ class IndicatorRuntime:
 
     def render_one(
         self,
-        ind_state: IndicatorState,
+        ind_state: ChartExtensionState,
         series: OHLCVSeries,
-    ) -> IndicatorRenderPass:
+    ) -> ChartExtensionRenderPass:
         indicator = get_indicator(ind_state.name)
         render = indicator.render(series, ind_state.params)
         ind_state.series_keys = [
@@ -86,7 +86,7 @@ class IndicatorRuntime:
             for key in ind_state.series_keys
             if key in ind_state.series_visibility
         }
-        return IndicatorRenderPass(
+        return ChartExtensionRenderPass(
             state=ind_state,
             render=render,
             render_target=indicator.render_target(),
@@ -144,7 +144,7 @@ class IndicatorRuntime:
         series: OHLCVSeries,
         event: ChartEvent,
     ) -> bool:
-        best_state: IndicatorState | None = None
+        best_state: ChartExtensionState | None = None
         best_hit = None
         for ind_state in self._state.indicators:
             indicator = get_indicator(ind_state.name)
@@ -175,14 +175,14 @@ class IndicatorRuntime:
         self,
         series: OHLCVSeries,
         event: ChartEvent,
-    ) -> IndicatorRenderPass | None:
+    ) -> ChartExtensionRenderPass | None:
         if self._drag_state is None or self._drag_session is None:
             return None
         indicator = get_indicator(self._drag_state.name)
         render = indicator.drag_to(series, self._drag_session, event)
         if render is None:
             return None
-        return IndicatorRenderPass(
+        return ChartExtensionRenderPass(
             state=self._drag_state,
             render=render,
             render_target=indicator.render_target(),
@@ -278,12 +278,12 @@ class IndicatorRuntime:
         series: OHLCVSeries,
         session: DrawingSession,
         event: ChartEvent,
-    ) -> IndicatorRenderPass | None:
+    ) -> ChartExtensionRenderPass | None:
         indicator = get_indicator(session.indicator_name)
         render = indicator.preview_drawing(series, session, event)
         if render is None:
             return None
-        return IndicatorRenderPass(
+        return ChartExtensionRenderPass(
             state=self._drawing_state(session, render),
             render=render,
             render_target=indicator.render_target(),
@@ -357,7 +357,7 @@ class IndicatorRuntime:
             return
         ind_state.params = params
 
-    def remove(self, series_key: str) -> IndicatorRemoval | None:
+    def remove(self, series_key: str) -> ChartExtensionRemoval | None:
         ind_state = self._state.get_indicator_by_series_key(series_key)
         if ind_state is None:
             return None
@@ -368,7 +368,7 @@ class IndicatorRuntime:
         )
         if mutation is not None:
             self.apply_mutation(mutation)
-            return IndicatorRemoval(
+            return ChartExtensionRemoval(
                 series_keys=[series_key],
                 render_target=indicator.render_target(),
             )
@@ -385,20 +385,20 @@ class IndicatorRuntime:
                 get_indicator(state.name).render_target() == render_target
                 for state in self._state.indicators
             )
-        return IndicatorRemoval(
+        return ChartExtensionRemoval(
             series_keys=series_keys,
             render_target=render_target,
             release_panel=release_panel,
         )
 
-    def _params_for_state(self, ind_state: IndicatorState) -> dict[str, Any]:
+    def _params_for_state(self, ind_state: ChartExtensionState) -> dict[str, Any]:
         return self._indicator_store.params_for(ind_state.name, ind_state.params)
 
     def _drawing_state(
         self,
         session: DrawingSession,
         render: IndicatorRender,
-    ) -> IndicatorState:
+    ) -> ChartExtensionState:
         keys = [
             series_render.key for series_render in render.series
         ] + [
@@ -406,7 +406,7 @@ class IndicatorRuntime:
         ] + [
             line.key for line in render.vertical_lines
         ]
-        return IndicatorState(
+        return ChartExtensionState(
             name=session.indicator_name,
             params=session.working_params,
             series_keys=keys,
@@ -456,3 +456,8 @@ class IndicatorRuntime:
         if not candidates:
             return None
         return min(candidates, key=lambda candidate: abs(timestamps[candidate] - x_ms))
+
+
+IndicatorRenderPass = ChartExtensionRenderPass
+IndicatorRemoval = ChartExtensionRemoval
+IndicatorRuntime = ChartExtensionRuntime

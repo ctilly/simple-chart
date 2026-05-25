@@ -4,9 +4,12 @@ from typing import Any
 
 import numpy as np
 
-from app.indicator_runtime import IndicatorRuntime
-from app.indicator_store import AppIndicatorStoreContext, IndicatorStore
-from app.state import IndicatorState, State
+from app.indicator_runtime import ChartExtensionRuntime
+from app.indicator_runtime import IndicatorRuntime as LegacyIndicatorRuntime
+from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
+from app.indicator_store import IndicatorStore as LegacyIndicatorStore
+from app.state import ChartExtensionState, State
+from app.state import IndicatorState as LegacyIndicatorState
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 import indicators.avwap  # noqa: F401
@@ -25,6 +28,12 @@ from simplechart.api import (
 )
 from indicators.avwap.anchor_store import AvwapAnchorStore
 from indicators.avwap.models import AnchorRecord
+
+
+def test_app_layer_legacy_names_alias_chart_extension_names() -> None:
+    assert LegacyIndicatorRuntime is ChartExtensionRuntime
+    assert LegacyIndicatorStore is ChartExtensionStore
+    assert LegacyIndicatorState is ChartExtensionState
 
 
 class SegmentOnlyIndicator(Indicator):
@@ -218,7 +227,7 @@ def test_runtime_adds_avwap_state_when_anchors_exist(tmp_path: Path) -> None:
     state = State(symbol="SPY")
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([
             AnchorRecord(
                 symbol="SPY",
@@ -243,7 +252,7 @@ def test_runtime_updates_series_keys_and_preserves_current_visibility(
 ) -> None:
     state = State(symbol="SPY")
     state.indicators = [
-        IndicatorState(
+        ChartExtensionState(
             name="sma",
             params={"days": 2, "color": "#ffffff"},
             series_visibility={"sma_2": False, "stale": True},
@@ -264,7 +273,7 @@ def test_runtime_tracks_horizontal_segment_keys_and_visibility(
 ) -> None:
     state = State(symbol="SPY")
     state.indicators = [
-        IndicatorState(
+        ChartExtensionState(
             name="test_segment_only",
             params={},
             series_visibility={"test_segment_only_line": False, "stale": True},
@@ -283,7 +292,7 @@ def test_runtime_tracks_horizontal_segment_keys_and_visibility(
 def test_runtime_tracks_vertical_line_keys_and_visibility(tmp_path: Path) -> None:
     state = State(symbol="SPY")
     state.indicators = [
-        IndicatorState(
+        ChartExtensionState(
             name="test_vertical_line_only",
             params={},
             series_visibility={"test_vertical_line_only_line": False, "stale": True},
@@ -376,7 +385,7 @@ def test_runtime_applies_plugin_context_action_to_add_avwap_anchor(
     series = _series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         event = runtime.chart_event(series, 2.0, button="right")
         actions = runtime.context_actions(series, event)
@@ -409,9 +418,9 @@ def test_runtime_routes_avwap_drag_and_persists_finish(tmp_path: Path) -> None:
                 show_anchor=True,
             ),
         )
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [IndicatorState(name="avwap", params={"anchors": []})]
+        state.indicators = [ChartExtensionState(name="avwap", params={"anchors": []})]
         runtime = _runtime(state, cache, store)
         runtime.render_all(series)
 
@@ -443,9 +452,9 @@ def test_runtime_skips_avwap_drag_redraw_until_anchor_bar_changes(tmp_path: Path
                 color="#00FF88",
             ),
         )
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [IndicatorState(name="avwap", params={"anchors": []})]
+        state.indicators = [ChartExtensionState(name="avwap", params={"anchors": []})]
         runtime = _runtime(state, cache, store)
         runtime.render_all(series)
 
@@ -471,10 +480,10 @@ def test_runtime_removes_avwap_anchor_through_store(tmp_path: Path) -> None:
                 anchor_id=10,
             ),
         )
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
         state.indicators = [
-            IndicatorState(
+            ChartExtensionState(
                 name="avwap",
                 params={"anchors": []},
                 series_keys=[f"avwap_anchor_{persisted.anchor_id}"],
@@ -509,10 +518,10 @@ def test_runtime_uses_indicator_owned_avwap_config(tmp_path: Path) -> None:
                 anchor_id=10,
             ),
         )
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
         state.indicators = [
-            IndicatorState(
+            ChartExtensionState(
                 name="avwap",
                 params={"anchors": []},
                 series_keys=[f"avwap_anchor_{persisted.anchor_id}"],
@@ -536,7 +545,7 @@ def test_avwap_anchor_store_applies_avwap_mutations(tmp_path: Path) -> None:
     state = State(symbol="SPY")
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = AvwapAnchorStore(AppIndicatorStoreContext(state, cache))
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.apply(
             IndicatorMutation(
                 indicator_name="avwap",
@@ -586,10 +595,10 @@ def _runtime(
     state: State,
     cache: Cache,
     store: AvwapAnchorStore | RecordingStore | None = None,
-) -> IndicatorRuntime:
+) -> ChartExtensionRuntime:
     handlers = [store] if store is not None else None
-    indicator_store = IndicatorStore(state, cache, handlers)
-    return IndicatorRuntime(
+    indicator_store = ChartExtensionStore(state, cache, handlers)
+    return ChartExtensionRuntime(
         state,
         cache,
         indicator_store,

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import ModuleType
 
 
-_DEFAULT_PLUGIN_PACKAGES: tuple[str, ...] = ("indicators",)
+_DEFAULT_PLUGIN_PACKAGES: tuple[str, ...] = ("indicators", "tools")
 _USER_PLUGIN_DIR = Path.home() / ".simplechart" / "plugins"
 
 
