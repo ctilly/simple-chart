@@ -8,12 +8,12 @@ from simplechart.api import (
     Bar,
     ChoiceParam,
     HorizontalSegmentRender,
-    Indicator,
-    IndicatorRender,
+    ChartExtension,
+    ChartExtensionRender,
     LINE_STYLE_OPTIONS,
     MarkerRender,
     OHLCVSeries,
-    register_indicator,
+    register_extension,
 )
 
 _ET = ZoneInfo("America/New_York")
@@ -25,7 +25,7 @@ _LEVEL_ORDER_BY_METHOD: dict[str, tuple[str, ...]] = {
 }
 
 
-class PivotPointsIndicator(Indicator):
+class PivotPointsIndicator(ChartExtension):
 
     def name(self) -> str:
         return "pivot_points"
@@ -56,7 +56,7 @@ class PivotPointsIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
+    ) -> ChartExtensionRender:
         method = _method_value(params["method"])
         periods = int(params["periods"])
         daily_bars = _daily_bars_for(series, params)
@@ -69,7 +69,7 @@ class PivotPointsIndicator(Indicator):
         line_width = float(params["line_width"])
         line_style = _choice_value(params["line_style"])
         show_labels = bool(params["show_labels"])
-        render = IndicatorRender()
+        render = ChartExtensionRender()
         primary_key_used = False
 
         for i in range(1, len(daily_bars)):
@@ -113,7 +113,7 @@ class PivotPointsIndicator(Indicator):
         return render
 
 
-register_indicator(PivotPointsIndicator)
+register_extension(PivotPointsIndicator)
 
 
 def _daily_bars_for(series: OHLCVSeries, params: dict[str, Any]) -> list[Bar]:

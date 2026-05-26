@@ -6,23 +6,14 @@ from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionSto
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
-from indicators.vertical_line import VerticalLineIndicator as LegacyVerticalLineIndicator
-from indicators.vertical_line.session_store import (
-    VerticalLineSessionStore as LegacyVerticalLineSessionStore,
-)
 import tools.vertical_line  # noqa: F401
 from tools.vertical_line import VerticalLineIndicator
 from tools.vertical_line.session_store import VerticalLineSessionStore
-from simplechart.api import ChoiceParam, IndicatorAddMode
-
-
-def test_vertical_line_legacy_indicator_import_aliases_tool_package() -> None:
-    assert LegacyVerticalLineIndicator is VerticalLineIndicator
-    assert LegacyVerticalLineSessionStore is VerticalLineSessionStore
+from simplechart.api import ChoiceParam, ChartExtensionAddMode
 
 
 def test_vertical_line_declares_toolbar_add_mode() -> None:
-    assert VerticalLineIndicator().add_mode() == IndicatorAddMode.TOOLBAR
+    assert VerticalLineIndicator().add_mode() == ChartExtensionAddMode.TOOLBAR
 
 
 def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
@@ -43,11 +34,11 @@ def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
 
     assert result.done
     assert result.deactivate_tool
-    assert state.get_indicator("vertical_line") is not None
+    assert state.get_extension("vertical_line") is not None
     assert len(render_passes) == 1
     assert render_passes[0].render.vertical_lines[0].key == "vertical_line_1"
     assert render_passes[0].render.vertical_lines[0].x_index == 2.0
-    assert state.get_indicator("vertical_line").series_keys == ["vertical_line_1"]  # type: ignore[union-attr]
+    assert state.get_extension("vertical_line").series_keys == ["vertical_line_1"]  # type: ignore[union-attr]
 
 
 def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path) -> None:
@@ -109,7 +100,7 @@ def test_vertical_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None:
 
     assert removal is not None
     assert removal.series_keys == ["vertical_line_1"]
-    assert state.get_indicator("vertical_line") is None
+    assert state.get_extension("vertical_line") is None
 
 
 def _daily_series() -> OHLCVSeries:

@@ -82,7 +82,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from data.models import IndicatorStoreRecord, OHLCVSeries
+from data.models import ChartExtensionStoreRecord, OHLCVSeries
 
 
 LINE_STYLE_OPTIONS: list[str] = ["solid", "dash", "dot", "dash_dot"]
@@ -204,14 +204,14 @@ class ChartEvent:
 
 @dataclass(frozen=True)
 class ChartExtensionAction:
-    indicator_name: str
+    extension_name: str
     action_key: str
     label: str
 
 
 @dataclass(frozen=True)
 class ChartExtensionMutation:
-    indicator_name: str
+    extension_name: str
     operation: str
     payload: dict[str, Any]
 
@@ -224,7 +224,7 @@ class ChartExtensionConfig:
 
 @dataclass(frozen=True)
 class HitTestResult:
-    indicator_name: str
+    extension_name: str
     handle_key: str
     cursor: str | None = None
     priority: int = 0
@@ -232,7 +232,7 @@ class HitTestResult:
 
 @dataclass
 class DragSession:
-    indicator_name: str
+    extension_name: str
     handle_key: str
     original_params: dict[str, Any]
     working_params: dict[str, Any]
@@ -240,7 +240,7 @@ class DragSession:
 
 @dataclass
 class DrawingSession:
-    indicator_name: str
+    extension_name: str
     tool_key: str
     original_params: dict[str, Any]
     working_params: dict[str, Any]
@@ -264,7 +264,7 @@ class ChartExtensionStoreContext(Protocol):
         self,
         store_key: str,
         symbol: str,
-    ) -> list[IndicatorStoreRecord]: ...
+    ) -> list[ChartExtensionStoreRecord]: ...
 
     def put_indicator_record(
         self,
@@ -272,7 +272,7 @@ class ChartExtensionStoreContext(Protocol):
         symbol: str,
         sort_key: int,
         payload: dict[str, Any],
-    ) -> IndicatorStoreRecord: ...
+    ) -> ChartExtensionStoreRecord: ...
 
     def update_indicator_record(
         self,
@@ -293,7 +293,7 @@ class ChartExtensionStoreContext(Protocol):
 
     def remove_series_visibility(
         self,
-        indicator_name: str,
+        extension_name: str,
         series_key: str,
     ) -> None: ...
 
@@ -308,7 +308,7 @@ class ChartExtensionStoreHandler(Protocol):
 
     def params_for(
         self,
-        indicator_name: str,
+        extension_name: str,
         base_params: dict[str, Any],
     ) -> dict[str, Any]: ...
 
@@ -412,7 +412,7 @@ class ChartExtension(ABC):
         hit: HitTestResult,
     ) -> DragSession:
         return DragSession(
-            indicator_name=hit.indicator_name,
+            extension_name=hit.extension_name,
             handle_key=hit.handle_key,
             original_params=dict(params),
             working_params=dict(params),
@@ -573,16 +573,3 @@ def _legacy_series_label(series_key: str) -> str:
     if series_key.startswith("ema_"):
         return f"EMA {series_key[4:]}"
     return series_key
-
-
-# Backward-compatible aliases. New extension code should prefer the
-# ChartExtension names; existing indicator plugins can continue to import the
-# Indicator names during the migration.
-Indicator = ChartExtension
-IndicatorAddMode = ChartExtensionAddMode
-IndicatorRender = ChartExtensionRender
-IndicatorAction = ChartExtensionAction
-IndicatorMutation = ChartExtensionMutation
-IndicatorConfig = ChartExtensionConfig
-IndicatorStoreContext = ChartExtensionStoreContext
-IndicatorStoreHandler = ChartExtensionStoreHandler

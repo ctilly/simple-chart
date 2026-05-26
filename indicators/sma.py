@@ -25,17 +25,17 @@ import numpy as np
 from simplechart.api import (
     Bar,
     ChoiceParam,
-    Indicator,
+    ChartExtension,
     LINE_STYLE_OPTIONS,
     OHLCVSeries,
     bars_for_n_days,
-    register_indicator,
+    register_extension,
 )
 
 _ET = ZoneInfo("America/New_York")
 
 
-class SMAIndicator(Indicator):
+class SMAIndicator(ChartExtension):
 
     def name(self) -> str:
         return "sma"
@@ -71,7 +71,7 @@ class SMAIndicator(Indicator):
         return {f"sma_{days}": values}
 
 
-register_indicator(SMAIndicator)
+register_extension(SMAIndicator)
 
 
 def _sma(closes: np.ndarray, period: int) -> np.ndarray:

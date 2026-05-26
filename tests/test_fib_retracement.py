@@ -1,30 +1,20 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 from app.indicator_runtime import ChartExtensionRuntime
 from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
-from indicators.fib_retracement import (
-    FibonacciRetracementIndicator as LegacyFibonacciRetracementIndicator,
-)
-from indicators.fib_retracement.session_store import (
-    FibRetracementSessionStore as LegacyFibRetracementSessionStore,
-)
 import tools.fib_retracement  # noqa: F401
 from tools.fib_retracement import FibonacciRetracementIndicator
 from tools.fib_retracement.session_store import FibRetracementSessionStore
-from simplechart.api import ChoiceParam, IndicatorAddMode
-
-
-def test_fib_legacy_indicator_import_aliases_tool_package() -> None:
-    assert LegacyFibonacciRetracementIndicator is FibonacciRetracementIndicator
-    assert LegacyFibRetracementSessionStore is FibRetracementSessionStore
+from simplechart.api import ChoiceParam, ChartExtensionAddMode
 
 
 def test_fib_declares_toolbar_add_mode() -> None:
-    assert FibonacciRetracementIndicator().add_mode() == IndicatorAddMode.TOOLBAR
+    assert FibonacciRetracementIndicator().add_mode() == ChartExtensionAddMode.TOOLBAR
 
 
 def test_fib_preview_upward_swing_wick_levels() -> None:
@@ -183,7 +173,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
         removal = runtime.remove("fib_retracement_ref_1")
 
     assert removal is not None
-    assert state.get_indicator("fib_retracement") is None
+    assert state.get_extension("fib_retracement") is None
 
 
 def test_fib_zero_height_drawing_stacks_levels() -> None:
@@ -234,7 +224,7 @@ def _intraday_series(day_start: datetime) -> OHLCVSeries:
     )
 
 
-def _event(series: OHLCVSeries, index: int, y: float):
+def _event(series: OHLCVSeries, index: int, y: float) -> Any:
     bar = series.bars[index]
     return type("Event", (), {
         "x": float(index),

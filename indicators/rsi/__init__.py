@@ -16,10 +16,10 @@ from typing import Any
 import numpy as np
 
 from indicators.rsi._kernel import rsi as _rsi_kernel
-from simplechart.api import Indicator, OHLCVSeries, bars_for_n_days, register_indicator
+from simplechart.api import ChartExtension, OHLCVSeries, bars_for_n_days, register_extension
 
 
-class RSIIndicator(Indicator):
+class RSIIndicator(ChartExtension):
 
     def name(self) -> str:
         return "rsi"
@@ -56,4 +56,4 @@ class RSIIndicator(Indicator):
         }
 
 
-register_indicator(RSIIndicator)
+register_extension(RSIIndicator)

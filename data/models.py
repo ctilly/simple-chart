@@ -129,7 +129,7 @@ class OHLCVSeries:
 
 
 @dataclass(frozen=True)
-class IndicatorStoreRecord:
+class ChartExtensionStoreRecord:
     record_id: int
     store_key: str
     symbol: str

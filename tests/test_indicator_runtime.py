@@ -5,11 +5,8 @@ from typing import Any
 import numpy as np
 
 from app.indicator_runtime import ChartExtensionRuntime
-from app.indicator_runtime import IndicatorRuntime as LegacyIndicatorRuntime
 from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
-from app.indicator_store import IndicatorStore as LegacyIndicatorStore
 from app.state import ChartExtensionState, State
-from app.state import IndicatorState as LegacyIndicatorState
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 import indicators.avwap  # noqa: F401
@@ -19,24 +16,18 @@ from simplechart.api import (
     DrawingSession,
     DrawingToolResult,
     HorizontalSegmentRender,
-    Indicator,
-    IndicatorAddMode,
-    IndicatorMutation,
-    IndicatorRender,
+    ChartExtension,
+    ChartExtensionAddMode,
+    ChartExtensionMutation,
+    ChartExtensionRender,
     VerticalLineRender,
-    register_indicator,
+    register_extension,
 )
 from indicators.avwap.anchor_store import AvwapAnchorStore
 from indicators.avwap.models import AnchorRecord
 
 
-def test_app_layer_legacy_names_alias_chart_extension_names() -> None:
-    assert LegacyIndicatorRuntime is ChartExtensionRuntime
-    assert LegacyIndicatorStore is ChartExtensionStore
-    assert LegacyIndicatorState is ChartExtensionState
-
-
-class SegmentOnlyIndicator(Indicator):
+class SegmentOnlyIndicator(ChartExtension):
 
     def name(self) -> str:
         return "test_segment_only"
@@ -58,8 +49,8 @@ class SegmentOnlyIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
-        return IndicatorRender(
+    ) -> ChartExtensionRender:
+        return ChartExtensionRender(
             segments=[
                 HorizontalSegmentRender(
                     key="test_segment_only_line",
@@ -74,10 +65,10 @@ class SegmentOnlyIndicator(Indicator):
         )
 
 
-register_indicator(SegmentOnlyIndicator)
+register_extension(SegmentOnlyIndicator)
 
 
-class VerticalLineOnlyIndicator(Indicator):
+class VerticalLineOnlyIndicator(ChartExtension):
 
     def name(self) -> str:
         return "test_vertical_line_only"
@@ -99,8 +90,8 @@ class VerticalLineOnlyIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
-        return IndicatorRender(
+    ) -> ChartExtensionRender:
+        return ChartExtensionRender(
             vertical_lines=[
                 VerticalLineRender(
                     key="test_vertical_line_only_line",
@@ -113,10 +104,10 @@ class VerticalLineOnlyIndicator(Indicator):
         )
 
 
-register_indicator(VerticalLineOnlyIndicator)
+register_extension(VerticalLineOnlyIndicator)
 
 
-class DrawingFixtureIndicator(Indicator):
+class DrawingFixtureIndicator(ChartExtension):
 
     def name(self) -> str:
         return "test_drawing_fixture"
@@ -127,8 +118,8 @@ class DrawingFixtureIndicator(Indicator):
     def default_params(self) -> dict[str, Any]:
         return {"starts": 0}
 
-    def add_mode(self) -> IndicatorAddMode:
-        return IndicatorAddMode.TOOLBAR
+    def add_mode(self) -> ChartExtensionAddMode:
+        return ChartExtensionAddMode.TOOLBAR
 
     def compute(
         self,
@@ -145,7 +136,7 @@ class DrawingFixtureIndicator(Indicator):
     ) -> DrawingToolResult:
         return DrawingToolResult(
             session=DrawingSession(
-                indicator_name=self.name(),
+                extension_name=self.name(),
                 tool_key="line",
                 original_params=dict(params),
                 working_params={"start_x": event.x, "start_y": event.y},
@@ -157,8 +148,8 @@ class DrawingFixtureIndicator(Indicator):
         series: OHLCVSeries,
         session: DrawingSession,
         event: ChartEvent,
-    ) -> IndicatorRender | None:
-        return IndicatorRender(
+    ) -> ChartExtensionRender | None:
+        return ChartExtensionRender(
             segments=[
                 HorizontalSegmentRender(
                     key="test_drawing_preview",
@@ -179,8 +170,8 @@ class DrawingFixtureIndicator(Indicator):
         event: ChartEvent,
     ) -> DrawingToolResult:
         return DrawingToolResult(
-            mutation=IndicatorMutation(
-                indicator_name=self.name(),
+            mutation=ChartExtensionMutation(
+                extension_name=self.name(),
                 operation="commit",
                 payload={"x": event.x, "y": event.y},
             ),
@@ -190,26 +181,26 @@ class DrawingFixtureIndicator(Indicator):
     def cancel_drawing(
         self,
         session: DrawingSession,
-    ) -> IndicatorMutation | None:
-        return IndicatorMutation(
-            indicator_name=self.name(),
+    ) -> ChartExtensionMutation | None:
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="cancel",
             payload={"tool_key": session.tool_key},
         )
 
 
-register_indicator(DrawingFixtureIndicator)
+register_extension(DrawingFixtureIndicator)
 
 
 class RecordingStore:
 
     def __init__(self) -> None:
-        self.mutations: list[IndicatorMutation] = []
+        self.mutations: list[ChartExtensionMutation] = []
 
     def load_for_symbol(self, symbol: str) -> None:
         pass
 
-    def apply(self, mutation: IndicatorMutation) -> None:
+    def apply(self, mutation: ChartExtensionMutation) -> None:
         self.mutations.append(mutation)
 
     def prepare_active_indicators(self) -> None:
@@ -217,7 +208,7 @@ class RecordingStore:
 
     def params_for(
         self,
-        indicator_name: str,
+        extension_name: str,
         base_params: dict[str, Any],
     ) -> dict[str, Any]:
         return base_params
@@ -240,7 +231,7 @@ def test_runtime_adds_avwap_state_when_anchors_exist(tmp_path: Path) -> None:
         runtime = _runtime(state, cache, store)
         passes = runtime.render_all(_series())
 
-    assert state.get_indicator("avwap") is not None
+    assert state.get_extension("avwap") is not None
     assert len(passes) == 1
     assert passes[0].state.name == "avwap"
     assert passes[0].state.params["anchors"] == store.anchors()
@@ -349,7 +340,7 @@ def test_runtime_routes_toolbar_drawing_lifecycle(tmp_path: Path) -> None:
 def test_runtime_applies_toolbar_drawing_cancel_mutation(tmp_path: Path) -> None:
     state = State(symbol="SPY")
     session = DrawingSession(
-        indicator_name="test_drawing_fixture",
+        extension_name="test_drawing_fixture",
         tool_key="line",
         original_params={},
         working_params={},
@@ -398,7 +389,7 @@ def test_runtime_applies_plugin_context_action_to_add_avwap_anchor(
     assert len(store.anchors()) == 1
     assert len(anchors) == 1
     assert store.anchors()[0].anchor_ts == int(series.bars[2].timestamp.timestamp() * 1000)
-    assert state.get_indicator("avwap") is not None
+    assert state.get_extension("avwap") is not None
 
 
 def test_runtime_routes_avwap_drag_and_persists_finish(tmp_path: Path) -> None:
@@ -499,7 +490,7 @@ def test_runtime_removes_avwap_anchor_through_store(tmp_path: Path) -> None:
     assert removal.series_keys == [f"avwap_anchor_{persisted.anchor_id}"]
     assert store.anchors() == []
     assert anchors == []
-    assert state.get_indicator("avwap") is None
+    assert state.get_extension("avwap") is None
 
 
 def test_runtime_uses_indicator_owned_avwap_config(tmp_path: Path) -> None:
@@ -547,8 +538,8 @@ def test_avwap_anchor_store_applies_avwap_mutations(tmp_path: Path) -> None:
     with Cache(str(tmp_path / "test.db")) as cache:
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.apply(
-            IndicatorMutation(
-                indicator_name="avwap",
+            ChartExtensionMutation(
+                extension_name="avwap",
                 operation="add_anchor",
                 payload={
                     "anchor_ts": 1_700_000_000_000,
@@ -558,12 +549,12 @@ def test_avwap_anchor_store_applies_avwap_mutations(tmp_path: Path) -> None:
             )
         )
 
-        assert state.get_indicator("avwap") is not None
+        assert state.get_extension("avwap") is not None
         assert len(store.anchors()) == 1
 
         store.apply(
-            IndicatorMutation(
-                indicator_name="avwap",
+            ChartExtensionMutation(
+                extension_name="avwap",
                 operation="delete_anchor",
                 payload={"anchor": store.anchors()[0]},
             )
@@ -572,7 +563,7 @@ def test_avwap_anchor_store_applies_avwap_mutations(tmp_path: Path) -> None:
 
     assert store.anchors() == []
     assert anchors == []
-    assert state.get_indicator("avwap") is None
+    assert state.get_extension("avwap") is None
 
 
 def _series() -> OHLCVSeries:

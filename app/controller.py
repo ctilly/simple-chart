@@ -64,11 +64,11 @@ from simplechart.api import (
     ChoiceParam,
     DrawingSession,
     DrawingToolResult,
-    IndicatorAddMode,
-    IndicatorRender,
+    ChartExtensionAddMode,
+    ChartExtensionRender,
     LINE_STYLE_OPTIONS,
     RENDER_CHART,
-    all_indicators,
+    all_extensions,
 )
 from simplechart.plugins import load_plugins
 
@@ -78,7 +78,7 @@ load_plugins()
 # ------------------------------------------------------------------
 # Initial indicator set loaded on every symbol
 # ------------------------------------------------------------------
-# Each entry is (indicator_name, params). Adjust to taste.
+# Each entry is (extension_name, params). Adjust to taste.
 
 INITIAL_INDICATORS: list[tuple[str, dict[str, Any]]] = [
     ("sma", {"days":  5, "color": "#FFA500", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # amber
@@ -416,7 +416,7 @@ class MainWindow(QMainWindow):
                     series_visibility=copy.deepcopy(s.series_visibility),
                 )
                 for s in self._state.indicators
-                if all_indicators()[s.name]().preserve_ui_state_per_symbol()
+                if all_extensions()[s.name]().preserve_ui_state_per_symbol()
             ]
 
         # Restore or initialize indicator state for the arriving symbol.
@@ -648,7 +648,7 @@ class MainWindow(QMainWindow):
         self._preview_keys.clear()
         pm.refresh(preserve_view=True)
 
-    def _render_keys(self, render: IndicatorRender) -> set[str]:
+    def _render_keys(self, render: ChartExtensionRender) -> set[str]:
         keys = {series.key for series in render.series}
         keys.update(segment.key for segment in render.segments)
         keys.update(line.key for line in render.vertical_lines)
@@ -694,7 +694,7 @@ class MainWindow(QMainWindow):
         if result.render is not None and self._current_series is not None:
             render_pass = ChartExtensionRenderPass(
                 state=ChartExtensionState(
-                    name=self._drawing_session.indicator_name if self._drawing_session else "",
+                    name=self._drawing_session.extension_name if self._drawing_session else "",
                     params=self._drawing_session.working_params if self._drawing_session else {},
                     series_keys=list(self._render_keys(result.render)),
                 ),
@@ -913,7 +913,7 @@ class MainWindow(QMainWindow):
         pm.scrub_orphan_markers(active_marker_keys)
 
     # ------------------------------------------------------------------
-    # Indicator toggle and configuration
+    # ChartExtension toggle and configuration
     # ------------------------------------------------------------------
 
     def _on_indicator_toggled(self, series_key: str) -> None:
@@ -984,11 +984,11 @@ class MainWindow(QMainWindow):
         for the selected type. On accept, add the new indicator to state and
         redraw.
         """
-        registry = all_indicators()
+        registry = all_extensions()
         entries = {
             name: cls
             for name, cls in sorted(registry.items())
-            if cls().add_mode() == IndicatorAddMode.DIALOG
+            if cls().add_mode() == ChartExtensionAddMode.DIALOG
         }
         if not entries:
             return
@@ -1017,19 +1017,19 @@ class MainWindow(QMainWindow):
             self._reload_indicators()
 
     def _drawing_tool_entries(self) -> list[tuple[str, str]]:
-        registry = all_indicators()
+        registry = all_extensions()
         return [
             (name, cls().label())
             for name, cls in sorted(registry.items())
-            if cls().add_mode() == IndicatorAddMode.TOOLBAR
+            if cls().add_mode() == ChartExtensionAddMode.TOOLBAR
         ]
 
-    def _on_drawing_tool_selected(self, indicator_name: str) -> None:
+    def _on_drawing_tool_selected(self, extension_name: str) -> None:
         if self._drawing_session is not None:
             self._indicator_runtime.cancel_drawing(self._drawing_session)
             self._drawing_session = None
             self._clear_preview_render()
-        self._active_drawing_tool = indicator_name
+        self._active_drawing_tool = extension_name
 
     def closeEvent(self, event: object) -> None:
         """Clean up on close."""

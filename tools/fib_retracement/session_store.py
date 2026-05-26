@@ -1,14 +1,14 @@
 from typing import Any
 
 from tools.fib_retracement.models import FibRetracementRecord
-from simplechart.api import IndicatorMutation, IndicatorStoreContext
+from simplechart.api import ChartExtensionMutation, ChartExtensionStoreContext
 
 _INDICATOR_NAME = "fib_retracement"
 
 
 class FibRetracementSessionStore:
 
-    def __init__(self, context: IndicatorStoreContext) -> None:
+    def __init__(self, context: ChartExtensionStoreContext) -> None:
         self._context = context
         self._records_by_symbol: dict[str, list[FibRetracementRecord]] = {}
         self._active_symbol: str | None = None
@@ -19,17 +19,17 @@ class FibRetracementSessionStore:
 
     def params_for(
         self,
-        indicator_name: str,
+        extension_name: str,
         base_params: dict[str, Any],
     ) -> dict[str, Any]:
-        if indicator_name != _INDICATOR_NAME:
+        if extension_name != _INDICATOR_NAME:
             return base_params
         params = dict(base_params)
         params["drawings"] = self._active_records()
         return params
 
-    def apply(self, mutation: IndicatorMutation) -> None:
-        if mutation.indicator_name != _INDICATOR_NAME:
+    def apply(self, mutation: ChartExtensionMutation) -> None:
+        if mutation.extension_name != _INDICATOR_NAME:
             return
         if mutation.operation == "add_drawing":
             self.add_drawing(mutation.payload["drawing"])

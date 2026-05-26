@@ -3,9 +3,9 @@ from typing import Any
 from indicators.avwap import avwap_anchor_key
 from indicators.avwap.models import AnchorRecord
 from simplechart.api import (
-    IndicatorMutation,
-    IndicatorStoreContext,
-    IndicatorStoreRecord,
+    ChartExtensionMutation,
+    ChartExtensionStoreContext,
+    ChartExtensionStoreRecord,
 )
 
 
@@ -14,7 +14,7 @@ _AVWAP_ANCHOR_STORE_KEY = "avwap.anchors"
 
 class AvwapAnchorStore:
 
-    def __init__(self, context: IndicatorStoreContext) -> None:
+    def __init__(self, context: ChartExtensionStoreContext) -> None:
         self._context = context
         self._anchors: list[AnchorRecord] = []
 
@@ -32,17 +32,17 @@ class AvwapAnchorStore:
 
     def params_for(
         self,
-        indicator_name: str,
+        extension_name: str,
         base_params: dict[str, Any],
     ) -> dict[str, Any]:
-        if indicator_name != "avwap":
+        if extension_name != "avwap":
             return base_params
         params = dict(base_params)
         params["anchors"] = self._anchors
         return params
 
-    def apply(self, mutation: IndicatorMutation) -> None:
-        if mutation.indicator_name != "avwap":
+    def apply(self, mutation: ChartExtensionMutation) -> None:
+        if mutation.extension_name != "avwap":
             return
         if mutation.operation == "add_anchor":
             self.add_anchor(mutation.payload)
@@ -119,7 +119,7 @@ def _anchor_payload(anchor: AnchorRecord) -> dict[str, Any]:
     }
 
 
-def _record_to_anchor(record: IndicatorStoreRecord) -> AnchorRecord:
+def _record_to_anchor(record: ChartExtensionStoreRecord) -> AnchorRecord:
     payload = record.payload
     return AnchorRecord(
         symbol=record.symbol,

@@ -6,7 +6,7 @@ from simplechart.extensions._base import (
 )
 
 
-StoreHandlerFactory = Callable[[ChartExtensionStoreContext], ChartExtensionStoreHandler]
+type StoreHandlerFactory = Callable[[ChartExtensionStoreContext], ChartExtensionStoreHandler]
 
 _registry: list[StoreHandlerFactory] = []
 

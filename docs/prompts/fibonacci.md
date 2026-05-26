@@ -47,9 +47,9 @@ spec).
 - QUALITY: extremely high quality. Fully typed (mypyc-compatible),
 standard-library-first, no speculative abstractions, no dead code. Honor the
 - TOTAL ISOLATION: every part of this indicator lives ONLY inside its own
-package under `indicators/` (e.g. `indicators/fib_retracement/`). No knowledge
+package under `tools/` (e.g. `tools/fib_retracement/`). No knowledge
 of Fibonacci may leak into `app/`, `chart/`, the runtime, the public API, or
-any shared file. No `if indicator_name == ...`, no series-key sniffing outside
+any shared file. No `if extension_name == ...`, no series-key sniffing outside
 the package, no Fibonacci-specific chart branch. Adding the SMALLEST GENERIC
 chart primitive is permitted only under the skill file's stated rule. If you
 believe any change outside the package is unavoidable, STOP and follow the

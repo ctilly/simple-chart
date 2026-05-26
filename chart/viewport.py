@@ -247,7 +247,7 @@ def _patch_indicator_axis_format(indicator_ax: object) -> None:
     Reduce tick density on an indicator panel's y-axis.
 
     pyqtgraph's default tick density is tuned for price charts with many
-    decimal places. Indicator panels (e.g. RSI 0–100) need fewer, more
+    decimal places. ChartExtension panels (e.g. RSI 0–100) need fewer, more
     widely spaced ticks so labels don't overlap.
     """
     axes = getattr(indicator_ax, "axes", {})

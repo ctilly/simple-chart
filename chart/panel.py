@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import Any
 
 
 class PanelType(Enum):
@@ -45,7 +46,7 @@ class Panel:
 
     def __init__(
         self,
-        ax: object,
+        ax: Any,
         panel_type: PanelType,
         ratio: int = 1,
     ) -> None:

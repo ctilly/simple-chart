@@ -78,8 +78,8 @@ Test plan:
 - Runtime routes generic capabilities only. Never parse indicator-specific series keys.
 - Controller orchestrates UI flow only. Never branch on indicator names.
 - Indicator behavior imports from `simplechart.api`.
-- Indicator packages register themselves:
-  - `register_indicator(YourIndicator)`
+- Extension packages register themselves:
+  - `register_extension(YourIndicator)`
   - `register_store_handler(YourStoreHandler)` when persistent/runtime state is needed
 - Store handlers live with the indicator package, not in `app/`.
 - Numeric hot paths live in `_kernel.py` and take/return numpy arrays.
@@ -118,18 +118,18 @@ or what decision was made, and wait for explicit user approval before continuing
    - Use stable render keys. Persistent objects need stable IDs in keys.
    - Prefer `render` when labels, colors, markers, handles, or per-object
      visual settings cannot be represented cleanly by the default compute path.
-   - Use `IndicatorRender`, `SeriesRender`, and `MarkerRender`; add new primitives
-     only when a real indicator needs them.
+   - Use `ChartExtensionRender`, `SeriesRender`, and `MarkerRender`; add new
+     primitives only when a real extension needs them.
 
 2. Declare add capability.
-   - `IndicatorAddMode.DIALOG` for normal config-dialog indicators.
-   - `IndicatorAddMode.CONTEXT` for right-click chart actions.
-   - `IndicatorAddMode.TOOLBAR` for drawing-mode tools.
-   - `IndicatorAddMode.HIDDEN` for internal/helper indicators.
+   - `ChartExtensionAddMode.DIALOG` for normal config-dialog indicators.
+   - `ChartExtensionAddMode.CONTEXT` for right-click chart actions.
+   - `ChartExtensionAddMode.TOOLBAR` for drawing-mode tools.
+   - `ChartExtensionAddMode.HIDDEN` for internal/helper extensions.
 
 3. Add context actions if needed.
    - Implement `context_actions(...)`.
-   - Implement `apply_action(...)` to return an `IndicatorMutation`.
+   - Implement `apply_action(...)` to return a `ChartExtensionMutation`.
    - Do not persist inside the indicator.
 
 4. Add hit testing and drag behavior if needed.
@@ -173,7 +173,7 @@ or what decision was made, and wait for explicit user approval before continuing
 ## Anti-Patterns
 
 - Importing Qt, finplot, chart, controller, or runtime from an indicator behavior file.
-- Adding `if indicator_name == ...` outside the indicator package.
+- Adding `if extension_name == ...` outside the extension package.
 - Adding `if series_key.startswith(...)` outside the indicator package.
 - Persisting directly from an indicator behavior method.
 - Creating a generic abstraction before a real indicator needs it.

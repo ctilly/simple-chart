@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from data.models import Bar, IndicatorStoreRecord, OHLCVSeries, Timeframe
+from data.models import Bar, ChartExtensionStoreRecord, OHLCVSeries, Timeframe
 
 
 # Path to the DDL file, relative to this module.
@@ -254,14 +254,14 @@ class Cache:
             )
 
     # ------------------------------------------------------------------
-    # Indicator records
+    # ChartExtension records
     # ------------------------------------------------------------------
 
     def get_indicator_records(
         self,
         store_key: str,
         symbol: str,
-    ) -> list[IndicatorStoreRecord]:
+    ) -> list[ChartExtensionStoreRecord]:
         cursor = self._conn.execute(
             """
             SELECT record_id, store_key, symbol, sort_key, payload
@@ -280,7 +280,7 @@ class Cache:
         symbol: str,
         sort_key: int,
         payload: dict[str, Any],
-    ) -> IndicatorStoreRecord:
+    ) -> ChartExtensionStoreRecord:
         with self._conn:
             cursor = self._conn.execute(
                 """
@@ -294,7 +294,7 @@ class Cache:
         record_id = cursor.lastrowid
         if record_id is None:
             raise RuntimeError("SQLite did not return an indicator record id.")
-        return IndicatorStoreRecord(
+        return ChartExtensionStoreRecord(
             record_id=record_id,
             store_key=store_key,
             symbol=symbol,
@@ -353,11 +353,11 @@ def _row_to_bar(row: sqlite3.Row) -> Bar:
     )
 
 
-def _row_to_indicator_record(row: sqlite3.Row) -> IndicatorStoreRecord:
+def _row_to_indicator_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:
     payload = json.loads(row["payload"])
     if not isinstance(payload, dict):
-        raise ValueError("Indicator record payload must be a JSON object.")
-    return IndicatorStoreRecord(
+        raise ValueError("ChartExtension record payload must be a JSON object.")
+    return ChartExtensionStoreRecord(
         record_id=row["record_id"],
         store_key=row["store_key"],
         symbol=row["symbol"],

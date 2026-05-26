@@ -63,16 +63,13 @@ class State:
     timeframe:  Timeframe  = Timeframe.DAILY
     indicators: list[ChartExtensionState] = field(default_factory=list)
 
-    def get_indicator(self, name: str) -> ChartExtensionState | None:
+    def get_extension(self, name: str) -> ChartExtensionState | None:
         """Return the first indicator instance with the given name, or None."""
         return next((i for i in self.indicators if i.name == name), None)
 
-    def get_indicator_by_series_key(self, series_key: str) -> ChartExtensionState | None:
+    def get_extension_by_series_key(self, series_key: str) -> ChartExtensionState | None:
         """Return the indicator that owns a given series key, or None."""
         return next(
             (i for i in self.indicators if series_key in i.series_keys),
             None,
         )
-
-
-IndicatorState = ChartExtensionState

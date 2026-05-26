@@ -17,6 +17,7 @@ shadowing the yfinance package on import.
 """
 
 import math
+from typing import Any, cast
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -160,10 +161,10 @@ def _normalize_timestamp(ts: object) -> datetime:
         timestamp = timestamp.tz_localize("UTC")
     else:
         timestamp = timestamp.tz_convert("UTC")
-    return timestamp.to_pydatetime()
+    return cast(datetime, timestamp.to_pydatetime())
 
 
-def _row_to_bar(ts: object, row: object) -> Bar:
+def _row_to_bar(ts: object, row: Any) -> Bar:
     """Convert one validated yfinance DataFrame row to a Bar."""
     return Bar(
         timestamp=_normalize_timestamp(ts),
@@ -176,21 +177,21 @@ def _row_to_bar(ts: object, row: object) -> Bar:
     )
 
 
-def _row_is_valid(row: object) -> bool:
+def _row_is_valid(row: Any) -> bool:
     required = ("Open", "High", "Low", "Close", "Volume")
     return all(_is_finite_number(row[column]) for column in required)
 
 
-def _is_finite_number(value: object) -> bool:
+def _is_finite_number(value: Any) -> bool:
     try:
         return math.isfinite(float(value))
     except (TypeError, ValueError):
         return False
 
 
-def _coerce_float(value: object) -> float:
+def _coerce_float(value: Any) -> float:
     return float(value)
 
 
-def _coerce_volume(value: object) -> int:
+def _coerce_volume(value: Any) -> int:
     return int(float(value))

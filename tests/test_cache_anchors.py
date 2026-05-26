@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from data.cache import Cache
-from data.models import IndicatorStoreRecord
+from data.models import ChartExtensionStoreRecord
 
 
 def test_update_indicator_record_persists_sort_key_and_payload(tmp_path: Path) -> None:
@@ -21,7 +21,7 @@ def test_update_indicator_record_persists_sort_key_and_payload(tmp_path: Path) -
             },
         )
 
-        updated = IndicatorStoreRecord(
+        updated = ChartExtensionStoreRecord(
             record_id=record.record_id,
             store_key="avwap.anchors",
             symbol="SPY",

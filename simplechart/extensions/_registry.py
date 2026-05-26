@@ -1,24 +1,25 @@
 """
 simplechart/extensions/_registry.py
 
-Indicator registry — maps indicator names to Indicator classes.
+Chart-extension registry — maps extension names to ChartExtension classes.
 
-Indicators are registered when their modules are imported at app startup
-by the loader. Plugin authors register their indicators the same way.
+Extensions (indicators and tools) are registered when their modules are
+imported at app startup by the loader. Plugin authors register theirs the
+same way.
 
 Usage:
 
-  Registering an indicator plugin:
-      from simplechart.api import register_indicator
-      register_indicator(MyIndicator)
+  Registering an extension plugin:
+      from simplechart.api import register_extension
+      register_extension(MyExtension)
 
-  Looking up an indicator by name:
-      from simplechart.api import get_indicator
-      indicator = get_indicator("sma")   # returns an instance of SMAIndicator
+  Looking up an extension by name:
+      from simplechart.api import get_extension
+      extension = get_extension("sma")   # returns an instance of SMAIndicator
 
-  Listing all registered indicators:
-      from simplechart.api import all_indicators
-      for name, cls in all_indicators().items():
+  Listing all registered extensions:
+      from simplechart.api import all_extensions
+      for name, cls in all_extensions().items():
           print(name, cls.label())
 """
 
@@ -26,48 +27,31 @@ from simplechart.extensions._base import ChartExtension
 
 
 # Internal registry: name -> class (not instance).
-# Instances are created on demand by get() so each call gets a fresh object.
+# Instances are created on demand by get_extension() so each call gets a fresh
+# object.
 _registry: dict[str, type[ChartExtension]] = {}
 
 
-def register(cls: type[ChartExtension]) -> None:
-    """
-    Register an Indicator class."""
+def register_extension(cls: type[ChartExtension]) -> None:
+    """Register a ChartExtension class."""
     instance = cls()
     _registry[instance.name()] = cls
 
 
-def register_extension(cls: type[ChartExtension]) -> None:
-    register(cls)
-
-
-register_indicator = register_extension
-
-
-def get(name: str) -> ChartExtension:
+def get_extension(name: str) -> ChartExtension:
     """
-    Return a new instance of the named indicator.
+    Return a new instance of the named extension.
 
     Raises KeyError if the name is not registered.
     """
     if name not in _registry:
         available = ", ".join(sorted(_registry))
         raise KeyError(
-            f"Unknown indicator {name!r}. Registered: {available}"
+            f"Unknown extension {name!r}. Registered: {available}"
         )
     return _registry[name]()
-
-
-def get_extension(name: str) -> ChartExtension:
-    return get(name)
-
-
-get_indicator = get_extension
 
 
 def all_extensions() -> dict[str, type[ChartExtension]]:
     """Return a copy of the full registry (name -> class)."""
     return dict(_registry)
-
-
-all_indicators = all_extensions

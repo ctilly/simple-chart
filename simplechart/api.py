@@ -1,7 +1,7 @@
 """
 simplechart/api.py
 
-Public API for SimpleChart indicator plugins.
+Public API for SimpleChart extension plugins (indicators and tools).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHO THIS IS FOR
@@ -9,20 +9,24 @@ WHO THIS IS FOR
 
 This module is the only import surface plugin authors ever need. Import
 everything from here — never from the internal packages (indicators.*,
-data.*, etc.). Internal paths may change across versions; this module
-will not.
+tools.*, data.*, etc.). Internal paths may change across versions; this
+module will not.
+
+A ChartExtension is the single base class for everything that draws on the
+chart: compute-style indicators (SMA, EMA, RSI) and interactive tools
+(vertical line, Fibonacci retracement) alike.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INDICATOR CATEGORIES
+EXTENSION CATEGORIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Chart indicators — draw directly on the price chart (time × price axes).
+Chart extensions — draw directly on the price chart (time × price axes).
   Examples: SMA, EMA, AVWAP.
   These do not override render_target(); the default RENDER_CHART applies.
 
-Panel indicators — draw in a dedicated panel below the chart, sharing
+Panel extensions — draw in a dedicated panel below the chart, sharing
   only the x (time) axis with the price chart. Their y-axis is scaled
-  independently to the indicator's value range.
+  independently to the extension's value range.
   Examples: RSI, MACD, RVOL.
   These override render_target() and return a short lowercase string
   naming their panel (e.g. "rsi", "macd"). Each unique string gets its
@@ -34,9 +38,9 @@ MINIMAL EXAMPLE — a 20-day simple moving average
 
     from typing import Any
     import numpy as np
-    from simplechart.api import Indicator, OHLCVSeries, bars_for_n_days, register_indicator
+    from simplechart.api import ChartExtension, OHLCVSeries, bars_for_n_days, register_extension
 
-    class MySMAIndicator(Indicator):
+    class MySMA(ChartExtension):
 
         def name(self) -> str:
             return "my_sma"
@@ -59,9 +63,9 @@ MINIMAL EXAMPLE — a 20-day simple moving average
                 result[i] = closes[i - period + 1 : i + 1].mean()
             return {f"my_sma_{params['days']}": result}
 
-    register_indicator(MySMAIndicator)
+    register_extension(MySMA)
 
-For a panel indicator (e.g. RSI), add one override:
+For a panel extension (e.g. RSI), add one override:
 
     def render_target(self) -> str:
         return "my_rsi"   # unique string → dedicated panel below the chart
@@ -72,66 +76,57 @@ Drop the file into ~/.simplechart/plugins/ — no other steps needed.
 EXPORTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  Name                      Description
-  ────────────────────────  ──────────────────────────────────────────
-  Indicator                 ABC to subclass for every indicator
-  IndicatorAddMode          Declares where/how an indicator can be added
-  ChoiceParam               Dropdown parameter (value + allowed options)
-  LINE_STYLE_OPTIONS        Standard line style strings for ChoiceParam
-  RENDER_CHART              render_target() constant for chart indicators
-  SeriesFill                Declares a shaded fill between two series
-  SeriesRender              Render description for a line series
-  HorizontalSegmentRender   Render description for a horizontal line segment
-  VerticalLineRender        Render description for a full-height vertical line
-  MarkerRender              Render description for a chart marker
-  IndicatorRender           Render output produced by an indicator
-  ChartEvent                Generic chart interaction event
-  IndicatorAction           User-triggered indicator action
-  IndicatorMutation         Requested indicator state mutation
-  IndicatorConfig           Indicator-owned config form for a render series
-  DrawingSession            Active toolbar drawing-tool state
-  DrawingToolResult         Result of advancing a toolbar drawing tool
-  IndicatorStoreRecord      Opaque plugin-owned persistence record
-  IndicatorStoreContext     Store-handler access to app persistence/state services
-  IndicatorStoreHandler     Store-handler protocol
-  HitTestResult             Interactive handle hit-test result
-  DragSession               Active indicator drag state
-  register_indicator        Register an Indicator class at import time
-  register                  Backward-compatible alias for register_indicator
-  register_store_handler    Register an indicator-owned store handler
-  all_indicators            Return registered indicator classes
-  get_indicator             Instantiate a registered indicator
-  OHLCVSeries               Bar series type passed to compute()
-  Bar                       Single OHLCV bar
-  bars_for_n_days           Convert a day count to a bar count for a timeframe
-  timestamp_ms_to_bar_index Convert a UTC ms timestamp to a bar index
+  Name                         Description
+  ───────────────────────────  ───────────────────────────────────────────
+  ChartExtension               ABC to subclass for every extension
+  ChartExtensionAddMode        Declares where/how an extension can be added
+  ChoiceParam                  Dropdown parameter (value + allowed options)
+  LINE_STYLE_OPTIONS           Standard line style strings for ChoiceParam
+  RENDER_CHART                 render_target() constant for chart extensions
+  SeriesFill                   Declares a shaded fill between two series
+  SeriesRender                 Render description for a line series
+  HorizontalSegmentRender      Render description for a horizontal line segment
+  VerticalLineRender           Render description for a full-height vertical line
+  MarkerRender                 Render description for a chart marker
+  ChartExtensionRender         Render output produced by an extension
+  ChartEvent                   Generic chart interaction event
+  ChartExtensionAction         User-triggered extension action
+  ChartExtensionMutation       Requested extension state mutation
+  ChartExtensionConfig         Extension-owned config form for a render series
+  DrawingSession               Active toolbar drawing-tool state
+  DrawingToolResult            Result of advancing a toolbar drawing tool
+  ChartExtensionStoreRecord    Opaque plugin-owned persistence record
+  ChartExtensionStoreContext   Store-handler access to app persistence/state services
+  ChartExtensionStoreHandler   Store-handler protocol
+  HitTestResult                Interactive handle hit-test result
+  DragSession                  Active extension drag state
+  register_extension           Register a ChartExtension class at import time
+  register_store_handler       Register an extension-owned store handler
+  all_extensions               Return registered extension classes
+  get_extension                Instantiate a registered extension
+  OHLCVSeries                  Bar series type passed to compute()
+  Bar                          Single OHLCV bar
+  bars_for_n_days              Convert a day count to a bar count for a timeframe
+  timestamp_ms_to_bar_index    Convert a UTC ms timestamp to a bar index
 """
 
 from simplechart.extensions._base import (  # noqa: F401
     RENDER_CHART,               # "chart" — default render_target() return value
     ChartEvent,                 # generic chart interaction event
-    ChartExtension,             # ABC: subclass this for chart extensions
+    ChartExtension,             # ABC: subclass this for every extension
     ChartExtensionAction,       # user-triggered extension action
     ChartExtensionAddMode,      # declares where/how an extension can be added
-    ChartExtensionConfig,       # extension-owned config form
+    ChartExtensionConfig,       # extension-owned config form for a render series
     ChartExtensionMutation,     # requested extension state mutation
-    ChartExtensionRender,       # render output produced by an extension
+    ChartExtensionRender,       # render output: series + markers
     ChartExtensionStoreContext, # store-handler access to app persistence/state services
     ChartExtensionStoreHandler, # store-handler protocol
     ChoiceParam,                # dropdown param: ChoiceParam(value, options)
     DrawingSession,             # active toolbar drawing-tool state
     DrawingToolResult,          # drawing-tool advance result
-    DragSession,                # active indicator drag state
+    DragSession,                # active extension drag state
     HitTestResult,              # interactive handle hit-test result
     HorizontalSegmentRender,    # horizontal line segment render primitive
-    Indicator,                  # ABC: subclass this for every indicator
-    IndicatorAddMode,           # declares where/how an indicator can be added
-    IndicatorAction,            # user-triggered indicator action
-    IndicatorConfig,            # indicator-owned config form for a render series
-    IndicatorMutation,          # requested indicator state mutation
-    IndicatorRender,            # render output: series + markers
-    IndicatorStoreContext,      # store-handler access to app persistence/state services
-    IndicatorStoreHandler,      # store-handler protocol
     LINE_STYLE_OPTIONS,         # ["solid", "dash", "dot", "dash_dot"]
     MarkerRender,               # chart marker render primitive
     SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
@@ -140,18 +135,14 @@ from simplechart.extensions._base import (  # noqa: F401
 )
 from simplechart.extensions._registry import (  # noqa: F401
     all_extensions,
-    all_indicators,
     get_extension,
-    get_indicator,
-    register,
     register_extension,
-    register_indicator,
 )
 from simplechart.extensions._store_registry import register_store_handler  # noqa: F401
-from data.models import (      # noqa: F401
-    Bar,                       # single OHLCV bar
-    IndicatorStoreRecord,      # opaque plugin-owned persistence record
-    OHLCVSeries,               # full bar series passed to compute()
+from data.models import (         # noqa: F401
+    Bar,                          # single OHLCV bar
+    ChartExtensionStoreRecord,    # opaque plugin-owned persistence record
+    OHLCVSeries,                  # full bar series passed to compute()
 )
 from data.calendar import (    # noqa: F401
     bars_for_n_days,           # bars_for_n_days(days, timeframe) -> int
@@ -170,21 +161,13 @@ __all__: list[str] = [
     "ChartExtensionRender",
     "ChartExtensionStoreContext",
     "ChartExtensionStoreHandler",
+    "ChartExtensionStoreRecord",
     "ChoiceParam",
     "DrawingSession",
     "DrawingToolResult",
     "DragSession",
     "HitTestResult",
     "HorizontalSegmentRender",
-    "Indicator",
-    "IndicatorAddMode",
-    "IndicatorAction",
-    "IndicatorConfig",
-    "IndicatorMutation",
-    "IndicatorRender",
-    "IndicatorStoreRecord",
-    "IndicatorStoreContext",
-    "IndicatorStoreHandler",
     "LINE_STYLE_OPTIONS",
     "MarkerRender",
     "OHLCVSeries",
@@ -193,13 +176,9 @@ __all__: list[str] = [
     "SeriesRender",
     "VerticalLineRender",
     "bars_for_n_days",
-    "register",
     "register_extension",
-    "register_indicator",
     "register_store_handler",
     "all_extensions",
-    "all_indicators",
     "get_extension",
-    "get_indicator",
     "timestamp_ms_to_bar_index",
 ]

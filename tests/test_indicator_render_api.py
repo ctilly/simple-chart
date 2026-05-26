@@ -11,32 +11,26 @@ from indicators.avwap import (
 )
 from indicators.avwap.models import AnchorRecord
 from indicators.pivot_points import PivotPointsIndicator
-from indicators._base import ChartExtension as LegacyChartExtension
-from indicators._registry import register_indicator as legacy_register_indicator
-from indicators._store_registry import register_store_handler as legacy_register_store_handler
 from simplechart.extensions._base import (
+    ChartEvent,
     ChartExtension,
     ChartExtensionAction,
     ChartExtensionAddMode,
     ChartExtensionConfig,
     ChartExtensionMutation,
     ChartExtensionRender,
+    DragSession,
     DrawingSession,
     DrawingToolResult,
+    HitTestResult,
     HorizontalSegmentRender,
-    Indicator,
-    IndicatorAddMode,
-    IndicatorConfig,
-    IndicatorRender,
     MarkerRender,
     SeriesRender,
     VerticalLineRender,
 )
-from simplechart.extensions._base import ChartEvent, DragSession, HitTestResult
-from simplechart.extensions._base import IndicatorAction, IndicatorMutation
 from simplechart.extensions._store_registry import register_store_handler
 from indicators.rsi import RSIIndicator
-from simplechart.extensions._registry import register_indicator
+from simplechart.extensions._registry import register_extension
 from simplechart.api import (
     ChartEvent as PublicChartEvent,
     ChartExtension as PublicChartExtension,
@@ -50,18 +44,12 @@ from simplechart.api import (
     DragSession as PublicDragSession,
     HorizontalSegmentRender as PublicHorizontalSegmentRender,
     HitTestResult as PublicHitTestResult,
-    IndicatorAction as PublicIndicatorAction,
-    IndicatorAddMode as PublicIndicatorAddMode,
-    IndicatorConfig as PublicIndicatorConfig,
-    IndicatorMutation as PublicIndicatorMutation,
-    IndicatorRender as PublicIndicatorRender,
     MarkerRender as PublicMarkerRender,
     SeriesRender as PublicSeriesRender,
     VerticalLineRender as PublicVerticalLineRender,
     all_extensions as public_all_extensions,
     get_extension as public_get_extension,
     register_extension as public_register_extension,
-    register_indicator as public_register_indicator,
     register_store_handler as public_register_store_handler,
 )
 
@@ -73,7 +61,6 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicChartExtensionAction is ChartExtensionAction
     assert PublicChartExtensionConfig is ChartExtensionConfig
     assert PublicChartExtensionMutation is ChartExtensionMutation
-    assert PublicIndicatorRender is IndicatorRender
     assert PublicHorizontalSegmentRender is HorizontalSegmentRender
     assert PublicMarkerRender is MarkerRender
     assert PublicSeriesRender is SeriesRender
@@ -83,21 +70,13 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicDrawingToolResult is DrawingToolResult
     assert PublicDragSession is DragSession
     assert PublicHitTestResult is HitTestResult
-    assert PublicIndicatorAddMode is IndicatorAddMode
-    assert PublicIndicatorAction is IndicatorAction
-    assert PublicIndicatorConfig is IndicatorConfig
-    assert PublicIndicatorMutation is IndicatorMutation
-    assert public_register_extension is public_register_indicator
+    assert public_register_extension is register_extension
     assert public_get_extension("rsi").name() == "rsi"
     assert "rsi" in public_all_extensions()
-    assert public_register_indicator is register_indicator
     assert public_register_store_handler is register_store_handler
-    assert LegacyChartExtension is ChartExtension
-    assert legacy_register_indicator is register_indicator
-    assert legacy_register_store_handler is register_store_handler
 
 
-class _NoOpIndicator(Indicator):
+class _NoOpIndicator(ChartExtension):
 
     def name(self) -> str:
         return "noop"
@@ -121,7 +100,7 @@ def test_drawing_lifecycle_defaults_are_noops() -> None:
     series = _series()
     event = ChartEvent(x=1.0, y=100.0, bar_index=1, timestamp_ms=1_700_086_400_000)
     session = DrawingSession(
-        indicator_name="noop",
+        extension_name="noop",
         tool_key="noop",
         original_params={},
         working_params={},
@@ -138,7 +117,7 @@ def test_legacy_compute_output_adapts_to_indicator_render() -> None:
     indicator = RSIIndicator()
     render = indicator.render(_series(), indicator.default_params())
 
-    assert isinstance(render, IndicatorRender)
+    assert isinstance(render, ChartExtensionRender)
     assert render.markers == []
     assert [series.key for series in render.series] == [
         "rsi_14",
@@ -414,7 +393,7 @@ def test_avwap_hit_test_keeps_small_candle_target_clickable() -> None:
 
 
 def test_avwap_declares_context_add_mode() -> None:
-    assert AVWAPIndicator().add_mode() == IndicatorAddMode.CONTEXT
+    assert AVWAPIndicator().add_mode() == ChartExtensionAddMode.CONTEXT
 
 
 def test_avwap_opts_out_of_per_symbol_ui_state() -> None:

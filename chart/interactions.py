@@ -35,7 +35,8 @@ map the scene x-coordinate to a bar index via the price viewbox.
 """
 
 import types
-from typing import Callable, cast
+from collections.abc import Callable
+from typing import cast
 
 from PyQt6.QtCore import Qt
 
@@ -238,7 +239,7 @@ class ChartInteractions:
         if self._mouse_move_cb is None:
             return
         rect = self._price_ax.vb.sceneBoundingRect()  # type: ignore[attr-defined]
-        if not rect.contains(scene_pos):  # type: ignore[attr-defined]
+        if not rect.contains(scene_pos):
             return
         pos = self._price_ax.vb.mapSceneToView(scene_pos)  # type: ignore[attr-defined]
         self._mouse_move_cb(pos.x(), pos.y())

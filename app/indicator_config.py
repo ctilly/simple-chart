@@ -158,38 +158,38 @@ class IndicatorConfigDialog(QDialog):
         """Build the appropriate input widget for a param value."""
         if isinstance(value, bool):
             # bool check must come before int since bool is a subclass of int
-            w = QCheckBox()
-            w.setChecked(value)
-            return w
+            checkbox = QCheckBox()
+            checkbox.setChecked(value)
+            return checkbox
 
         if isinstance(value, int):
-            w = QSpinBox()
-            w.setRange(1, 9999)
-            w.setValue(value)
-            return w
+            spin = QSpinBox()
+            spin.setRange(1, 9999)
+            spin.setValue(value)
+            return spin
 
         if isinstance(value, float):
-            w = QDoubleSpinBox()
-            w.setRange(0.0, 9999.0)
-            w.setDecimals(2)
-            w.setValue(value)
-            return w
+            dspin = QDoubleSpinBox()
+            dspin.setRange(0.0, 9999.0)
+            dspin.setDecimals(2)
+            dspin.setValue(value)
+            return dspin
 
         if isinstance(value, ChoiceParam):
-            w = QComboBox()
+            combo = QComboBox()
             for opt in value.options:
-                w.addItem(opt)
+                combo.addItem(opt)
             idx = value.options.index(value.value) if value.value in value.options else 0
-            w.setCurrentIndex(idx)
-            return w
+            combo.setCurrentIndex(idx)
+            return combo
 
         if isinstance(value, str) and value.startswith("#"):
             return ColorButton(value)
 
         # Default: plain text field
-        w = QLineEdit()
-        w.setText(str(value))
-        return w
+        edit = QLineEdit()
+        edit.setText(str(value))
+        return edit
 
     def _read_field(self, widget: QWidget, original: Any) -> Any:
         """Read the current value from a form widget."""

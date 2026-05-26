@@ -27,7 +27,7 @@ finplot integration:
     height ratio is set via pyqtgraph's row stretch factors.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 import finplot as fplt
 import pyqtgraph as pg
@@ -119,7 +119,7 @@ class ChartWidget(QWidget):
             self._master.nextRow()
 
         # Price: row 0 (stretch 4), Volume: row 1 (stretch 1).
-        # Indicator slots: rows 2–4: stretch 0 prevents proportional growth;
+        # ChartExtension slots: rows 2–4: stretch 0 prevents proportional growth;
         # maxHeight 0 enforces the hard cap (stretch alone still allows min-size).
         self._master.ci.layout.setRowStretchFactor(0, 4)
         self._master.ci.layout.setRowStretchFactor(1, 1)
@@ -150,7 +150,7 @@ class ChartWidget(QWidget):
 
         # Hide all indicator slots — they become visible only when assigned.
         for slot in self._indicator_slots:
-            slot.panel.ax.hide()  # type: ignore[attr-defined]
+            slot.panel.ax.hide()
 
         all_axes = [price_ax, volume_ax] + [s.panel.ax for s in self._indicator_slots]
         sync_x_axis_labels(all_axes)
@@ -246,7 +246,7 @@ class ChartWidget(QWidget):
                 # can actually grow to its proportional share.
                 self._master.ci.layout.setRowMaximumHeight(i + 2, 10000.0)
                 self._master.ci.layout.setRowStretchFactor(i + 2, 2)
-                slot.panel.ax.show()  # type: ignore[attr-defined]
+                slot.panel.ax.show()
                 if not slot.behavior_installed:
                     install_indicator_panel_behavior(slot.panel.ax, self._price_panel.ax)
                     slot.behavior_installed = True
@@ -269,8 +269,8 @@ class ChartWidget(QWidget):
         """
         for i, slot in enumerate(self._indicator_slots):
             if slot.name == name:
-                slot.panel.ax.reset()  # type: ignore[attr-defined]
-                slot.panel.ax.hide()   # type: ignore[attr-defined]
+                slot.panel.ax.reset()
+                slot.panel.ax.hide()
                 self._master.ci.layout.setRowStretchFactor(i + 2, 0)
                 self._master.ci.layout.setRowMaximumHeight(i + 2, 0.0)
                 slot.name = None

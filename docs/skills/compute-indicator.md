@@ -19,8 +19,9 @@ Read these files before classifying the work:
 
 - `simplechart/api.py` — the public API surface; every import in a new indicator
   comes from here
-- `indicators/_base.py` — the Indicator ABC, compute() and render() contracts,
-  render primitives, interaction hooks, and default legacy render behavior
+- `simplechart/extensions/_base.py` — the ChartExtension ABC, compute() and
+  render() contracts, render primitives, interaction hooks, and default legacy
+  render behavior
 
 After the indicator is classified in Step 2, read the reference files that match
 the capability you are about to build:
@@ -170,7 +171,7 @@ For directory-form indicators (kernel needed):
 ```
 indicators/
   your_indicator/
-    __init__.py     # Indicator subclass + register_indicator()
+    __init__.py     # ChartExtension subclass + register_extension()
     _kernel.py      # compiled kernel
 ```
 
@@ -202,7 +203,7 @@ Reference kernels:
   use this as the model when the kernel produces more than one array (e.g.
   upper band, middle band, lower band for Bollinger Bands)
 
-### 7b. The Indicator subclass
+### 7b. The ChartExtension subclass
 
 File: `indicators/your_indicator.py` (single-file) or
       `indicators/your_indicator/__init__.py` (directory form with kernel)
@@ -210,10 +211,10 @@ File: `indicators/your_indicator.py` (single-file) or
 Imports come from `simplechart.api`:
 ```python
 from simplechart.api import (
-    Indicator,
+    ChartExtension,
     ChoiceParam,
     LINE_STYLE_OPTIONS,
-    register_indicator,
+    register_extension,
     OHLCVSeries,
 )
 ```
@@ -257,12 +258,12 @@ def render_target(self) -> str:
 
 Chart indicators do not override this method.
 
-End the file with: `register_indicator(YourIndicator)`
+End the file with: `register_extension(YourIndicator)`
 
 `simplechart.plugins` loads every `.py` file and sub-package in the project
 plugin package whose name does not start with `_`, plus user plugin `.py` files
 from `~/.simplechart/plugins/`. No app/controller import wiring is needed — the
-`register_indicator()` call at the bottom of the file fires on import.
+`register_extension()` call at the bottom of the file fires on import.
 
 ### 7c. Add to INITIAL_INDICATORS (optional)
 

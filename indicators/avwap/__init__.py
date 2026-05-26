@@ -49,17 +49,17 @@ from simplechart.api import (
     ChoiceParam,
     DragSession,
     HitTestResult,
-    Indicator,
-    IndicatorAction,
-    IndicatorAddMode,
-    IndicatorConfig,
-    IndicatorMutation,
-    IndicatorRender,
+    ChartExtension,
+    ChartExtensionAction,
+    ChartExtensionAddMode,
+    ChartExtensionConfig,
+    ChartExtensionMutation,
+    ChartExtensionRender,
     LINE_STYLE_OPTIONS,
     MarkerRender,
     OHLCVSeries,
     SeriesRender,
-    register_indicator,
+    register_extension,
     register_store_handler,
     timestamp_ms_to_bar_index,
 )
@@ -78,7 +78,7 @@ _ANCHOR_HIT_BUFFER_FRACTION = 0.35
 _ANCHOR_HIT_MIN_PRICE_FRACTION = 0.0004
 
 
-class AVWAPIndicator(Indicator):
+class AVWAPIndicator(ChartExtension):
 
     def name(self) -> str:
         return "avwap"
@@ -91,8 +91,8 @@ class AVWAPIndicator(Indicator):
         # added interactively by clicking bars on the chart.
         return {"anchors": []}
 
-    def add_mode(self) -> IndicatorAddMode:
-        return IndicatorAddMode.CONTEXT
+    def add_mode(self) -> ChartExtensionAddMode:
+        return ChartExtensionAddMode.CONTEXT
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return False
@@ -149,10 +149,10 @@ class AVWAPIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
+    ) -> ChartExtensionRender:
         anchors: list[AnchorRecord] = params.get("anchors", [])
         result = self.compute(series, params)
-        render = IndicatorRender()
+        render = ChartExtensionRender()
         anchors_by_key: dict[str, AnchorRecord] = {
             avwap_anchor_key(anchor): anchor
             for anchor in anchors
@@ -191,7 +191,7 @@ class AVWAPIndicator(Indicator):
         series: OHLCVSeries,
         params: dict[str, Any],
         event: ChartEvent,
-    ) -> list[IndicatorAction]:
+    ) -> list[ChartExtensionAction]:
         if event.timestamp_ms is None:
             return []
         if event.bar_index is not None and _anchor_target_is_duplicate(
@@ -202,8 +202,8 @@ class AVWAPIndicator(Indicator):
         ):
             return []
         return [
-            IndicatorAction(
-                indicator_name=self.name(),
+            ChartExtensionAction(
+                extension_name=self.name(),
                 action_key="add_anchor",
                 label="Add AVWAP here",
             )
@@ -215,7 +215,7 @@ class AVWAPIndicator(Indicator):
         params: dict[str, Any],
         action_key: str,
         event: ChartEvent,
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         if action_key != "add_anchor" or event.timestamp_ms is None:
             return None
         anchors: list[AnchorRecord] = params.get("anchors", [])
@@ -224,8 +224,8 @@ class AVWAPIndicator(Indicator):
             tz=timezone.utc,
         ).strftime("%Y-%m-%d")
         color = _AVWAP_PALETTE[len(anchors) % len(_AVWAP_PALETTE)]
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="add_anchor",
             payload={
                 "anchor_ts": event.timestamp_ms,
@@ -255,7 +255,7 @@ class AVWAPIndicator(Indicator):
                 and _anchor_y_hit_test(series, event.bar_index, event.y)
             ):
                 return HitTestResult(
-                    indicator_name=self.name(),
+                    extension_name=self.name(),
                     handle_key=key,
                     cursor="drag",
                     priority=10,
@@ -271,7 +271,7 @@ class AVWAPIndicator(Indicator):
         anchors: list[AnchorRecord] = params.get("anchors", [])
         original = [_copy_anchor(anchor) for anchor in anchors]
         return DragSession(
-            indicator_name=self.name(),
+            extension_name=self.name(),
             handle_key=hit.handle_key,
             original_params={"anchors": original},
             working_params={"anchors": [_copy_anchor(anchor) for anchor in anchors]},
@@ -282,7 +282,7 @@ class AVWAPIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorRender | None:
+    ) -> ChartExtensionRender | None:
         if event.bar_index is None:
             return None
         updated = _updated_drag_anchor(series, session, event.bar_index)
@@ -299,7 +299,7 @@ class AVWAPIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         if event.bar_index is not None:
             self.drag_to(series, session, event)
         anchor = avwap_anchor_for_key(
@@ -308,8 +308,8 @@ class AVWAPIndicator(Indicator):
         )
         if anchor is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_anchor",
             payload={"anchor": anchor},
         )
@@ -317,9 +317,9 @@ class AVWAPIndicator(Indicator):
     def cancel_drag(
         self,
         session: DragSession,
-    ) -> IndicatorMutation | None:
-        return IndicatorMutation(
-            indicator_name=self.name(),
+    ) -> ChartExtensionMutation | None:
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="restore_anchors",
             payload={"anchors": session.original_params["anchors"]},
         )
@@ -335,11 +335,11 @@ class AVWAPIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorConfig | None:
+    ) -> ChartExtensionConfig | None:
         anchor = avwap_anchor_for_key(params.get("anchors", []), series_key)
         if anchor is None:
             return None
-        return IndicatorConfig(
+        return ChartExtensionConfig(
             label=f"AVWAP {anchor.label}",
             params={
                 "color": anchor.color,
@@ -354,12 +354,12 @@ class AVWAPIndicator(Indicator):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         anchor = avwap_anchor_for_key(params.get("anchors", []), series_key)
         if anchor is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_anchor",
             payload={
                 "anchor": AnchorRecord(
@@ -379,18 +379,18 @@ class AVWAPIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         anchor = avwap_anchor_for_key(params.get("anchors", []), series_key)
         if anchor is None or anchor.anchor_id is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="delete_anchor",
             payload={"anchor": anchor},
         )
 
 
-register_indicator(AVWAPIndicator)
+register_extension(AVWAPIndicator)
 
 
 def avwap_anchor_key(anchor: AnchorRecord) -> str:

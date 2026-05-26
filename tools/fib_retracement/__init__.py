@@ -16,15 +16,15 @@ from simplechart.api import (
     DrawingToolResult,
     HitTestResult,
     HorizontalSegmentRender,
-    Indicator,
-    IndicatorAddMode,
-    IndicatorConfig,
-    IndicatorMutation,
-    IndicatorRender,
+    ChartExtension,
+    ChartExtensionAddMode,
+    ChartExtensionConfig,
+    ChartExtensionMutation,
+    ChartExtensionRender,
     LINE_STYLE_OPTIONS,
     MarkerRender,
     OHLCVSeries,
-    register_indicator,
+    register_extension,
     register_store_handler,
 )
 
@@ -35,7 +35,7 @@ _HIT_X_BUFFER = 0.65
 _HANDLE_HIT_Y_FRACTION = 0.004
 
 
-class FibonacciRetracementIndicator(Indicator):
+class FibonacciRetracementIndicator(ChartExtension):
 
     def name(self) -> str:
         return "fib_retracement"
@@ -61,8 +61,8 @@ class FibonacciRetracementIndicator(Indicator):
             "show_100_0": True,
         }
 
-    def add_mode(self) -> IndicatorAddMode:
-        return IndicatorAddMode.TOOLBAR
+    def add_mode(self) -> ChartExtensionAddMode:
+        return ChartExtensionAddMode.TOOLBAR
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return False
@@ -78,8 +78,8 @@ class FibonacciRetracementIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
-        render = IndicatorRender()
+    ) -> ChartExtensionRender:
+        render = ChartExtensionRender()
         for drawing in _drawings_for_series(params, series):
             layout = _drawing_layout(series, drawing)
             if layout is None:
@@ -97,7 +97,7 @@ class FibonacciRetracementIndicator(Indicator):
             return DrawingToolResult()
         return DrawingToolResult(
             session=DrawingSession(
-                indicator_name=self.name(),
+                extension_name=self.name(),
                 tool_key="fib_retracement",
                 original_params=dict(params),
                 working_params={
@@ -113,11 +113,11 @@ class FibonacciRetracementIndicator(Indicator):
         series: OHLCVSeries,
         session: DrawingSession,
         event: ChartEvent,
-    ) -> IndicatorRender | None:
+    ) -> ChartExtensionRender | None:
         drawing = _session_drawing(series, session, event)
         if drawing is None:
-            return IndicatorRender()
-        render = IndicatorRender()
+            return ChartExtensionRender()
+        render = ChartExtensionRender()
         layout = _live_drawing_layout(series, drawing, event)
         if layout is None:
             return render
@@ -134,8 +134,8 @@ class FibonacciRetracementIndicator(Indicator):
         if drawing is None:
             return DrawingToolResult(cancel=True, deactivate_tool=True)
         return DrawingToolResult(
-            mutation=IndicatorMutation(
-                indicator_name=self.name(),
+            mutation=ChartExtensionMutation(
+                extension_name=self.name(),
                 operation="add_drawing",
                 payload={"drawing": drawing},
             ),
@@ -146,7 +146,7 @@ class FibonacciRetracementIndicator(Indicator):
     def cancel_drawing(
         self,
         session: DrawingSession,
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         return None
 
     def hit_test(
@@ -178,7 +178,7 @@ class FibonacciRetracementIndicator(Indicator):
     ) -> DragSession:
         drawings = _drawings_for_series(params, series)
         return DragSession(
-            indicator_name=self.name(),
+            extension_name=self.name(),
             handle_key=hit.handle_key,
             original_params={"drawings": list(drawings)},
             working_params={"drawings": list(drawings)},
@@ -189,7 +189,7 @@ class FibonacciRetracementIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorRender | None:
+    ) -> ChartExtensionRender | None:
         updated = _updated_drag_drawing(series, session, event)
         if updated is None:
             return None
@@ -197,7 +197,7 @@ class FibonacciRetracementIndicator(Indicator):
             updated if fib_drawing_key(drawing) == session.handle_key else drawing
             for drawing in session.working_params["drawings"]
         ]
-        render = IndicatorRender()
+        render = ChartExtensionRender()
         layout = _live_drawing_layout(series, updated, event)
         if layout is not None:
             _append_drawing_render(render, updated, layout, len(series.bars))
@@ -208,7 +208,7 @@ class FibonacciRetracementIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         self.drag_to(series, session, event)
         drawing = fib_drawing_for_key(
             session.working_params["drawings"],
@@ -216,15 +216,15 @@ class FibonacciRetracementIndicator(Indicator):
         )
         if drawing is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_drawing",
             payload={"drawing": drawing},
         )
 
-    def cancel_drag(self, session: DragSession) -> IndicatorMutation | None:
-        return IndicatorMutation(
-            indicator_name=self.name(),
+    def cancel_drag(self, session: DragSession) -> ChartExtensionMutation | None:
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="restore_drawings",
             payload={"drawings": session.original_params["drawings"]},
         )
@@ -233,11 +233,11 @@ class FibonacciRetracementIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorConfig | None:
+    ) -> ChartExtensionConfig | None:
         drawing = fib_drawing_for_key(params.get("drawings", []), series_key)
         if drawing is None:
             return None
-        return IndicatorConfig(
+        return ChartExtensionConfig(
             label="Fibonacci Retracement",
             params={
                 "anchor_price_mode": ChoiceParam(drawing.anchor_price_mode, _ANCHOR_MODE_OPTIONS),
@@ -261,12 +261,12 @@ class FibonacciRetracementIndicator(Indicator):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         drawing = fib_drawing_for_key(params.get("drawings", []), series_key)
         if drawing is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_drawing",
             payload={"drawing": _configured_drawing(drawing, edited_params)},
         )
@@ -275,12 +275,12 @@ class FibonacciRetracementIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         drawing = fib_drawing_for_key(params.get("drawings", []), series_key)
         if drawing is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="delete_drawing",
             payload={"drawing": drawing},
         )
@@ -376,7 +376,7 @@ def _session_drawing(
 
 
 def _append_drawing_render(
-    render: IndicatorRender,
+    render: ChartExtensionRender,
     drawing: FibRetracementRecord,
     layout: _DrawingLayout,
     bar_count: int,
@@ -631,5 +631,5 @@ def _choice_value(value: Any) -> str:
     return str(value)
 
 
-register_indicator(FibonacciRetracementIndicator)
+register_extension(FibonacciRetracementIndicator)
 register_store_handler(FibRetracementSessionStore)

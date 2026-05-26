@@ -1,7 +1,7 @@
 """
 chart/legend.py
 
-Indicator legend — shows active indicators and lets the user toggle them.
+ChartExtension legend — shows active indicators and lets the user toggle them.
 
 Displayed as a horizontal strip at the top of the chart area, matching
 the style of Webull's indicator label row. Each indicator appears as a
@@ -15,9 +15,10 @@ set_visible() on the PlotManager, then calls update() on the legend to
 reflect the new state.
 """
 
-from typing import Callable
+from collections.abc import Callable
+from typing import cast
 
-from PyQt6.QtCore import QEvent, QPoint, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -203,7 +204,7 @@ class DrawingToolPalette(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(frame)
 
-    def eventFilter(self, watched: object, event: object) -> bool:
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
         if isinstance(event, QMouseEvent):
             if event.type() == QEvent.Type.MouseButtonPress:
                 self._begin_drag(event)
@@ -340,7 +341,7 @@ class ChartLegend(QWidget):
             self._on_remove,
         )
         self._labels[series_key] = label
-        layout = self.layout()
+        layout = cast(QVBoxLayout, self.layout())
         assert layout is not None
         layout.insertWidget(max(1, layout.count() - 2), label)
 
@@ -412,7 +413,9 @@ def _tool_icon(tool_name: str, widget: QWidget) -> QIcon:
         for y, length in ((5, 18), (9, 14), (14, 11), (19, 18)):
             painter.drawLine(3, y, 3 + length, y)
     else:
-        icon = widget.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+        style = widget.style()
+        assert style is not None
+        icon = style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
         painter.end()
         return icon
     painter.end()

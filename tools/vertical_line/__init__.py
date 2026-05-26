@@ -14,15 +14,15 @@ from simplechart.api import (
     DragSession,
     DrawingToolResult,
     HitTestResult,
-    Indicator,
-    IndicatorAddMode,
-    IndicatorConfig,
-    IndicatorMutation,
-    IndicatorRender,
+    ChartExtension,
+    ChartExtensionAddMode,
+    ChartExtensionConfig,
+    ChartExtensionMutation,
+    ChartExtensionRender,
     LINE_STYLE_OPTIONS,
     OHLCVSeries,
     VerticalLineRender,
-    register_indicator,
+    register_extension,
     register_store_handler,
 )
 
@@ -30,7 +30,7 @@ _DEFAULT_COLOR = "#7a7f8c"
 _HIT_BUFFER = 0.55
 
 
-class VerticalLineIndicator(Indicator):
+class VerticalLineIndicator(ChartExtension):
 
     def name(self) -> str:
         return "vertical_line"
@@ -46,8 +46,8 @@ class VerticalLineIndicator(Indicator):
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
         }
 
-    def add_mode(self) -> IndicatorAddMode:
-        return IndicatorAddMode.TOOLBAR
+    def add_mode(self) -> ChartExtensionAddMode:
+        return ChartExtensionAddMode.TOOLBAR
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return False
@@ -63,8 +63,8 @@ class VerticalLineIndicator(Indicator):
         self,
         series: OHLCVSeries,
         params: dict[str, Any],
-    ) -> IndicatorRender:
-        render = IndicatorRender()
+    ) -> ChartExtensionRender:
+        render = ChartExtensionRender()
         for line in _lines_for_symbol(params, series.symbol):
             x_index = _timestamp_to_nearest_index(line.timestamp_ms, series)
             if x_index is None:
@@ -90,8 +90,8 @@ class VerticalLineIndicator(Indicator):
         if event.timestamp_ms is None:
             return DrawingToolResult()
         return DrawingToolResult(
-            mutation=IndicatorMutation(
-                indicator_name=self.name(),
+            mutation=ChartExtensionMutation(
+                extension_name=self.name(),
                 operation="add_line",
                 payload={
                     "timestamp_ms": event.timestamp_ms,
@@ -120,7 +120,7 @@ class VerticalLineIndicator(Indicator):
                 continue
             if abs(event.x - float(x_index)) <= _HIT_BUFFER:
                 return HitTestResult(
-                    indicator_name=self.name(),
+                    extension_name=self.name(),
                     handle_key=key,
                     cursor="drag",
                     priority=10,
@@ -135,7 +135,7 @@ class VerticalLineIndicator(Indicator):
     ) -> DragSession:
         lines = _lines_for_symbol(params, series.symbol)
         return DragSession(
-            indicator_name=self.name(),
+            extension_name=self.name(),
             handle_key=hit.handle_key,
             original_params={"lines": list(lines)},
             working_params={"lines": list(lines)},
@@ -146,7 +146,7 @@ class VerticalLineIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorRender | None:
+    ) -> ChartExtensionRender | None:
         updated = _updated_drag_line(session, event)
         if updated is None:
             return None
@@ -161,7 +161,7 @@ class VerticalLineIndicator(Indicator):
         series: OHLCVSeries,
         session: DragSession,
         event: ChartEvent,
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         self.drag_to(series, session, event)
         line = vertical_line_for_key(
             session.working_params["lines"],
@@ -169,8 +169,8 @@ class VerticalLineIndicator(Indicator):
         )
         if line is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_line",
             payload={"line": line},
         )
@@ -178,9 +178,9 @@ class VerticalLineIndicator(Indicator):
     def cancel_drag(
         self,
         session: DragSession,
-    ) -> IndicatorMutation | None:
-        return IndicatorMutation(
-            indicator_name=self.name(),
+    ) -> ChartExtensionMutation | None:
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="restore_lines",
             payload={"lines": session.original_params["lines"]},
         )
@@ -189,11 +189,11 @@ class VerticalLineIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorConfig | None:
+    ) -> ChartExtensionConfig | None:
         line = vertical_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
-        return IndicatorConfig(
+        return ChartExtensionConfig(
             label="Vertical Line",
             params={
                 "color": line.color,
@@ -207,12 +207,12 @@ class VerticalLineIndicator(Indicator):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         line = vertical_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="update_line",
             payload={
                 "line": VerticalLineRecord(
@@ -230,12 +230,12 @@ class VerticalLineIndicator(Indicator):
         self,
         series_key: str,
         params: dict[str, Any],
-    ) -> IndicatorMutation | None:
+    ) -> ChartExtensionMutation | None:
         line = vertical_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
-        return IndicatorMutation(
-            indicator_name=self.name(),
+        return ChartExtensionMutation(
+            extension_name=self.name(),
             operation="delete_line",
             payload={"line": line},
         )
@@ -313,5 +313,5 @@ def _choice_value(value: Any) -> str:
     return str(value)
 
 
-register_indicator(VerticalLineIndicator)
+register_extension(VerticalLineIndicator)
 register_store_handler(VerticalLineSessionStore)

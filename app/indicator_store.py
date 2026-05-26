@@ -1,5 +1,5 @@
 from collections.abc import Sequence
-from typing import Any, cast
+from typing import Any
 
 from app.state import ChartExtensionState
 from app.state import State
@@ -9,7 +9,7 @@ from simplechart.api import (
     ChartExtensionMutation,
     ChartExtensionStoreContext,
     ChartExtensionStoreHandler,
-    IndicatorStoreRecord,
+    ChartExtensionStoreRecord,
 )
 
 
@@ -44,12 +44,12 @@ class ChartExtensionStore:
 
     def params_for(
         self,
-        indicator_name: str,
+        extension_name: str,
         base_params: dict[str, Any],
     ) -> dict[str, Any]:
         params = base_params
         for handler in self._handlers:
-            params = handler.params_for(indicator_name, params)
+            params = handler.params_for(extension_name, params)
         return params
 
 
@@ -60,13 +60,13 @@ class AppChartExtensionStoreContext:
         self._cache = cache
 
     def current_symbol(self) -> str | None:
-        return cast(str | None, self._state.symbol)
+        return self._state.symbol
 
     def get_indicator_records(
         self,
         store_key: str,
         symbol: str,
-    ) -> list[IndicatorStoreRecord]:
+    ) -> list[ChartExtensionStoreRecord]:
         return self._cache.get_indicator_records(store_key, symbol)
 
     def put_indicator_record(
@@ -75,7 +75,7 @@ class AppChartExtensionStoreContext:
         symbol: str,
         sort_key: int,
         payload: dict[str, Any],
-    ) -> IndicatorStoreRecord:
+    ) -> ChartExtensionStoreRecord:
         return self._cache.put_indicator_record(store_key, symbol, sort_key, payload)
 
     def update_indicator_record(
@@ -94,7 +94,7 @@ class AppChartExtensionStoreContext:
         name: str,
         params: dict[str, Any],
     ) -> None:
-        if self._state.get_indicator(name) is None:
+        if self._state.get_extension(name) is None:
             self._state.indicators.append(ChartExtensionState(name=name, params=params))
 
     def remove_indicator_state(self, name: str) -> None:
@@ -105,16 +105,9 @@ class AppChartExtensionStoreContext:
 
     def remove_series_visibility(
         self,
-        indicator_name: str,
+        extension_name: str,
         series_key: str,
     ) -> None:
-        ind_state = self._state.get_indicator(indicator_name)
+        ind_state = self._state.get_extension(extension_name)
         if ind_state is not None:
             ind_state.series_visibility.pop(series_key, None)
-
-
-IndicatorStore = ChartExtensionStore
-AppIndicatorStoreContext = AppChartExtensionStoreContext
-IndicatorMutation = ChartExtensionMutation
-IndicatorStoreContext = ChartExtensionStoreContext
-IndicatorStoreHandler = ChartExtensionStoreHandler

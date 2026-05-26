@@ -25,7 +25,7 @@ Grouping strategy:
     volume = sum of all volumes
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from data.models import Bar, Timeframe
@@ -130,7 +130,7 @@ def _resample(bars: list[Bar], target: Timeframe) -> list[Bar]:
     # Group bars by (date, period_index). Using a list of (key, bar) pairs
     # rather than a dict preserves insertion order (Python 3.7+ guarantee)
     # and makes the reduce step straightforward.
-    groups: dict[tuple[datetime, int], list[Bar]] = {}
+    groups: dict[tuple[date, int], list[Bar]] = {}
     for bar in bars:
         key = _group_key(bar.timestamp, period_minutes)
         if key not in groups:
@@ -140,7 +140,7 @@ def _resample(bars: list[Bar], target: Timeframe) -> list[Bar]:
     return [_reduce_group(group_bars) for group_bars in groups.values()]
 
 
-def _group_key(ts: datetime, period_minutes: int) -> tuple[datetime, int]:
+def _group_key(ts: datetime, period_minutes: int) -> tuple[date, int]:
     """
     Return a (date, period_index) key for a bar timestamp.
 

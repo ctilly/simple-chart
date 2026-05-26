@@ -80,37 +80,43 @@ material when useful, but do not treat them as automatic dependencies.
 - If an external library is used only for validation, document that in the
   research summary and test plan.
 
-## Indicator API
+## Extension API
 
-`simplechart.api` is the stable public import path for indicator authors. It
-re-exports everything a plugin needs: `Indicator`, `ChoiceParam`,
-`LINE_STYLE_OPTIONS`, `RENDER_CHART`, `SeriesFill`, `SeriesRender`,
-`MarkerRender`, `IndicatorRender`, `ChartEvent`, `IndicatorAction`,
-`IndicatorMutation`, `IndicatorConfig`, `IndicatorAddMode`, `HitTestResult`,
-`DragSession`, `register_indicator`, `register`, `register_store_handler`,
-`all_indicators`, `get_indicator`, `OHLCVSeries`, `Bar`,
-`IndicatorStoreRecord`, `bars_for_n_days`, and `timestamp_ms_to_bar_index`.
-Prefer `register_indicator` in new code. `register` is kept as a
-backward-compatible alias.
+`simplechart.api` is the stable public import path for extension authors
+(indicators and tools). It re-exports everything a plugin needs:
+`ChartExtension`, `ChoiceParam`, `LINE_STYLE_OPTIONS`, `RENDER_CHART`,
+`SeriesFill`, `SeriesRender`, `HorizontalSegmentRender`, `VerticalLineRender`,
+`MarkerRender`, `ChartExtensionRender`, `ChartEvent`, `ChartExtensionAction`,
+`ChartExtensionMutation`, `ChartExtensionConfig`, `ChartExtensionAddMode`,
+`HitTestResult`, `DragSession`, `DrawingSession`, `DrawingToolResult`,
+`register_extension`, `register_store_handler`, `all_extensions`,
+`get_extension`, `OHLCVSeries`, `Bar`, `ChartExtensionStoreRecord`,
+`ChartExtensionStoreContext`, `ChartExtensionStoreHandler`, `bars_for_n_days`,
+and `timestamp_ms_to_bar_index`. `ChartExtension` is the single base class for
+both indicators and tools.
 
-Internal package paths (`indicators._base`, `indicators._registry`, etc.) are
-not part of the public contract — they may change. External plugins must
-import only from `simplechart.api`. Internal code (app layer, built-in
-indicators) may import from internals directly.
+Internal package paths (`simplechart.extensions._base`,
+`simplechart.extensions._registry`, etc.) are not part of the public
+contract — they may change. External plugins must import only from
+`simplechart.api`. Internal code (app layer, built-in indicators and tools)
+may import from internals directly.
 
-New indicators, including project indicators under `indicators/`, should import
-indicator-facing APIs from `simplechart.api` unless the task is explicitly to
-change framework internals.
+New extensions, including project indicators under `indicators/` and tools
+under `tools/`, should import extension-facing APIs from `simplechart.api`
+unless the task is explicitly to change framework internals.
 
 ## Where indicators live
 
-- **Project plugins** — `indicators/`, as a `.py` file or a package directory
+- **Project indicators** — `indicators/`, as a `.py` file or a package directory
   with `__init__.py`. Use the dev install (see `AGENT-SETUP.md`).
+- **Project tools** — interactive drawing tools (vertical line, Fibonacci
+  retracement) live in `tools/`, as a package directory with `__init__.py`.
+  Tools are chart extensions too; they load the same way indicators do.
 - **User plugins** — `.py` files under `~/.simplechart/plugins/`. The normal
   install is sufficient when no compiled kernel is needed.
 
-Both locations load automatically on next launch — no manual controller
-wiring required. The `register_indicator()` call at the bottom of the
+All locations load automatically on next launch — no manual controller
+wiring required. The `register_extension()` call at the bottom of the
 indicator file fires on import.
 
 ## Building new indicators

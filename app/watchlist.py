@@ -13,9 +13,9 @@ add_symbol() / remove_symbol() / set_active_symbol() to keep the list
 in sync after its own DB writes succeed.
 """
 
-from typing import Callable
+from collections.abc import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
@@ -107,21 +107,24 @@ class WatchlistWidget(QWidget):
     def add_symbol(self, symbol: str) -> None:
         """Append symbol to the list (no-op if already present)."""
         for i in range(self._list.count()):
-            if self._list.item(i).text() == symbol:
+            item = self._list.item(i)
+            if item is not None and item.text() == symbol:
                 return
         self._list.addItem(symbol)
 
     def remove_symbol(self, symbol: str) -> None:
         """Remove symbol from the list (no-op if not present)."""
         for i in range(self._list.count()):
-            if self._list.item(i).text() == symbol:
+            item = self._list.item(i)
+            if item is not None and item.text() == symbol:
                 self._list.takeItem(i)
                 return
 
     def set_active_symbol(self, symbol: str) -> None:
         """Highlight the row matching symbol; clear selection if not found."""
         for i in range(self._list.count()):
-            if self._list.item(i).text() == symbol:
+            item = self._list.item(i)
+            if item is not None and item.text() == symbol:
                 self._list.setCurrentRow(i)
                 return
         self._list.clearSelection()
@@ -137,14 +140,14 @@ class WatchlistWidget(QWidget):
         if ok and symbol.strip():
             self._on_add(symbol.strip().upper())
 
-    def _show_context_menu(self, pos: object) -> None:
-        item = self._list.itemAt(pos)  # type: ignore[arg-type]
+    def _show_context_menu(self, pos: QPoint) -> None:
+        item = self._list.itemAt(pos)
         if item is None:
             return
         menu = QMenu(self)
         remove_action = menu.addAction("Remove")
         action = menu.exec(
-            self._list.mapToGlobal(pos)  # type: ignore[arg-type]
+            self._list.mapToGlobal(pos)
         )
         if action == remove_action:
             self._on_remove(item.text())
