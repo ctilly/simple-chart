@@ -60,65 +60,6 @@ class Cache:
         """Run schema.sql to create tables if they don't exist yet."""
         ddl = _SCHEMA_PATH.read_text()
         self._conn.executescript(ddl)
-        self._migrate()
-
-    def _migrate(self) -> None:
-        """Add columns introduced after the initial schema release."""
-        for stmt in (
-            "ALTER TABLE avwap_anchors ADD COLUMN line_width REAL NOT NULL DEFAULT 2.0",
-            "ALTER TABLE avwap_anchors ADD COLUMN line_style TEXT NOT NULL DEFAULT 'solid'",
-            "ALTER TABLE avwap_anchors ADD COLUMN show_anchor INTEGER NOT NULL DEFAULT 0",
-        ):
-            try:
-                self._conn.execute(stmt)
-            except sqlite3.OperationalError:
-                pass  # column already exists
-        self._migrate_avwap_anchors()
-        self._conn.commit()
-
-    def _migrate_avwap_anchors(self) -> None:
-        row = self._conn.execute(
-            """
-            SELECT 1
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name = 'avwap_anchors'
-            """
-        ).fetchone()
-        if row is None:
-            return
-        cursor = self._conn.execute(
-            """
-            SELECT
-                anchor_id, symbol, anchor_ts, label, color,
-                line_width, line_style, show_anchor
-            FROM avwap_anchors
-            """
-        )
-        self._conn.executemany(
-            """
-            INSERT OR IGNORE INTO indicator_records (
-                record_id, store_key, symbol, sort_key, payload
-            )
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    row["anchor_id"],
-                    "avwap.anchors",
-                    row["symbol"],
-                    row["anchor_ts"],
-                    json.dumps({
-                        "label": row["label"],
-                        "color": row["color"],
-                        "line_width": row["line_width"],
-                        "line_style": row["line_style"],
-                        "show_anchor": bool(row["show_anchor"]),
-                    }),
-                )
-                for row in cursor
-            ],
-        )
 
     def close(self) -> None:
         self._conn.close()

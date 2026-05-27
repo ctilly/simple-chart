@@ -5,7 +5,7 @@ import numpy as np
 
 from tools.vertical_line.models import VerticalLineRecord
 from tools.vertical_line.session_store import (
-    VerticalLineSessionStore,
+    VerticalLineStore,
     vertical_line_key,
 )
 from simplechart.api import (
@@ -89,16 +89,19 @@ class VerticalLineIndicator(ChartExtension):
     ) -> DrawingToolResult:
         if event.timestamp_ms is None:
             return DrawingToolResult()
+        record = VerticalLineRecord(
+            symbol=series.symbol,
+            timestamp_ms=event.timestamp_ms,
+            timeframe=series.timeframe.value,
+            color=str(params.get("color", _DEFAULT_COLOR)),
+            line_width=float(params.get("line_width", 1.0)),
+            line_style=_choice_value(params.get("line_style", "solid")),
+        )
         return DrawingToolResult(
             mutation=ChartExtensionMutation(
                 extension_name=self.name(),
-                operation="add_line",
-                payload={
-                    "timestamp_ms": event.timestamp_ms,
-                    "color": str(params.get("color", _DEFAULT_COLOR)),
-                    "line_width": float(params.get("line_width", 1.0)),
-                    "line_style": _choice_value(params.get("line_style", "solid")),
-                },
+                operation="add",
+                payload={"record": record},
             ),
             done=True,
             deactivate_tool=True,
@@ -171,19 +174,17 @@ class VerticalLineIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="update_line",
-            payload={"line": line},
+            operation="update",
+            payload={"record": line},
         )
 
     def cancel_drag(
         self,
         session: DragSession,
     ) -> ChartExtensionMutation | None:
-        return ChartExtensionMutation(
-            extension_name=self.name(),
-            operation="restore_lines",
-            payload={"lines": session.original_params["lines"]},
-        )
+        # Dragging only produces preview renders; the store is untouched, so a
+        # cancel needs no mutation — the controller re-renders from store state.
+        return None
 
     def config_for_series(
         self,
@@ -199,6 +200,8 @@ class VerticalLineIndicator(ChartExtension):
                 "color": line.color,
                 "line_width": line.line_width,
                 "line_style": ChoiceParam(line.line_style, LINE_STYLE_OPTIONS),
+                "persist_across_timeframes": line.persist_across_timeframes,
+                "persist_across_sessions": line.persist_across_sessions,
             },
         )
 
@@ -213,14 +216,17 @@ class VerticalLineIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="update_line",
+            operation="update",
             payload={
-                "line": VerticalLineRecord(
+                "record": VerticalLineRecord(
                     symbol=line.symbol,
                     timestamp_ms=line.timestamp_ms,
+                    timeframe=line.timeframe,
                     color=str(edited_params["color"]),
                     line_width=float(edited_params["line_width"]),
                     line_style=_choice_value(edited_params["line_style"]),
+                    persist_across_timeframes=bool(edited_params["persist_across_timeframes"]),
+                    persist_across_sessions=bool(edited_params["persist_across_sessions"]),
                     line_id=line.line_id,
                 )
             },
@@ -236,8 +242,8 @@ class VerticalLineIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="delete_line",
-            payload={"line": line},
+            operation="delete",
+            payload={"record": line},
         )
 
 
@@ -300,9 +306,12 @@ def _updated_drag_line(
     return VerticalLineRecord(
         symbol=line.symbol,
         timestamp_ms=event.timestamp_ms,
+        timeframe=line.timeframe,
         color=line.color,
         line_width=line.line_width,
         line_style=line.line_style,
+        persist_across_timeframes=line.persist_across_timeframes,
+        persist_across_sessions=line.persist_across_sessions,
         line_id=line.line_id,
     )
 
@@ -314,4 +323,4 @@ def _choice_value(value: Any) -> str:
 
 
 register_extension(VerticalLineIndicator)
-register_store_handler(VerticalLineSessionStore)
+register_store_handler(VerticalLineStore)

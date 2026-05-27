@@ -7,6 +7,12 @@ configuration/removal, or indicator-owned store behavior.
 If the indicator only computes arrays from OHLCV data and is configured through
 the normal indicator dialog, use `docs/skills/compute-indicator.md` instead.
 
+If the work is a **toolbar drawing tool** the user places and manipulates on the
+chart (vertical line, Fibonacci retracement) with `DrawingStore`-backed
+timeframe/session persistence, use `docs/skills/drawing-tool.md` instead. This
+skill is for interactive *indicators* (e.g. Anchored VWAP), which compute from
+data, are added via context menu, and always persist.
+
 ## Read First
 
 Read these files before classifying the work:

@@ -10,7 +10,7 @@ requires-python = ">=3.13"
 
 dependencies = [
     "PyQt6>=6.6",
-    "finplot>=1.9",      # pyqtgraph-based finance charting; pulls in pandas
+    "finplot>=1.9.7,<1.10",  # pyqtgraph-based finance charting; pulls in pandas. Capped: viewport.py monkeypatches finplot/pyqtgraph private internals, so a minor bump needs a tested upgrade.
     "yfinance>=0.2",     # dev/test data provider; replace with Alpaca in production
     "numpy>=1.26",
 ]

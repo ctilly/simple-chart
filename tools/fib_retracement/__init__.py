@@ -5,7 +5,7 @@ import numpy as np
 
 from tools.fib_retracement.models import FIB_LEVELS, FibRetracementRecord
 from tools.fib_retracement.session_store import (
-    FibRetracementSessionStore,
+    FibRetracementStore,
     fib_drawing_key,
 )
 from simplechart.api import (
@@ -136,8 +136,8 @@ class FibonacciRetracementIndicator(ChartExtension):
         return DrawingToolResult(
             mutation=ChartExtensionMutation(
                 extension_name=self.name(),
-                operation="add_drawing",
-                payload={"drawing": drawing},
+                operation="add",
+                payload={"record": drawing},
             ),
             done=True,
             deactivate_tool=True,
@@ -218,16 +218,14 @@ class FibonacciRetracementIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="update_drawing",
-            payload={"drawing": drawing},
+            operation="update",
+            payload={"record": drawing},
         )
 
     def cancel_drag(self, session: DragSession) -> ChartExtensionMutation | None:
-        return ChartExtensionMutation(
-            extension_name=self.name(),
-            operation="restore_drawings",
-            payload={"drawings": session.original_params["drawings"]},
-        )
+        # Dragging only produces preview renders; the store is untouched, so a
+        # cancel needs no mutation — the controller re-renders from store state.
+        return None
 
     def config_for_series(
         self,
@@ -267,8 +265,8 @@ class FibonacciRetracementIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="update_drawing",
-            payload={"drawing": _configured_drawing(drawing, edited_params)},
+            operation="update",
+            payload={"record": _configured_drawing(drawing, edited_params)},
         )
 
     def remove_series(
@@ -281,8 +279,8 @@ class FibonacciRetracementIndicator(ChartExtension):
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
-            operation="delete_drawing",
-            payload={"drawing": drawing},
+            operation="delete",
+            payload={"record": drawing},
         )
 
 
@@ -399,6 +397,9 @@ def _append_drawing_render(
                 color=drawing.color,
                 line_width=drawing.line_width,
                 line_style=drawing.line_style,
+                # A fib retracement is managed entirely on-chart (drag handles,
+                # right-click configure/remove); no level belongs in the legend.
+                reference=True,
             )
         )
         render.markers.append(
@@ -632,4 +633,4 @@ def _choice_value(value: Any) -> str:
 
 
 register_extension(FibonacciRetracementIndicator)
-register_store_handler(FibRetracementSessionStore)
+register_store_handler(FibRetracementStore)

@@ -1,95 +1,69 @@
+from dataclasses import replace
 from typing import Any
 
 from tools.vertical_line.models import VerticalLineRecord
-from simplechart.api import ChartExtensionMutation, ChartExtensionStoreContext
+from simplechart.api import AxisPolicy, DrawingStore
 
-_INDICATOR_NAME = "vertical_line"
+_STORE_KEY = "vertical_line.lines"
 
 
-class VerticalLineSessionStore:
+class VerticalLineStore(DrawingStore[VerticalLineRecord]):
 
-    def __init__(self, context: ChartExtensionStoreContext) -> None:
-        self._context = context
-        self._lines_by_symbol: dict[str, list[VerticalLineRecord]] = {}
-        self._active_symbol: str | None = None
-        self._next_id = 1
+    extension_name = "vertical_line"
+    store_key = _STORE_KEY
+    params_key = "lines"
+    timeframe_axis = AxisPolicy.USER
+    session_axis = AxisPolicy.USER
 
-    def load_for_symbol(self, symbol: str) -> None:
-        self._active_symbol = symbol
+    def to_payload(self, record: VerticalLineRecord) -> dict[str, Any]:
+        return {
+            "timeframe": record.timeframe,
+            "color": record.color,
+            "line_width": record.line_width,
+            "line_style": record.line_style,
+            "persist_across_timeframes": record.persist_across_timeframes,
+            "persist_across_sessions": record.persist_across_sessions,
+        }
 
-    def params_for(
+    def from_payload(
         self,
-        extension_name: str,
-        base_params: dict[str, Any],
-    ) -> dict[str, Any]:
-        if extension_name != _INDICATOR_NAME:
-            return base_params
-        params = dict(base_params)
-        params["lines"] = self._active_lines()
-        return params
-
-    def apply(self, mutation: ChartExtensionMutation) -> None:
-        if mutation.extension_name != _INDICATOR_NAME:
-            return
-        if mutation.operation == "add_line":
-            self.add_line(mutation.payload)
-            self.prepare_active_indicators()
-        elif mutation.operation == "update_line":
-            self.update_line(mutation.payload["line"])
-        elif mutation.operation == "restore_lines":
-            self.restore_lines(mutation.payload["lines"])
-        elif mutation.operation == "delete_line":
-            self.delete_line(mutation.payload["line"])
-
-    def prepare_active_indicators(self) -> None:
-        if self._active_lines():
-            self._context.ensure_indicator_state(_INDICATOR_NAME, {"lines": []})
-
-    def add_line(self, payload: dict[str, Any]) -> None:
-        symbol = self._context.current_symbol()
-        if symbol is None:
-            return
-        line = VerticalLineRecord(
+        record_id: int,
+        symbol: str,
+        sort_key: int,
+        payload: dict[str, Any],
+    ) -> VerticalLineRecord:
+        return VerticalLineRecord(
             symbol=symbol,
-            timestamp_ms=int(payload["timestamp_ms"]),
+            timestamp_ms=sort_key,
+            timeframe=str(payload["timeframe"]),
             color=str(payload["color"]),
             line_width=float(payload["line_width"]),
             line_style=str(payload["line_style"]),
-            line_id=self._next_id,
+            persist_across_timeframes=bool(payload["persist_across_timeframes"]),
+            persist_across_sessions=bool(payload["persist_across_sessions"]),
+            line_id=record_id,
         )
-        self._next_id += 1
-        self._lines_by_symbol.setdefault(symbol, []).append(line)
 
-    def update_line(self, line: VerticalLineRecord) -> None:
-        if line.line_id is None:
-            return
-        lines = self._lines_by_symbol.get(line.symbol, [])
-        self._lines_by_symbol[line.symbol] = [
-            line if current.line_id == line.line_id else current
-            for current in lines
-        ]
+    def sort_key(self, record: VerticalLineRecord) -> int:
+        return record.timestamp_ms
 
-    def restore_lines(self, lines: list[VerticalLineRecord]) -> None:
-        if self._active_symbol is None:
-            return
-        self._lines_by_symbol[self._active_symbol] = lines
+    def record_id(self, record: VerticalLineRecord) -> int | None:
+        return record.line_id
 
-    def delete_line(self, line: VerticalLineRecord) -> None:
-        if line.line_id is None:
-            return
-        lines = self._lines_by_symbol.get(line.symbol, [])
-        self._lines_by_symbol[line.symbol] = [
-            current for current in lines
-            if current.line_id != line.line_id
-        ]
-        self._context.remove_series_visibility(_INDICATOR_NAME, vertical_line_key(line))
-        if not self._active_lines():
-            self._context.remove_indicator_state(_INDICATOR_NAME)
+    def with_id(self, record: VerticalLineRecord, record_id: int) -> VerticalLineRecord:
+        return replace(record, line_id=record_id)
 
-    def _active_lines(self) -> list[VerticalLineRecord]:
-        if self._active_symbol is None:
-            return []
-        return list(self._lines_by_symbol.get(self._active_symbol, []))
+    def series_key(self, record: VerticalLineRecord) -> str:
+        return vertical_line_key(record)
+
+    def created_timeframe(self, record: VerticalLineRecord) -> str:
+        return record.timeframe
+
+    def wants_timeframe_persistence(self, record: VerticalLineRecord) -> bool:
+        return record.persist_across_timeframes
+
+    def wants_session_persistence(self, record: VerticalLineRecord) -> bool:
+        return record.persist_across_sessions
 
 
 def vertical_line_key(line: VerticalLineRecord) -> str:

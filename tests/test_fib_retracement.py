@@ -9,7 +9,7 @@ from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 import tools.fib_retracement  # noqa: F401
 from tools.fib_retracement import FibonacciRetracementIndicator
-from tools.fib_retracement.session_store import FibRetracementSessionStore
+from tools.fib_retracement.session_store import FibRetracementStore
 from simplechart.api import ChoiceParam, ChartExtensionAddMode
 
 
@@ -103,7 +103,7 @@ def test_fib_commit_deactivates_and_scopes_to_exact_timeframe(tmp_path: Path) ->
     series = _series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = FibRetracementSessionStore(AppChartExtensionStoreContext(state, cache))
+        store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing(
@@ -131,7 +131,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
     series = _series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = FibRetracementSessionStore(AppChartExtensionStoreContext(state, cache))
+        store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing(
@@ -143,7 +143,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
         runtime.advance_drawing(series, start.session, runtime.chart_event(series, 3.0, 111.0))
         runtime.render_all(series)
 
-        request = runtime.config_request("fib_retracement_ref_1")
+        request = runtime.config_request("fib_retracement_ref_-1")
         assert request is not None
         edited = dict(request.params)
         edited["anchor_price_mode"] = ChoiceParam("close", ["swing_wick", "close"])
@@ -152,7 +152,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
         edited["line_style"] = ChoiceParam("dash", ["solid", "dash", "dot", "dash_dot"])
         edited["show_price_labels"] = True
         edited["show_23_6"] = False
-        runtime.apply_config("fib_retracement_ref_1", edited)
+        runtime.apply_config("fib_retracement_ref_-1", edited)
         configured = runtime.render_all(series)[0].render
         assert [segment.y_value for segment in configured.segments] == [106.0, 104.09, 103.5, 102.91, 101.0]
         assert configured.segments[0].color == "#ff0000"
@@ -162,7 +162,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
 
         hit = runtime.drawing_hit_test(series, runtime.chart_event(series, 3.0, 104.0))
         assert hit is not None
-        assert hit.handle_key == "fib_retracement_ref_1"
+        assert hit.handle_key == "fib_retracement_ref_-1"
 
         assert runtime.begin_drag(series, runtime.chart_event(series, 3.0, 106.0))
         runtime.finish_drag(series, runtime.chart_event(series, 4.0, 90.0))
@@ -170,7 +170,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
         assert dragged.segments[0].y_value == 89.0
         assert dragged.segments[-1].y_value == 101.0
 
-        removal = runtime.remove("fib_retracement_ref_1")
+        removal = runtime.remove("fib_retracement_ref_-1")
 
     assert removal is not None
     assert state.get_extension("fib_retracement") is None
@@ -190,6 +190,23 @@ def test_fib_zero_height_drawing_stacks_levels() -> None:
 
     assert render is not None
     assert {segment.y_value for segment in render.segments} == {100.0}
+
+
+def test_fib_levels_stay_out_of_the_legend() -> None:
+    # Every fib segment must be reference=True so it is excluded from the legend.
+    # A reference=False level would reintroduce per-drag-frame legend restyling.
+    indicator = FibonacciRetracementIndicator()
+    series = _series()
+    start = indicator.start_drawing(
+        series,
+        indicator.default_params(),
+        _event(series, 1, 100.0),
+    )
+    assert start.session is not None
+    render = indicator.preview_drawing(series, start.session, _event(series, 3, 111.0))
+    assert render is not None
+    assert render.segments
+    assert all(segment.reference for segment in render.segments)
 
 
 def _series() -> OHLCVSeries:
@@ -237,7 +254,7 @@ def _event(series: OHLCVSeries, index: int, y: float) -> Any:
 def _runtime(
     state: State,
     cache: Cache,
-    store: FibRetracementSessionStore,
+    store: FibRetracementStore,
 ) -> ChartExtensionRuntime:
     return ChartExtensionRuntime(
         state,

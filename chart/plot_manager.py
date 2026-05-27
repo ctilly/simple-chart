@@ -437,12 +437,12 @@ class PlotManager:
             target_ax.removeItem(item)  # type: ignore[attr-defined]
 
     def remove_marker(self, marker_key: str) -> None:
-        if marker_key in self._markers:
-            handle = self._markers.pop(marker_key)
+        # O(1) via the tracking dict — avoids scanning every item on the axis on
+        # each call (hot during drag). Orphaned items not in the dict are swept
+        # by scrub_orphan_markers, which runs once per full render.
+        handle = self._markers.pop(marker_key, None)
+        if handle is not None:
             self._price_panel.ax.removeItem(handle)
-        for item in list(self._price_panel.ax.items):
-            if getattr(item, "_simplechart_marker_key", None) == marker_key:
-                self._price_panel.ax.removeItem(item)
 
     def scrub_orphan_markers(self, active_marker_keys: set[str]) -> None:
         for marker_key in list(self._markers):
@@ -450,11 +450,7 @@ class PlotManager:
                 self.remove_marker(marker_key)
         for item in list(self._price_panel.ax.items):
             item_marker_key = getattr(item, "_simplechart_marker_key", None)
-            if isinstance(item_marker_key, str):
-                if item_marker_key not in active_marker_keys:
-                    self._price_panel.ax.removeItem(item)
-                continue
-            if _text_item_plain_text(item) in {"⚓", "⚓️"}:
+            if isinstance(item_marker_key, str) and item_marker_key not in active_marker_keys:
                 self._price_panel.ax.removeItem(item)
 
     def _x_value_for_index(self, index: float) -> float:
@@ -544,11 +540,3 @@ def _x_value_for_index(
         return first + (step * index)
 
     return float(index)
-
-
-def _text_item_plain_text(item: object) -> str | None:
-    text_item = getattr(item, "textItem", None)
-    to_plain_text = getattr(text_item, "toPlainText", None)
-    if callable(to_plain_text):
-        return str(to_plain_text())
-    return None

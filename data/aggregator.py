@@ -3,9 +3,10 @@ data/aggregator.py
 
 Synthesizes non-native timeframes by resampling smaller bars.
 
-The two timeframes that no provider supplies natively are MIN39 and MIN65:
-  - MIN65 is synthesized from MIN5  (65 / 5  = 13 bars per period, exact)
-  - MIN39 is synthesized from MIN1  (39 / 1  = 39 bars per period, exact)
+The two timeframes that no provider supplies natively are MIN39 and MIN65.
+Both are synthesized from MIN5 (with MIN1 as a fallback); see the comment on
+_SYNTHESIS_BASES below for why MIN5 is preferred even for MIN39, where 39 is
+not evenly divisible by 5.
 
 All other timeframes are passed through to the provider unchanged.
 

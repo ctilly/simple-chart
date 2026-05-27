@@ -8,7 +8,7 @@ from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 import tools.vertical_line  # noqa: F401
 from tools.vertical_line import VerticalLineIndicator
-from tools.vertical_line.session_store import VerticalLineSessionStore
+from tools.vertical_line.session_store import VerticalLineStore
 from simplechart.api import ChoiceParam, ChartExtensionAddMode
 
 
@@ -21,7 +21,7 @@ def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
     series = _daily_series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
+        store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
 
@@ -47,7 +47,7 @@ def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path)
     intraday = _intraday_series(daily.bars[2].timestamp)
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
+        store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         runtime.start_drawing(
@@ -65,7 +65,7 @@ def test_vertical_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None:
     series = _daily_series()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        store = VerticalLineSessionStore(AppChartExtensionStoreContext(state, cache))
+        store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
         runtime.start_drawing(
@@ -143,7 +143,7 @@ def _intraday_series(day_start: datetime) -> OHLCVSeries:
 def _runtime(
     state: State,
     cache: Cache,
-    store: VerticalLineSessionStore,
+    store: VerticalLineStore,
 ) -> ChartExtensionRuntime:
     return ChartExtensionRuntime(
         state,

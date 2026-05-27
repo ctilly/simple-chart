@@ -91,7 +91,8 @@ material when useful, but do not treat them as automatic dependencies.
 `HitTestResult`, `DragSession`, `DrawingSession`, `DrawingToolResult`,
 `register_extension`, `register_store_handler`, `all_extensions`,
 `get_extension`, `OHLCVSeries`, `Bar`, `ChartExtensionStoreRecord`,
-`ChartExtensionStoreContext`, `ChartExtensionStoreHandler`, `bars_for_n_days`,
+`ChartExtensionStoreContext`, `ChartExtensionStoreHandler`, `DrawingStore`,
+`AxisPolicy`, `bars_for_n_days`,
 and `timestamp_ms_to_bar_index`. `ChartExtension` is the single base class for
 both indicators and tools.
 
@@ -119,21 +120,22 @@ All locations load automatically on next launch — no manual controller
 wiring required. The `register_extension()` call at the bottom of the
 indicator file fires on import.
 
-## Building new indicators
+## Building new indicators and tools
 
 Canonical skill files walk through the full process: reading the right
 reference files, deciding whether a compiled kernel is needed, implementing
 each piece in order, and verifying the result.
 
-| Indicator type | Skill location | When to use |
+| Extension type | Skill location | When to use |
 |----------------|----------------|-------------|
-| Compute | `docs/skills/compute-indicator.md` | Ordinary chart overlays or panel indicators that primarily convert OHLCV data into arrays (SMA, EMA, RSI, MACD). |
-| Interactive | `docs/skills/interactive-indicator.md` | Indicators with context-menu actions, drag handles, persistent drawing state, per-series configuration/removal, or custom render output (AVWAP). |
+| Compute indicator | `docs/skills/compute-indicator.md` | Ordinary chart overlays or panel indicators that primarily convert OHLCV data into arrays (SMA, EMA, RSI, MACD). |
+| Interactive indicator | `docs/skills/interactive-indicator.md` | Indicators with context-menu actions, drag handles, persistent drawing state, per-series configuration/removal, or custom render output (AVWAP). |
+| Drawing tool | `docs/skills/drawing-tool.md` | Interactive overlays the user places and manipulates on-chart via the toolbar (vertical line, Fibonacci retracement), with `DrawingStore`-backed persistence (`AxisPolicy` per timeframe/session axis). |
 
 Agent-specific skill directories (`.codex/skills`, `.claude/skills`,
 `.gemini/skills`, and `.grok/skills`) contain forwarding files that point to
 the canonical docs above.
 
-Read the appropriate skill file before starting any indicator work.
-Before editing code, produce the indicator spec requested by that skill file and
+Read the appropriate skill file before starting any indicator or tool work.
+Before editing code, produce the spec requested by that skill file and
 wait for approval.

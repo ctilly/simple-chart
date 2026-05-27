@@ -33,6 +33,7 @@ Initial workspace indicator set:
 """
 
 import copy
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -66,8 +67,11 @@ from simplechart.api import (
     DrawingToolResult,
     ChartExtensionAddMode,
     ChartExtensionRender,
+    HorizontalSegmentRender,
     LINE_STYLE_OPTIONS,
     RENDER_CHART,
+    SeriesRender,
+    VerticalLineRender,
     all_extensions,
 )
 from simplechart.plugins import load_plugins
@@ -304,16 +308,7 @@ class MainWindow(QMainWindow):
         chart_layout.setSpacing(0)
 
         self._symbol_bar = SymbolBar()
-        self._chart      = ChartWidget()
-
-        chart_layout.addWidget(self._symbol_bar)
-        chart_layout.addWidget(self._chart)
-        main_layout.addWidget(chart_area)
-
-        self.setCentralWidget(frame)
-
-        # Wire legend callbacks now that the controller exists.
-        self._chart.wire_legend(
+        self._chart      = ChartWidget(
             on_toggle=self._on_indicator_toggled,
             on_configure=self._on_indicator_configure,
             on_remove=self._on_indicator_remove,
@@ -321,6 +316,12 @@ class MainWindow(QMainWindow):
             on_drawing_tool=self._on_drawing_tool_selected,
             drawing_tools=self._drawing_tool_entries(),
         )
+
+        chart_layout.addWidget(self._symbol_bar)
+        chart_layout.addWidget(self._chart)
+        main_layout.addWidget(chart_area)
+
+        self.setCentralWidget(frame)
 
         # Wire chart interactions.
         self._chart.interactions.on_bar_clicked(self._on_bar_clicked)
@@ -495,65 +496,8 @@ class MainWindow(QMainWindow):
 
         ind_state = render_pass.state
         render = render_pass.render
-        pm = self._chart.plot_manager
-
-        for series_render in render.series:
-            series_key = series_render.key
-            # Reference lines (e.g. RSI overbought/oversold) are drawn as
-            # ordinary render series but excluded from the legend.
-            if "_ref_" in series_key:
-                visible = ind_state.series_visibility.get(series_key, ind_state.visible)
-                pm.update_indicator(
-                    series_key,
-                    series_render.values,
-                    series_render.color,
-                    series_render.line_width,
-                    series_render.line_style,
-                    series_render.render_target,
-                )
-                pm.set_visible(series_key, visible)
-                continue
-
-            visible = ind_state.series_visibility.get(series_key, ind_state.visible)
-            visible = visible and series_render.visible
-            pm.update_indicator(
-                series_key,
-                series_render.values,
-                series_render.color,
-                series_render.line_width,
-                series_render.line_style,
-                series_render.render_target,
-            )
-            pm.set_visible(series_key, visible)
-
-            self._chart.legend.add_indicator(series_key, series_render.label, series_render.color)
-            self._chart.legend.update_color(series_key, series_render.color)
-            self._chart.legend.set_indicator_visible(series_key, visible)
-
-        for segment in render.segments:
-            visible = ind_state.series_visibility.get(segment.key, ind_state.visible)
-            visible = visible and segment.visible
-            segment.visible = visible
-            pm.update_horizontal_segment(segment)
-            if "_ref_" in segment.key:
-                continue
-            self._chart.legend.add_indicator(segment.key, segment.label, segment.color)
-            self._chart.legend.update_color(segment.key, segment.color)
-            self._chart.legend.set_indicator_visible(segment.key, visible)
-
-        for line in render.vertical_lines:
-            visible = ind_state.series_visibility.get(line.key, ind_state.visible)
-            line.visible = visible and line.visible
-            pm.update_vertical_line(line)
-
-        marker_keys = {marker.key for marker in render.markers}
-        for marker in render.markers:
-            visible = ind_state.series_visibility.get(marker.key, ind_state.visible)
-            marker.visible = marker.visible and visible
-            pm.update_marker(marker)
-        for series_key in ind_state.series_keys:
-            if series_key not in marker_keys:
-                pm.remove_marker(series_key)
+        self._draw_render_content(render, ind_state)
+        self._draw_markers(render, ind_state, ind_state.series_keys)
 
     def _draw_drag_render(self, render_pass: ChartExtensionRenderPass) -> None:
         pm = self._chart.plot_manager
@@ -561,54 +505,108 @@ class MainWindow(QMainWindow):
         price_vb.win._isMouseLeftDrag = True
         with pm.preserving_viewport():
             ind_state = render_pass.state
-            rendered_keys: set[str] = set()
-            for series_render in render_pass.render.series:
-                rendered_keys.add(series_render.key)
-                visible = ind_state.series_visibility.get(series_render.key, ind_state.visible)
-                visible = visible and series_render.visible
-                pm.update_indicator(
-                    series_render.key,
-                    series_render.values,
-                    series_render.color,
-                    series_render.line_width,
-                    series_render.line_style,
-                    series_render.render_target,
-                )
-                pm.set_visible(series_render.key, visible)
-                self._chart.legend.add_indicator(
-                    series_render.key,
-                    series_render.label,
-                    series_render.color,
-                )
-                self._chart.legend.update_color(series_render.key, series_render.color)
-                self._chart.legend.set_indicator_visible(series_render.key, visible)
+            render = render_pass.render
+            # Drag-render optimization: a drag changes only position, never a
+            # legend entry's color/label/visibility, and the entry already exists
+            # from the committed render. Skipping legend updates avoids a
+            # per-frame setStyleSheet repolish on the dragged item's label.
+            # The finish/cancel reload re-runs the full (legend-updating) render.
+            rendered_keys = self._draw_render_content(render, ind_state, update_legend=False)
+            self._draw_markers(render, ind_state, rendered_keys)
 
-            for segment in render_pass.render.segments:
-                rendered_keys.add(segment.key)
-                visible = ind_state.series_visibility.get(segment.key, ind_state.visible)
-                visible = visible and segment.visible
-                segment.visible = visible
-                pm.update_horizontal_segment(segment)
-                if "_ref_" in segment.key:
-                    continue
-                self._chart.legend.add_indicator(segment.key, segment.label, segment.color)
-                self._chart.legend.update_color(segment.key, segment.color)
-                self._chart.legend.set_indicator_visible(segment.key, visible)
+    def _draw_render_content(
+        self,
+        render: ChartExtensionRender,
+        ind_state: ChartExtensionState,
+        update_legend: bool = True,
+    ) -> set[str]:
+        """
+        Draw a render's series, segments, and vertical lines to the chart and
+        legend. Returns the set of non-marker keys drawn. When update_legend is
+        False the legend is left untouched (used by the drag-preview path).
+        """
+        rendered_keys: set[str] = set()
+        for series_render in render.series:
+            rendered_keys.add(series_render.key)
+            self._draw_series(series_render, ind_state, update_legend)
+        for segment in render.segments:
+            rendered_keys.add(segment.key)
+            self._draw_segment(segment, ind_state, update_legend)
+        for line in render.vertical_lines:
+            rendered_keys.add(line.key)
+            self._draw_vertical_line(line, ind_state)
+        return rendered_keys
 
-            for line in render_pass.render.vertical_lines:
-                rendered_keys.add(line.key)
-                visible = ind_state.series_visibility.get(line.key, ind_state.visible)
-                line.visible = visible and line.visible
-                pm.update_vertical_line(line)
+    def _draw_series(
+        self,
+        series_render: SeriesRender,
+        ind_state: ChartExtensionState,
+        update_legend: bool = True,
+    ) -> None:
+        pm = self._chart.plot_manager
+        series_key = series_render.key
+        visible = ind_state.series_visibility.get(series_key, ind_state.visible)
+        # Reference lines (e.g. RSI overbought/oversold) are drawn as ordinary
+        # render series but excluded from the legend.
+        is_reference = series_render.reference
+        if not is_reference:
+            visible = visible and series_render.visible
+        pm.update_indicator(
+            series_key,
+            series_render.values,
+            series_render.color,
+            series_render.line_width,
+            series_render.line_style,
+            series_render.render_target,
+        )
+        pm.set_visible(series_key, visible)
+        if is_reference or not update_legend:
+            return
+        self._chart.legend.add_indicator(series_key, series_render.label, series_render.color)
+        self._chart.legend.update_color(series_key, series_render.color)
+        self._chart.legend.set_indicator_visible(series_key, visible)
 
-            marker_keys = {marker.key for marker in render_pass.render.markers}
-            for marker in render_pass.render.markers:
-                visible = ind_state.series_visibility.get(marker.key, ind_state.visible)
-                marker.visible = marker.visible and visible
-                pm.update_marker(marker)
-            for series_key in rendered_keys:
-                if series_key not in marker_keys:
-                    pm.remove_marker(series_key)
+    def _draw_segment(
+        self,
+        segment: HorizontalSegmentRender,
+        ind_state: ChartExtensionState,
+        update_legend: bool = True,
+    ) -> None:
+        pm = self._chart.plot_manager
+        visible = ind_state.series_visibility.get(segment.key, ind_state.visible)
+        visible = visible and segment.visible
+        segment.visible = visible
+        pm.update_horizontal_segment(segment)
+        if segment.reference or not update_legend:
+            return
+        self._chart.legend.add_indicator(segment.key, segment.label, segment.color)
+        self._chart.legend.update_color(segment.key, segment.color)
+        self._chart.legend.set_indicator_visible(segment.key, visible)
+
+    def _draw_vertical_line(
+        self,
+        line: VerticalLineRender,
+        ind_state: ChartExtensionState,
+    ) -> None:
+        visible = ind_state.series_visibility.get(line.key, ind_state.visible)
+        line.visible = visible and line.visible
+        self._chart.plot_manager.update_vertical_line(line)
+
+    def _draw_markers(
+        self,
+        render: ChartExtensionRender,
+        ind_state: ChartExtensionState,
+        cleanup_keys: Iterable[str],
+    ) -> None:
+        pm = self._chart.plot_manager
+        marker_keys = {marker.key for marker in render.markers}
+        for marker in render.markers:
+            visible = ind_state.series_visibility.get(marker.key, ind_state.visible)
+            marker.visible = marker.visible and visible
+            pm.update_marker(marker)
+        for series_key in cleanup_keys:
+            if series_key not in marker_keys:
+                pm.remove_marker(series_key)
 
     def _draw_preview_render(self, render_pass: ChartExtensionRenderPass) -> None:
         pm = self._chart.plot_manager

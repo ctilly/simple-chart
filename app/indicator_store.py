@@ -61,6 +61,9 @@ class AppChartExtensionStoreContext:
     def current_symbol(self) -> str | None:
         return self._state.symbol
 
+    def current_timeframe(self) -> str | None:
+        return self._state.timeframe.value
+
     def get_indicator_records(
         self,
         store_key: str,

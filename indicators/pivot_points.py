@@ -82,7 +82,8 @@ class PivotPointsIndicator(ChartExtension):
             levels = _pivot_levels(daily_bars[i - 1], method)
             for level in _LEVEL_ORDER_BY_METHOD[method]:
                 key = _series_key(method, session_date, level)
-                if not primary_key_used:
+                is_primary = not primary_key_used
+                if is_primary:
                     key = "pivot_points"
                     primary_key_used = True
                 color = _level_color(level, params)
@@ -96,6 +97,7 @@ class PivotPointsIndicator(ChartExtension):
                         color=color,
                         line_width=line_width,
                         line_style=line_style,
+                        reference=not is_primary,
                     )
                 )
                 if show_labels:

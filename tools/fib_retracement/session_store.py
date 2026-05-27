@@ -1,100 +1,73 @@
+from dataclasses import replace
 from typing import Any
 
 from tools.fib_retracement.models import FibRetracementRecord
-from simplechart.api import ChartExtensionMutation, ChartExtensionStoreContext
+from simplechart.api import AxisPolicy, DrawingStore
 
-_INDICATOR_NAME = "fib_retracement"
+_STORE_KEY = "fib_retracement.drawings"
 
 
-class FibRetracementSessionStore:
+class FibRetracementStore(DrawingStore[FibRetracementRecord]):
 
-    def __init__(self, context: ChartExtensionStoreContext) -> None:
-        self._context = context
-        self._records_by_symbol: dict[str, list[FibRetracementRecord]] = {}
-        self._active_symbol: str | None = None
-        self._next_id = 1
+    extension_name = "fib_retracement"
+    store_key = _STORE_KEY
+    params_key = "drawings"
+    timeframe_axis = AxisPolicy.FIXED_OFF
+    session_axis = AxisPolicy.FIXED_OFF
 
-    def load_for_symbol(self, symbol: str) -> None:
-        self._active_symbol = symbol
+    def to_payload(self, record: FibRetracementRecord) -> dict[str, Any]:
+        return {
+            "timeframe": record.timeframe,
+            "end_timestamp_ms": record.end_timestamp_ms,
+            "direction": record.direction,
+            "anchor_price_mode": record.anchor_price_mode,
+            "color": record.color,
+            "line_width": record.line_width,
+            "line_style": record.line_style,
+            "show_price_labels": record.show_price_labels,
+            "label_position": record.label_position,
+            "show_anchor_handles": record.show_anchor_handles,
+            "visible_levels": list(record.visible_levels),
+        }
 
-    def params_for(
+    def from_payload(
         self,
-        extension_name: str,
-        base_params: dict[str, Any],
-    ) -> dict[str, Any]:
-        if extension_name != _INDICATOR_NAME:
-            return base_params
-        params = dict(base_params)
-        params["drawings"] = self._active_records()
-        return params
-
-    def apply(self, mutation: ChartExtensionMutation) -> None:
-        if mutation.extension_name != _INDICATOR_NAME:
-            return
-        if mutation.operation == "add_drawing":
-            self.add_drawing(mutation.payload["drawing"])
-            self.prepare_active_indicators()
-        elif mutation.operation == "update_drawing":
-            self.update_drawing(mutation.payload["drawing"])
-        elif mutation.operation == "restore_drawings":
-            self.restore_drawings(mutation.payload["drawings"])
-        elif mutation.operation == "delete_drawing":
-            self.delete_drawing(mutation.payload["drawing"])
-
-    def prepare_active_indicators(self) -> None:
-        if self._active_records():
-            self._context.ensure_indicator_state(_INDICATOR_NAME, {"drawings": []})
-
-    def add_drawing(self, drawing: FibRetracementRecord) -> None:
-        record = FibRetracementRecord(
-            symbol=drawing.symbol,
-            timeframe=drawing.timeframe,
-            start_timestamp_ms=drawing.start_timestamp_ms,
-            end_timestamp_ms=drawing.end_timestamp_ms,
-            direction=drawing.direction,
-            anchor_price_mode=drawing.anchor_price_mode,
-            color=drawing.color,
-            line_width=drawing.line_width,
-            line_style=drawing.line_style,
-            show_price_labels=drawing.show_price_labels,
-            label_position=drawing.label_position,
-            show_anchor_handles=drawing.show_anchor_handles,
-            visible_levels=drawing.visible_levels,
-            drawing_id=self._next_id,
+        record_id: int,
+        symbol: str,
+        sort_key: int,
+        payload: dict[str, Any],
+    ) -> FibRetracementRecord:
+        return FibRetracementRecord(
+            symbol=symbol,
+            timeframe=str(payload["timeframe"]),
+            start_timestamp_ms=sort_key,
+            end_timestamp_ms=int(payload["end_timestamp_ms"]),
+            direction=str(payload["direction"]),
+            anchor_price_mode=str(payload["anchor_price_mode"]),
+            color=str(payload["color"]),
+            line_width=float(payload["line_width"]),
+            line_style=str(payload["line_style"]),
+            show_price_labels=bool(payload["show_price_labels"]),
+            label_position=str(payload["label_position"]),
+            show_anchor_handles=bool(payload["show_anchor_handles"]),
+            visible_levels=tuple(payload["visible_levels"]),
+            drawing_id=record_id,
         )
-        self._next_id += 1
-        self._records_by_symbol.setdefault(record.symbol, []).append(record)
 
-    def update_drawing(self, drawing: FibRetracementRecord) -> None:
-        if drawing.drawing_id is None:
-            return
-        drawings = self._records_by_symbol.get(drawing.symbol, [])
-        self._records_by_symbol[drawing.symbol] = [
-            drawing if current.drawing_id == drawing.drawing_id else current
-            for current in drawings
-        ]
+    def sort_key(self, record: FibRetracementRecord) -> int:
+        return record.start_timestamp_ms
 
-    def restore_drawings(self, drawings: list[FibRetracementRecord]) -> None:
-        if self._active_symbol is None:
-            return
-        self._records_by_symbol[self._active_symbol] = drawings
+    def record_id(self, record: FibRetracementRecord) -> int | None:
+        return record.drawing_id
 
-    def delete_drawing(self, drawing: FibRetracementRecord) -> None:
-        if drawing.drawing_id is None:
-            return
-        drawings = self._records_by_symbol.get(drawing.symbol, [])
-        self._records_by_symbol[drawing.symbol] = [
-            current for current in drawings
-            if current.drawing_id != drawing.drawing_id
-        ]
-        self._context.remove_series_visibility(_INDICATOR_NAME, fib_drawing_key(drawing))
-        if not self._active_records():
-            self._context.remove_indicator_state(_INDICATOR_NAME)
+    def with_id(self, record: FibRetracementRecord, record_id: int) -> FibRetracementRecord:
+        return replace(record, drawing_id=record_id)
 
-    def _active_records(self) -> list[FibRetracementRecord]:
-        if self._active_symbol is None:
-            return []
-        return list(self._records_by_symbol.get(self._active_symbol, []))
+    def series_key(self, record: FibRetracementRecord) -> str:
+        return fib_drawing_key(record)
+
+    def created_timeframe(self, record: FibRetracementRecord) -> str:
+        return record.timeframe
 
 
 def fib_drawing_key(drawing: FibRetracementRecord) -> str:

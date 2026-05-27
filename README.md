@@ -221,10 +221,12 @@ python -m pip install -e ".[dev]"
 
 Then read:
 
-- `AGENTS.md` for project conventions and the public indicator API contract
+- `AGENTS.md` for project conventions and the public extension API contract
 - `docs/skills/compute-indicator.md` for standard computed indicators
-- `docs/skills/interactive-indicator.md` for drawing tools, drag handles,
-  context actions, and persistent indicator state
+- `docs/skills/interactive-indicator.md` for interactive indicators with drag
+  handles, context actions, and persistent state (e.g. Anchored VWAP)
+- `docs/skills/drawing-tool.md` for toolbar drawing tools (vertical line,
+  Fibonacci retracement) with per-tool timeframe/session persistence
 
 ## Development Notes
 
@@ -235,7 +237,7 @@ Useful commands:
 
 ```bash
 python -m pytest
-python -m compileall app chart data indicators simplechart tests
+python -m compileall app chart data indicators simplechart tools tests
 python scripts/build_compiled.py
 ```
 

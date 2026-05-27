@@ -59,21 +59,26 @@ class ChartExtensionRuntime:
 
         passes: list[ChartExtensionRenderPass] = []
         for ind_state in self._state.indicators:
-            ind_state.params["_daily_bars"] = daily_bars
             ind_state.params = self._indicator_store.params_for(
                 ind_state.name,
                 ind_state.params,
             )
-            passes.append(self.render_one(ind_state, series))
+            passes.append(self.render_one(ind_state, series, daily_bars))
         return passes
 
     def render_one(
         self,
         ind_state: ChartExtensionState,
         series: OHLCVSeries,
+        daily_bars: list[Bar],
     ) -> ChartExtensionRenderPass:
         indicator = get_extension(ind_state.name)
-        render = indicator.render(series, ind_state.params)
+        # _daily_bars is a transient compute input (daily history for intraday
+        # MA warmup). Merge it into a throwaway params dict for this render only,
+        # never into the persisted ind_state.params — otherwise the full bar list
+        # rides into per-symbol saved state and gets deep-copied on every switch.
+        params = {**ind_state.params, "_daily_bars": daily_bars}
+        render = indicator.render(series, params)
         ind_state.series_keys = [
             series_render.key for series_render in render.series
         ] + [

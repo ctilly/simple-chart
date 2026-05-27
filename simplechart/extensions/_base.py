@@ -144,6 +144,9 @@ class SeriesRender:
     line_style: str = "solid"
     render_target: str = RENDER_CHART
     visible: bool = True
+    # Reference lines (e.g. RSI overbought/oversold) are drawn but kept out of
+    # the legend. Set explicitly by the extension rather than inferred from key.
+    reference: bool = False
 
 
 @dataclass
@@ -158,6 +161,7 @@ class HorizontalSegmentRender:
     line_style: str = "solid"
     render_target: str = RENDER_CHART
     visible: bool = True
+    reference: bool = False
 
 
 @dataclass
@@ -259,6 +263,8 @@ class DrawingToolResult:
 class ChartExtensionStoreContext(Protocol):
 
     def current_symbol(self) -> str | None: ...
+
+    def current_timeframe(self) -> str | None: ...
 
     def get_indicator_records(
         self,
@@ -551,14 +557,22 @@ def render_from_legacy(
                 key=key,
                 values=values,
                 label=_legacy_series_label(key),
-                color="#AAAAAA" if "_ref_" in key else color,
-                line_width=0.8 if "_ref_" in key else line_width,
-                line_style="dash" if "_ref_" in key else line_style,
+                color="#AAAAAA" if _is_legacy_reference(key) else color,
+                line_width=0.8 if _is_legacy_reference(key) else line_width,
+                line_style="dash" if _is_legacy_reference(key) else line_style,
                 render_target=render_target,
+                reference=_is_legacy_reference(key),
             )
             for key, values in result.items()
         ]
     )
+
+
+def _is_legacy_reference(series_key: str) -> bool:
+    # Legacy dict-keyed indicators (SMA/EMA/RSI) signal a reference line via the
+    # "_ref_" key convention. This is the one place that convention is read;
+    # downstream layers use the explicit SeriesRender.reference flag instead.
+    return "_ref_" in series_key
 
 
 def _line_style_value(value: Any) -> str:

@@ -98,6 +98,8 @@ EXPORTS
   ChartExtensionStoreRecord    Opaque plugin-owned persistence record
   ChartExtensionStoreContext   Store-handler access to app persistence/state services
   ChartExtensionStoreHandler   Store-handler protocol
+  DrawingStore                 Generic per-tool persistence store base
+  AxisPolicy                   FIXED_ON | FIXED_OFF | USER per persistence axis
   HitTestResult                Interactive handle hit-test result
   DragSession                  Active extension drag state
   register_extension           Register a ChartExtension class at import time
@@ -139,6 +141,10 @@ from simplechart.extensions._registry import (  # noqa: F401
     register_extension,
 )
 from simplechart.extensions._store_registry import register_store_handler  # noqa: F401
+from simplechart.extensions._drawing_store import (  # noqa: F401
+    AxisPolicy,                 # FIXED_ON | FIXED_OFF | USER per persistence axis
+    DrawingStore,               # generic per-tool persistence store base
+)
 from data.models import (         # noqa: F401
     Bar,                          # single OHLCV bar
     ChartExtensionStoreRecord,    # opaque plugin-owned persistence record
@@ -151,6 +157,7 @@ from data.calendar import (    # noqa: F401
 
 
 __all__: list[str] = [
+    "AxisPolicy",
     "Bar",
     "ChartEvent",
     "ChartExtension",
@@ -164,6 +171,7 @@ __all__: list[str] = [
     "ChartExtensionStoreRecord",
     "ChoiceParam",
     "DrawingSession",
+    "DrawingStore",
     "DrawingToolResult",
     "DragSession",
     "HitTestResult",

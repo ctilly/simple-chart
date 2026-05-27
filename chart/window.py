@@ -65,8 +65,8 @@ class ChartWidget(QWidget):
     """
     Self-contained chart area widget.
 
-    The controller constructs this, then registers callbacks for
-    bar_clicked and bar_right_clicked before showing the window.
+    The controller constructs this with the legend callbacks, then registers
+    chart-interaction handlers (bar_clicked, etc.) before showing the window.
 
     Public interface used by the controller:
         plot_manager   — draw/update/remove data and indicators
@@ -74,9 +74,27 @@ class ChartWidget(QWidget):
         interactions   — register click handlers
     """
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        on_toggle:    Callable[[str], None],
+        on_configure: Callable[[str], None],
+        on_remove:    Callable[[str], None],
+        on_add:       Callable[[], None],
+        on_drawing_tool: Callable[[str], None],
+        drawing_tools: list[tuple[str, str]],
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self._setup_finplot()
+        self._legend = ChartLegend(
+            on_toggle=on_toggle,
+            on_configure=on_configure,
+            on_remove=on_remove,
+            on_add=on_add,
+            on_drawing_tool=on_drawing_tool,
+            drawing_tools=drawing_tools,
+            parent=self,
+        )
         self._build_layout()
         self._install_shortcuts()
 
@@ -160,17 +178,6 @@ class ChartWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-
-        # Placeholder legend — real callbacks wired by controller via wire_legend().
-        self._legend = ChartLegend(
-            on_toggle=lambda _: None,
-            on_configure=lambda _: None,
-            on_remove=lambda _: None,
-            on_add=lambda: None,
-            on_drawing_tool=lambda _: None,
-            drawing_tools=[],
-            parent=self,
-        )
 
         layout.addWidget(self._legend)
         layout.addWidget(self._master)
@@ -289,38 +296,6 @@ class ChartWidget(QWidget):
         for slot in self._indicator_slots:
             if slot.name is not None:
                 self.release_indicator_panel(slot.name)
-
-    def wire_legend(
-        self,
-        on_toggle:    Callable[[str], None],
-        on_configure: Callable[[str], None],
-        on_remove:    Callable[[str], None],
-        on_add:       Callable[[], None],
-        on_drawing_tool: Callable[[str], None],
-        drawing_tools: list[tuple[str, str]],
-    ) -> None:
-        """
-        Replace the placeholder legend callbacks with real ones from the
-        controller. Called once during app startup.
-        """
-        new_legend = ChartLegend(
-            on_toggle=on_toggle,
-            on_configure=on_configure,
-            on_remove=on_remove,
-            on_add=on_add,
-            on_drawing_tool=on_drawing_tool,
-            drawing_tools=drawing_tools,
-            parent=self,
-        )
-        layout = self.layout()
-        assert layout is not None
-        old_item = layout.itemAt(0)
-        assert old_item is not None
-        old_widget = old_item.widget()
-        assert old_widget is not None
-        layout.replaceWidget(old_widget, new_legend)
-        old_widget.deleteLater()
-        self._legend = new_legend
 
     def on_cancel(self, callback: Callable[[], None]) -> None:
         self._cancel_cb = callback

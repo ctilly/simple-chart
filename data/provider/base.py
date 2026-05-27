@@ -27,8 +27,10 @@ class UnsupportedTimeframeError(Exception):
     """
     Raised when a provider is asked for a timeframe it cannot supply.
 
-    The aggregator catches this to know it must synthesize the timeframe
-    from a smaller one rather than fetching it directly.
+    The aggregator decides whether to synthesize by pre-checking the
+    provider's native_timeframes(), not by catching this error. It raises
+    this itself when a requested timeframe is neither native nor synthesizable
+    from an available base timeframe.
     """
 
 
