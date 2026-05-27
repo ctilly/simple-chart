@@ -229,27 +229,6 @@ class ChartExtensionRuntime:
             self.apply_mutation(result.mutation)
         return result
 
-    def hit_test(
-        self,
-        series: OHLCVSeries,
-        event: ChartEvent,
-    ) -> HitTestResult | None:
-        best_hit = None
-        for ind_state in self._state.indicators:
-            indicator = get_extension(ind_state.name)
-            params = self._params_for_state(ind_state)
-            visible_keys = {
-                key
-                for key in ind_state.series_keys
-                if ind_state.series_visibility.get(key, ind_state.visible)
-            }
-            hit = indicator.hit_test(series, params, event, visible_keys)
-            if hit is None:
-                continue
-            if best_hit is None or hit.priority > best_hit.priority:
-                best_hit = hit
-        return best_hit
-
     def drawing_hit_test(
         self,
         series: OHLCVSeries,

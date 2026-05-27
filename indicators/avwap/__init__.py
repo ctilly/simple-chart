@@ -399,13 +399,6 @@ def avwap_anchor_key(anchor: AnchorRecord) -> str:
     return f"avwap_anchor_ts_{anchor.anchor_ts}"
 
 
-def is_avwap_series_key(series_key: str) -> bool:
-    return (
-        series_key.startswith("avwap_anchor_")
-        or series_key.startswith("avwap_anchor_ts_")
-    )
-
-
 def avwap_anchor_for_key(
     anchors: list[AnchorRecord],
     series_key: str,

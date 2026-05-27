@@ -7,7 +7,6 @@ from data.cache import Cache
 from simplechart.extensions._store_registry import all_store_handlers
 from simplechart.api import (
     ChartExtensionMutation,
-    ChartExtensionStoreContext,
     ChartExtensionStoreHandler,
     ChartExtensionStoreRecord,
 )

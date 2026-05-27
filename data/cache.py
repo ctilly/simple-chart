@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from data.models import Bar, ChartExtensionStoreRecord, OHLCVSeries, Timeframe
+from data.models import Bar, ChartExtensionStoreRecord, Timeframe
 
 
 # Path to the DDL file, relative to this module.

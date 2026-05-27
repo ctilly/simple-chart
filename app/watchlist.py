@@ -20,7 +20,6 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QListWidget,
-    QListWidgetItem,
     QMenu,
     QPushButton,
     QVBoxLayout,

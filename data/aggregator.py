@@ -25,7 +25,7 @@ Grouping strategy:
     volume = sum of all volumes
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from data.models import Bar, Timeframe

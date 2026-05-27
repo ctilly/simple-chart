@@ -33,7 +33,7 @@ Initial workspace indicator set:
 """
 
 import copy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal

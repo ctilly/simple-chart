@@ -7,7 +7,6 @@ from indicators.avwap import (
     AVWAPIndicator,
     avwap_anchor_for_key,
     avwap_anchor_key,
-    is_avwap_series_key,
 )
 from indicators.avwap.models import AnchorRecord
 from indicators.pivot_points import PivotPointsIndicator
@@ -274,9 +273,6 @@ def test_avwap_anchor_keys_use_stable_persisted_identity() -> None:
 
     assert avwap_anchor_key(persisted) == "avwap_anchor_321"
     assert avwap_anchor_key(unpersisted) == "avwap_anchor_ts_1700086400000"
-    assert is_avwap_series_key("avwap_anchor_321")
-    assert is_avwap_series_key("avwap_anchor_ts_1700086400000")
-    assert not is_avwap_series_key("sma_50")
     assert avwap_anchor_for_key([persisted, unpersisted], "avwap_anchor_321") is persisted
     assert (
         avwap_anchor_for_key(

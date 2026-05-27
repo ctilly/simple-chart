@@ -14,7 +14,7 @@ Third-party providers can register themselves:
     register_provider("my_provider", MyProvider)
 """
 
-from data.provider.base import DataProvider, UnsupportedTimeframeError
+from data.provider.base import DataProvider
 from data.provider.yfinance_provider import YFinanceProvider
 
 _registry: dict[str, type[DataProvider]] = {

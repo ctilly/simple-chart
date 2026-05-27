@@ -18,7 +18,7 @@ shadowing the yfinance package on import.
 
 import math
 from typing import Any, cast
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pandas as pd
 import yfinance as yf

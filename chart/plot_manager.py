@@ -370,37 +370,6 @@ class PlotManager:
         self._volume_plot = None
         self._bar_index   = None
 
-    def clamp_initial_zoom(self) -> None:
-        """
-        Ensure the initial x-zoom shows at most half of all available bars.
-
-        Must be called AFTER all draw/update calls for a render pass (candles,
-        volume, and every indicator), but BEFORE fplt.refresh(). If called
-        earlier, finplot resets init_x0/init_x1 back to the full-data default
-        each time fplt.plot() or update_data() adds a new series to the axis.
-
-        Why this is needed:
-            create_plot_widget is constructed once with init_zoom_periods=200.
-            For short datasets (e.g. MIN39 ~60 bars), finplot computes
-            init_x0 = max(60-200, 0) = 0, so the initial view covers ALL bars
-            and the pan limits are simultaneously at their minimum — the user
-            has nowhere to pan. Clamping to half the dataset guarantees
-            at least 50 % of the data is off-screen and available for panning.
-
-        For larger datasets (daily 600 bars, MIN5 4290 bars) min(200, N//2)
-        equals 200 so this is a no-op.
-        """
-        vb = self._price_panel.ax.vb
-        datasrc = getattr(vb, "datasrc", None)
-        if datasrc is None:
-            return
-        total: int = datasrc.xlen
-        if total <= 1:
-            return
-        init_steps: int = getattr(vb, "init_steps", 200)
-        zoom_n = min(init_steps, max(1, total // 2))
-        datasrc.update_init_x(zoom_n)
-
     def active_series_keys(self) -> list[str]:
         """Return the keys of all currently drawn indicator series."""
         return (

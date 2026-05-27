@@ -66,6 +66,20 @@ strict = true
 ignore_missing_imports = true   # finplot has no type stubs
 
 # ------------------------------------------------------------------
+# pyright / Pylance
+# ------------------------------------------------------------------
+# PyQt6's classes subclass the untyped `sip` layer, so under strict
+# mode every Qt base resolves to Any and floods the editor with
+# unknown-type warnings that aren't real bugs. Standard mode keeps
+# meaningful checking on our own code without that noise.
+
+[tool.pyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.13"
+venvPath = "/home/chucktilly/.pyenv/versions"
+venv = "simple-chart"
+
+# ------------------------------------------------------------------
 # pytest
 # ------------------------------------------------------------------
 
