@@ -78,6 +78,12 @@ typeCheckingMode = "standard"
 pythonVersion = "3.13"
 venvPath = "/home/chucktilly/.pyenv/versions"
 venv = "simple-chart"
+# PyQt6's auto-generated stubs use placeholder parameter names (a0, a1, ev)
+# in Qt event/override methods. Our overrides use readable names, which the
+# rule flags as Liskov-incompatible — purely a stub-convention artifact, not
+# a real bug. Off for the project; mypy provides override-compatibility checks
+# where they're actually meaningful.
+reportIncompatibleMethodOverride = false
 
 # ------------------------------------------------------------------
 # pytest
