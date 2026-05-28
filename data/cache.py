@@ -1,16 +1,16 @@
 """
 data/cache.py
 
-SQLite-backed cache for bar data and indicator records.
+SQLite-backed cache for bar data and extension records.
 
 The Cache class is the only part of the app that reads from or writes to
-the database. Everything above this layer (indicators, chart, controller)
+the database. Everything above this layer (extensions, chart, controller)
 works with Bar and OHLCVSeries objects and never touches SQLite directly.
 
 Responsibilities:
   - Initialize the database schema on first launch
   - Store and retrieve OHLCV bars (keyed by symbol + timeframe + timestamp)
-  - Store, retrieve, update, and delete plugin-owned indicator records
+  - Store, retrieve, update, and delete plugin-owned extension records
 
 The controller checks the cache before calling a data provider. On a cache
 miss (not enough bars), it fetches from the provider and calls put_bars()
@@ -33,7 +33,7 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 class Cache:
     """
     Wraps a SQLite connection and exposes read/write operations for bars
-    and indicator records.
+    and extension records.
 
     Usage:
         cache = Cache("/path/to/simplechart.db")
@@ -198,7 +198,7 @@ class Cache:
     # ChartExtension records
     # ------------------------------------------------------------------
 
-    def get_indicator_records(
+    def get_extension_records(
         self,
         store_key: str,
         symbol: str,
@@ -206,16 +206,16 @@ class Cache:
         cursor = self._conn.execute(
             """
             SELECT record_id, store_key, symbol, sort_key, payload
-            FROM indicator_records
+            FROM extension_records
             WHERE store_key = ?
               AND symbol = ?
             ORDER BY sort_key ASC, record_id ASC
             """,
             (store_key, symbol),
         )
-        return [_row_to_indicator_record(row) for row in cursor]
+        return [_row_to_extension_record(row) for row in cursor]
 
-    def put_indicator_record(
+    def put_extension_record(
         self,
         store_key: str,
         symbol: str,
@@ -225,7 +225,7 @@ class Cache:
         with self._conn:
             cursor = self._conn.execute(
                 """
-                INSERT INTO indicator_records (
+                INSERT INTO extension_records (
                     store_key, symbol, sort_key, payload
                 )
                 VALUES (?, ?, ?, ?)
@@ -234,7 +234,7 @@ class Cache:
             )
         record_id = cursor.lastrowid
         if record_id is None:
-            raise RuntimeError("SQLite did not return an indicator record id.")
+            raise RuntimeError("SQLite did not return an extension record id.")
         return ChartExtensionStoreRecord(
             record_id=record_id,
             store_key=store_key,
@@ -243,7 +243,7 @@ class Cache:
             payload=dict(payload),
         )
 
-    def update_indicator_record(
+    def update_extension_record(
         self,
         record_id: int,
         sort_key: int,
@@ -252,7 +252,7 @@ class Cache:
         with self._conn:
             self._conn.execute(
                 """
-                UPDATE indicator_records
+                UPDATE extension_records
                 SET sort_key = ?,
                     payload = ?
                 WHERE record_id = ?
@@ -260,10 +260,10 @@ class Cache:
                 (sort_key, json.dumps(payload), record_id),
             )
 
-    def delete_indicator_record(self, record_id: int) -> None:
+    def delete_extension_record(self, record_id: int) -> None:
         with self._conn:
             self._conn.execute(
-                "DELETE FROM indicator_records WHERE record_id = ?",
+                "DELETE FROM extension_records WHERE record_id = ?",
                 (record_id,),
             )
 
@@ -294,7 +294,7 @@ def _row_to_bar(row: sqlite3.Row) -> Bar:
     )
 
 
-def _row_to_indicator_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:
+def _row_to_extension_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:
     payload = json.loads(row["payload"])
     if not isinstance(payload, dict):
         raise ValueError("ChartExtension record payload must be a JSON object.")

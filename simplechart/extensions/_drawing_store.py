@@ -116,7 +116,7 @@ class DrawingStore(ABC, Generic[R]):
         self._active_symbol = symbol
         self._durable = [
             self.from_payload(record.record_id, record.symbol, record.sort_key, record.payload)
-            for record in self._context.get_indicator_records(self.store_key, symbol)
+            for record in self._context.get_extension_records(self.store_key, symbol)
         ]
 
     def params_for(
@@ -141,7 +141,7 @@ class DrawingStore(ABC, Generic[R]):
         elif mutation.operation == "delete":
             self._delete(mutation.payload["record"])
 
-    def prepare_active_indicators(self) -> None:
+    def prepare_active_extensions(self) -> None:
         self._reconcile_state()
 
     # ------------------------------------------------------------------
@@ -185,7 +185,7 @@ class DrawingStore(ABC, Generic[R]):
         if symbol is None:
             return
         if self._is_durable(record):
-            persisted = self._context.put_indicator_record(
+            persisted = self._context.put_extension_record(
                 self.store_key,
                 symbol,
                 self.sort_key(record),
@@ -214,7 +214,7 @@ class DrawingStore(ABC, Generic[R]):
             self._reconcile_state()
             return
         if now_durable:
-            self._context.update_indicator_record(record_id, self.sort_key(record), self.to_payload(record))
+            self._context.update_extension_record(record_id, self.sort_key(record), self.to_payload(record))
             self._durable = [record if self.record_id(c) == record_id else c for c in self._durable]
         elif self._active_symbol is not None:
             lines = self._volatile.get(self._active_symbol, [])
@@ -227,7 +227,7 @@ class DrawingStore(ABC, Generic[R]):
         if record_id is None:
             return
         if record_id >= 0:
-            self._context.delete_indicator_record(record_id)
+            self._context.delete_extension_record(record_id)
             self._durable = [c for c in self._durable if self.record_id(c) != record_id]
         elif self._active_symbol is not None:
             lines = self._volatile.get(self._active_symbol, [])
@@ -237,6 +237,6 @@ class DrawingStore(ABC, Generic[R]):
 
     def _reconcile_state(self) -> None:
         if self._active_records():
-            self._context.ensure_indicator_state(self.extension_name, {self.params_key: []})
+            self._context.ensure_extension_state(self.extension_name, {self.params_key: []})
         else:
-            self._context.remove_indicator_state(self.extension_name)
+            self._context.remove_extension_state(self.extension_name)

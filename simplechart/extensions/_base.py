@@ -1,29 +1,29 @@
 """
 simplechart/extensions/_base.py
 
-Abstract base class for all indicators.
+Abstract base class for all chart extensions.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-HOW THE INDICATOR SYSTEM WORKS
+HOW THE EXTENSION SYSTEM WORKS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-There are three layers involved in every indicator:
+There are three layers involved in chart extensions:
 
   1. The ChartExtension subclass (this file / plugin packages)
      - Implements the ChartExtension ABC
-     - Responsible for extracting arrays from OHLCVSeries (e.g. closes,
-       volumes) and delegating to any compiled kernels
+     - Compute indicators extract arrays from OHLCVSeries and delegate
+       to compiled kernels when needed; tools can render directly
      - Plain Python — not compiled
 
-  2. Compiled kernels (optional, per-indicator _kernel.py)
+  2. Compiled kernels (optional, per compute-indicator _kernel.py)
      - Pure numeric functions: numpy array(s) in, numpy array out
      - No I/O, no dicts, no strings, no dynamic dispatch
      - Compiled to native extensions via mypyc for maximum speed
-     - Live alongside the indicator in its directory (e.g. indicators/ema/)
+     - Live alongside the compute indicator in its directory (e.g. indicators/ema/)
 
   3. The plugin registry (simplechart/extensions/_registry.py)
      - Maps extension names to ChartExtension classes
-     - All indicators are registered at import time via register()
+     - All extensions are registered at import time via register()
      - simplechart.plugins imports plugin modules so registration runs
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -32,7 +32,7 @@ THE MYPYC BOUNDARY
 
 mypyc compiles Python source to C extensions. The rule is:
 
-  Code that CAN be compiled lives in _kernel.py files inside indicator
+  Code that CAN be compiled lives in _kernel.py files inside compute-indicator
   directories (e.g. indicators/ema/_kernel.py). It must:
     - Use concrete types only (no Any, no Union in hot paths)
     - Accept and return numpy arrays or plain scalars
@@ -57,7 +57,7 @@ COMPUTE() CONTRACT
 
 compute() returns a dict[str, np.ndarray]. Each key is a unique series
 name; each value is an array aligned to series.bars (same length).
-Use np.nan for bars where the indicator has no value.
+Use np.nan for bars where the compute indicator has no value.
 
   Example — 50-day SMA:
       {"sma_50": np.array([nan, nan, ..., 14.56, 14.61])}
@@ -102,8 +102,8 @@ class SeriesFill:
     """
     Declares a shaded fill between two named series produced by compute().
 
-    series_a and series_b must be keys returned by the indicator's compute()
-    method. The fill is drawn between those two lines using the indicator's
+    series_a and series_b must be keys returned by the extension's compute()
+    method. The fill is drawn between those two lines using the extension's
     color param at the given alpha (0.0 = fully transparent, 1.0 = opaque).
     Values between 0.1 and 0.3 are typical for chart fills.
 
@@ -121,10 +121,10 @@ class ChoiceParam:
     """
     A parameter that must be one of a fixed set of string options.
 
-    Indicators put this in their default_params() for any field that maps to
+    Extensions put this in their default_params() for any field that maps to
     a dropdown in the config dialog. The value and choices travel together so
     the dialog can reconstruct the combo box without knowing anything about
-    the specific indicator.
+    the specific extension.
 
     Example:
         "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)
@@ -178,6 +178,13 @@ class VerticalLineRender:
 
 @dataclass
 class MarkerRender:
+    """
+    Text marker anchored to a bar/price coordinate on the main price chart.
+
+    Markers intentionally do not accept a render_target. Panel extensions
+    should use line/segment render primitives inside their own panel.
+    """
+
     key: str
     x_index: int
     y_value: float
@@ -266,13 +273,13 @@ class ChartExtensionStoreContext(Protocol):
 
     def current_timeframe(self) -> str | None: ...
 
-    def get_indicator_records(
+    def get_extension_records(
         self,
         store_key: str,
         symbol: str,
     ) -> list[ChartExtensionStoreRecord]: ...
 
-    def put_indicator_record(
+    def put_extension_record(
         self,
         store_key: str,
         symbol: str,
@@ -280,22 +287,22 @@ class ChartExtensionStoreContext(Protocol):
         payload: dict[str, Any],
     ) -> ChartExtensionStoreRecord: ...
 
-    def update_indicator_record(
+    def update_extension_record(
         self,
         record_id: int,
         sort_key: int,
         payload: dict[str, Any],
     ) -> None: ...
 
-    def delete_indicator_record(self, record_id: int) -> None: ...
+    def delete_extension_record(self, record_id: int) -> None: ...
 
-    def ensure_indicator_state(
+    def ensure_extension_state(
         self,
         name: str,
         params: dict[str, Any],
     ) -> None: ...
 
-    def remove_indicator_state(self, name: str) -> None: ...
+    def remove_extension_state(self, name: str) -> None: ...
 
     def remove_series_visibility(
         self,
@@ -310,7 +317,7 @@ class ChartExtensionStoreHandler(Protocol):
 
     def apply(self, mutation: ChartExtensionMutation) -> None: ...
 
-    def prepare_active_indicators(self) -> None: ...
+    def prepare_active_extensions(self) -> None: ...
 
     def params_for(
         self,
@@ -334,7 +341,7 @@ class ChartExtension(ABC):
     def label(self) -> str:
         """
         Human-readable display name shown in the chart legend and the
-        indicator config dialog.
+        extension config dialog.
 
         Example: "Simple Moving Average", "Anchored VWAP"
         """
@@ -342,7 +349,7 @@ class ChartExtension(ABC):
     @abstractmethod
     def default_params(self) -> dict[str, Any]:
         """
-        Return the default parameter set for this indicator.
+        Return the default parameter set for this extension.
 
         The config dialog calls this to build its input form. Keys are
         parameter names; values are the defaults. The same dict structure
@@ -370,7 +377,7 @@ class ChartExtension(ABC):
 
         Returns a dict of named arrays, each the same length as series.bars,
         aligned to the bar timestamps. Use np.nan for bars where the
-        indicator has no value (e.g. before an MA has accumulated enough
+        compute indicator has no value (e.g. before an MA has accumulated enough
         bars to produce its first valid output).
 
         Delegate heavy numeric work to a _kernel.py module when the
@@ -513,12 +520,12 @@ class ChartExtension(ABC):
 
     def render_target(self) -> str:
         """
-        Return the render target for this indicator.
+        Return the render target for this extension.
 
-        Chart indicators return RENDER_CHART (the default — no override needed).
+        Chart extensions return RENDER_CHART (the default — no override needed).
         They draw directly on the price chart, sharing its time × price axes.
 
-        Panel indicators return a short lowercase string naming their panel
+        Panel extensions return a short lowercase string naming their panel
         (e.g. "rsi", "macd"). Each unique string gets its own dedicated panel
         below the chart, sharing only the x (time) axis. Two instances
         returning the same string share one panel.
@@ -531,7 +538,7 @@ class ChartExtension(ABC):
 
         Override this to have the chart draw a translucent fill between two
         named series (e.g. Bollinger Bands upper and lower). Returns an empty
-        list by default — chart indicators need not override it.
+        list by default — chart extensions need not override it.
 
         Note: fill rendering support in PlotManager is planned but not yet
         implemented. Declaring fills here is forward-compatible; they will
@@ -541,7 +548,7 @@ class ChartExtension(ABC):
 
 
 def render_from_legacy(
-    indicator: ChartExtension,
+    extension: ChartExtension,
     params: dict[str, Any],
     result: dict[str, np.ndarray],
 ) -> ChartExtensionRender:
@@ -550,7 +557,7 @@ def render_from_legacy(
     line_style: str = _line_style_value(
         params.get("line_style", ChoiceParam("solid", LINE_STYLE_OPTIONS))
     )
-    render_target: str = indicator.render_target()
+    render_target: str = extension.render_target()
     return ChartExtensionRender(
         series=[
             SeriesRender(

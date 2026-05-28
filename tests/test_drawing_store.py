@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app.indicator_runtime import ChartExtensionRuntime
-from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
+from app.extension_runtime import ChartExtensionRuntime
+from app.extension_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe

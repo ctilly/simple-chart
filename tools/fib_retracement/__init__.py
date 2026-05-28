@@ -80,8 +80,9 @@ class FibonacciRetracementIndicator(ChartExtension):
         params: dict[str, Any],
     ) -> ChartExtensionRender:
         render = ChartExtensionRender()
+        timestamps = _series_timestamps(series)
         for drawing in _drawings_for_series(params, series):
-            layout = _drawing_layout(series, drawing)
+            layout = _drawing_layout(series, drawing, timestamps)
             if layout is None:
                 continue
             _append_drawing_render(render, drawing, layout, len(series.bars))
@@ -118,10 +119,17 @@ class FibonacciRetracementIndicator(ChartExtension):
         if drawing is None:
             return ChartExtensionRender()
         render = ChartExtensionRender()
-        layout = _live_drawing_layout(series, drawing, event)
+        timestamps = _series_timestamps(series)
+        layout = _live_drawing_layout(series, drawing, event, timestamps)
         if layout is None:
             return render
-        _append_drawing_render(render, drawing, layout, len(series.bars))
+        _append_drawing_render(
+            render,
+            drawing,
+            layout,
+            len(series.bars),
+            key=_live_preview_key(session),
+        )
         return render
 
     def advance_drawing(
@@ -156,12 +164,13 @@ class FibonacciRetracementIndicator(ChartExtension):
         event: ChartEvent,
         visible_keys: set[str],
     ) -> HitTestResult | None:
+        timestamps = _series_timestamps(series)
         for drawing in _drawings_for_series(params, series):
             key = fib_drawing_key(drawing)
             hit_key = _visible_drawing_key(key, visible_keys)
             if hit_key is None:
                 continue
-            layout = _drawing_layout(series, drawing)
+            layout = _drawing_layout(series, drawing, timestamps)
             if layout is None:
                 continue
             if _end_handle_hit(series, layout, event):
@@ -190,7 +199,8 @@ class FibonacciRetracementIndicator(ChartExtension):
         session: DragSession,
         event: ChartEvent,
     ) -> ChartExtensionRender | None:
-        updated = _updated_drag_drawing(series, session, event)
+        timestamps = _series_timestamps(series)
+        updated = _updated_drag_drawing(series, session, event, timestamps)
         if updated is None:
             return None
         session.working_params["drawings"] = [
@@ -198,9 +208,15 @@ class FibonacciRetracementIndicator(ChartExtension):
             for drawing in session.working_params["drawings"]
         ]
         render = ChartExtensionRender()
-        layout = _live_drawing_layout(series, updated, event)
+        layout = _live_drawing_layout(series, updated, event, timestamps)
         if layout is not None:
-            _append_drawing_render(render, updated, layout, len(series.bars))
+            _append_drawing_render(
+                render,
+                updated,
+                layout,
+                len(series.bars),
+                key=_drawing_base_key(session.handle_key),
+            )
         return render
 
     def finish_drag(
@@ -332,6 +348,22 @@ def _visible_drawing_key(
     return next((key for key in visible_keys if key.startswith(prefix)), None)
 
 
+def _live_preview_key(session: DrawingSession) -> str:
+    return f"fib_retracement_preview_{session.tool_key}"
+
+
+def _drawing_base_key(series_key: str) -> str:
+    if series_key.startswith("fib_retracement_ref_ts_"):
+        suffix = series_key.removeprefix("fib_retracement_ref_ts_")
+        start_end = suffix.split("_ref_", 1)[0]
+        return f"fib_retracement_ref_ts_{start_end}"
+    if series_key.startswith("fib_retracement_ref_"):
+        suffix = series_key.removeprefix("fib_retracement_ref_")
+        drawing_id = suffix.split("_ref_", 1)[0]
+        return f"fib_retracement_ref_{drawing_id}"
+    return series_key
+
+
 def _drawing_defaults(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "anchor_price_mode": _choice_value(params.get("anchor_price_mode", "swing_wick")),
@@ -378,8 +410,11 @@ def _append_drawing_render(
     drawing: FibRetracementRecord,
     layout: _DrawingLayout,
     bar_count: int,
+    *,
+    key: str | None = None,
 ) -> None:
-    key = fib_drawing_key(drawing)
+    if key is None:
+        key = fib_drawing_key(drawing)
     x_end = float(max(layout.end_index, bar_count - 1))
     label_index = _label_index(drawing, layout, bar_count)
     for level in FIB_LEVELS:
@@ -449,9 +484,10 @@ def _drawings_for_series(
 def _drawing_layout(
     series: OHLCVSeries,
     drawing: FibRetracementRecord,
+    timestamps: list[int],
 ) -> _DrawingLayout | None:
-    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, series)
-    end_index = _timestamp_to_exact_index(drawing.end_timestamp_ms, series)
+    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, timestamps)
+    end_index = _timestamp_to_exact_index(drawing.end_timestamp_ms, timestamps)
     if start_index is None or end_index is None:
         return None
     start_bar = series.bars[start_index]
@@ -467,8 +503,9 @@ def _live_drawing_layout(
     series: OHLCVSeries,
     drawing: FibRetracementRecord,
     event: ChartEvent,
+    timestamps: list[int],
 ) -> _DrawingLayout | None:
-    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, series)
+    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, timestamps)
     if start_index is None:
         return None
     start_bar = series.bars[start_index]
@@ -483,13 +520,14 @@ def _updated_drag_drawing(
     series: OHLCVSeries,
     session: DragSession,
     event: ChartEvent,
+    timestamps: list[int],
 ) -> FibRetracementRecord | None:
     if event.bar_index is None or event.timestamp_ms is None:
         return None
     drawing = fib_drawing_for_key(session.working_params["drawings"], session.handle_key)
     if drawing is None:
         return None
-    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, series)
+    start_index = _timestamp_to_exact_index(drawing.start_timestamp_ms, timestamps)
     if start_index is None or event.bar_index <= start_index:
         return None
     return FibRetracementRecord(
@@ -532,8 +570,11 @@ def _configured_drawing(
     )
 
 
-def _timestamp_to_exact_index(timestamp_ms: int, series: OHLCVSeries) -> int | None:
-    timestamps = [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+def _series_timestamps(series: OHLCVSeries) -> list[int]:
+    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+
+
+def _timestamp_to_exact_index(timestamp_ms: int, timestamps: list[int]) -> int | None:
     idx = bisect_left(timestamps, timestamp_ms)
     if idx < len(timestamps) and timestamps[idx] == timestamp_ms:
         return idx

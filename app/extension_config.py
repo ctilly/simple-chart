@@ -1,11 +1,11 @@
 """
-app/indicator_config.py
+app/extension_config.py
 
-Configuration dialog for individual indicators.
+Configuration dialog for individual extensions.
 
-Opens when the user right-clicks an indicator label in the legend (or
-right-clicks a plot line on the chart). Builds a form dynamically from
-the indicator's current params dict and returns the updated params on
+Opens when the user right-clicks an extension label in the legend (or
+right-clicks a render item on the chart). Builds a form dynamically from
+the extension's current params dict and returns the updated params on
 accept.
 
 Supported param types:
@@ -17,7 +17,7 @@ Supported param types:
                 updated .value
 
 Adding support for a new param type means adding a branch in
-_build_field(). The indicator's default_params() dict is the contract —
+_build_field(). The extension's default_params() dict is the contract —
 whatever types appear there, this dialog must handle.
 """
 
@@ -84,13 +84,13 @@ class ColorButton(QPushButton):
         )
 
 
-class IndicatorConfigDialog(QDialog):
+class ExtensionConfigDialog(QDialog):
     """
-    Modal dialog for editing indicator parameters.
+    Modal dialog for editing extension parameters.
 
     Usage:
-        dialog = IndicatorConfigDialog(
-            indicator_label="Simple Moving Average",
+        dialog = ExtensionConfigDialog(
+            extension_label="Simple Moving Average",
             params={"days": 50, "color": "#00BFFF"},
             parent=parent_widget,
         )
@@ -100,12 +100,12 @@ class IndicatorConfigDialog(QDialog):
 
     def __init__(
         self,
-        indicator_label: str,
+        extension_label: str,
         params: dict[str, Any],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Configure: {indicator_label}")
+        self.setWindowTitle(f"Configure: {extension_label}")
         self.setMinimumWidth(300)
 
         self._params  = dict(params)   # working copy

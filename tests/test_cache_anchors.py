@@ -4,11 +4,11 @@ from data.cache import Cache
 from data.models import ChartExtensionStoreRecord
 
 
-def test_update_indicator_record_persists_sort_key_and_payload(tmp_path: Path) -> None:
+def test_update_extension_record_persists_sort_key_and_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "simplechart.db"
     cache = Cache(str(db_path))
     try:
-        record = cache.put_indicator_record(
+        record = cache.put_extension_record(
             "avwap.anchors",
             "SPY",
             1_700_000_000_000,
@@ -34,37 +34,37 @@ def test_update_indicator_record_persists_sort_key_and_payload(tmp_path: Path) -
                 "show_anchor": True,
             },
         )
-        cache.update_indicator_record(
+        cache.update_extension_record(
             updated.record_id,
             updated.sort_key,
             updated.payload,
         )
 
-        records = cache.get_indicator_records("avwap.anchors", "SPY")
+        records = cache.get_extension_records("avwap.anchors", "SPY")
     finally:
         cache.close()
 
     assert records == [updated]
 
 
-def test_indicator_records_are_scoped_by_store_key_and_symbol(tmp_path: Path) -> None:
+def test_extension_records_are_scoped_by_store_key_and_symbol(tmp_path: Path) -> None:
     db_path = tmp_path / "simplechart.db"
     cache = Cache(str(db_path))
     try:
-        cache.put_indicator_record(
+        cache.put_extension_record(
             "avwap.anchors",
             "QQQ",
             1_700_000_000_000,
             {"label": "2023-11-14"},
         )
-        cache.put_indicator_record(
+        cache.put_extension_record(
             "fib.retracements",
             "QQQ",
             1_700_000_000_000,
             {"label": "2023-11-14"},
         )
 
-        records = cache.get_indicator_records("avwap.anchors", "QQQ")
+        records = cache.get_extension_records("avwap.anchors", "QQQ")
     finally:
         cache.close()
 

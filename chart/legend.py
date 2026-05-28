@@ -1,14 +1,14 @@
 """
 chart/legend.py
 
-ChartExtension legend — shows active indicators and lets the user toggle them.
+ChartExtension legend — shows active extension labels and lets the user toggle them.
 
 Displayed as a horizontal strip at the top of the chart area, matching
-the style of Webull's indicator label row. Each indicator appears as a
-colored label. Clicking a label toggles the indicator's visibility.
-Right-clicking opens the config dialog for that indicator.
+the style of Webull's label row. Each extension label appears as a
+colored label. Clicking a label toggles that extension's visibility.
+Right-clicking opens the config dialog for that extension.
 
-The legend does not own indicator state — it only reflects what the
+The legend does not own extension state — it only reflects what the
 controller tells it. When the user clicks a label, the legend calls the
 registered toggle callback; the controller updates state and calls
 set_visible() on the PlotManager, then calls update() on the legend to
@@ -44,11 +44,11 @@ from PyQt6.QtWidgets import (
 from chart.styles import LEGEND_FONT_SIZE
 
 
-class IndicatorLabel(QLabel):
+class ExtensionLabel(QLabel):
     """
     A single clickable label in the legend strip.
 
-    Displays the indicator name in its assigned color. Muted when hidden.
+    Displays the extension name in its assigned color. Muted when hidden.
     """
 
     def __init__(
@@ -74,8 +74,8 @@ class IndicatorLabel(QLabel):
         self._color = color
         self._apply_style()
 
-    def set_indicator_visible(self, visible: bool) -> None:
-        """Update visual state when the indicator is toggled."""
+    def set_extension_visible(self, visible: bool) -> None:
+        """Update visual state when the extension is toggled."""
         self._visible = visible
         self._apply_style()
 
@@ -195,7 +195,7 @@ class DrawingToolPalette(QWidget):
                 "QToolButton:hover { background: #ffffff; }"
             )
             button.clicked.connect(
-                lambda checked=False, name=tool_name: on_drawing_tool(name)
+                lambda _checked=False, name=tool_name: on_drawing_tool(name)
             )
             tool_layout.addWidget(button)
         frame_layout.addWidget(tool_row)
@@ -259,10 +259,10 @@ class DrawingToolPalette(QWidget):
 
 class ChartLegend(QWidget):
     """
-    Horizontal strip of indicator labels displayed above the chart.
+    Horizontal strip of extension labels displayed above the chart.
 
-    The controller calls add_indicator(), remove_indicator(), and
-    set_indicator_visible() to keep the legend in sync with chart state.
+    The controller calls add_extension(), remove_extension(), and
+    set_extension_visible() to keep the legend in sync with chart state.
     """
 
     def __init__(
@@ -279,7 +279,7 @@ class ChartLegend(QWidget):
         self._on_toggle    = on_toggle
         self._on_configure = on_configure
         self._on_remove    = on_remove
-        self._labels: dict[str, IndicatorLabel] = {}
+        self._labels: dict[str, ExtensionLabel] = {}
         palette_parent = parent if parent is not None else self
         self._tool_palette = DrawingToolPalette(
             drawing_tools,
@@ -323,16 +323,16 @@ class ChartLegend(QWidget):
         layout.addWidget(tools_btn)
         self._tools_button = tools_btn
 
-    def add_indicator(
+    def add_extension(
         self,
         series_key: str,
         display_text: str,
         color: str,
     ) -> None:
-        """Add a new indicator label to the legend."""
+        """Add a new extension label to the legend."""
         if series_key in self._labels:
             return
-        label = IndicatorLabel(
+        label = ExtensionLabel(
             series_key,
             display_text,
             color,
@@ -345,23 +345,23 @@ class ChartLegend(QWidget):
         assert layout is not None
         layout.insertWidget(max(1, layout.count() - 2), label)
 
-    def remove_indicator(self, series_key: str) -> None:
-        """Remove an indicator label from the legend."""
+    def remove_extension(self, series_key: str) -> None:
+        """Remove an extension label from the legend."""
         if series_key not in self._labels:
             return
         label = self._labels.pop(series_key)
         self.layout().removeWidget(label)  # type: ignore[union-attr]
         label.deleteLater()
 
-    def set_indicator_visible(self, series_key: str, visible: bool) -> None:
+    def set_extension_visible(self, series_key: str, visible: bool) -> None:
         """Update the visual state of a label without removing it."""
         if series_key in self._labels:
-            self._labels[series_key].set_indicator_visible(visible)
+            self._labels[series_key].set_extension_visible(visible)
 
     def clear_all(self) -> None:
-        """Remove all indicator labels. Called when switching symbols."""
+        """Remove all extension labels. Called when switching symbols."""
         for series_key in list(self._labels.keys()):
-            self.remove_indicator(series_key)
+            self.remove_extension(series_key)
 
     def update_color(self, series_key: str, color: str) -> None:
         """Update the color of an existing label (no-op if key not present)."""

@@ -4,8 +4,8 @@ from typing import Any
 
 import numpy as np
 
-from app.indicator_runtime import ChartExtensionRuntime
-from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
+from app.extension_runtime import ChartExtensionRuntime
+from app.extension_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import ChartExtensionState, State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
@@ -203,7 +203,7 @@ class RecordingStore:
     def apply(self, mutation: ChartExtensionMutation) -> None:
         self.mutations.append(mutation)
 
-    def prepare_active_indicators(self) -> None:
+    def prepare_active_extensions(self) -> None:
         pass
 
     def params_for(
@@ -242,7 +242,7 @@ def test_runtime_updates_series_keys_and_preserves_current_visibility(
     tmp_path: Path,
 ) -> None:
     state = State(symbol="SPY")
-    state.indicators = [
+    state.extensions = [
         ChartExtensionState(
             name="sma",
             params={"days": 2, "color": "#ffffff"},
@@ -255,15 +255,15 @@ def test_runtime_updates_series_keys_and_preserves_current_visibility(
         passes = runtime.render_all(_series())
 
     assert len(passes) == 1
-    assert state.indicators[0].series_keys == ["sma_2"]
-    assert state.indicators[0].series_visibility == {"sma_2": False}
+    assert state.extensions[0].series_keys == ["sma_2"]
+    assert state.extensions[0].series_visibility == {"sma_2": False}
 
 
 def test_runtime_tracks_horizontal_segment_keys_and_visibility(
     tmp_path: Path,
 ) -> None:
     state = State(symbol="SPY")
-    state.indicators = [
+    state.extensions = [
         ChartExtensionState(
             name="test_segment_only",
             params={},
@@ -276,13 +276,13 @@ def test_runtime_tracks_horizontal_segment_keys_and_visibility(
         passes = runtime.render_all(_series())
 
     assert len(passes) == 1
-    assert state.indicators[0].series_keys == ["test_segment_only_line"]
-    assert state.indicators[0].series_visibility == {"test_segment_only_line": False}
+    assert state.extensions[0].series_keys == ["test_segment_only_line"]
+    assert state.extensions[0].series_visibility == {"test_segment_only_line": False}
 
 
 def test_runtime_tracks_vertical_line_keys_and_visibility(tmp_path: Path) -> None:
     state = State(symbol="SPY")
-    state.indicators = [
+    state.extensions = [
         ChartExtensionState(
             name="test_vertical_line_only",
             params={},
@@ -295,8 +295,8 @@ def test_runtime_tracks_vertical_line_keys_and_visibility(tmp_path: Path) -> Non
         passes = runtime.render_all(_series())
 
     assert len(passes) == 1
-    assert state.indicators[0].series_keys == ["test_vertical_line_only_line"]
-    assert state.indicators[0].series_visibility == {"test_vertical_line_only_line": False}
+    assert state.extensions[0].series_keys == ["test_vertical_line_only_line"]
+    assert state.extensions[0].series_visibility == {"test_vertical_line_only_line": False}
 
 
 def test_runtime_routes_toolbar_drawing_lifecycle(tmp_path: Path) -> None:
@@ -411,7 +411,7 @@ def test_runtime_routes_avwap_drag_and_persists_finish(tmp_path: Path) -> None:
         )
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [ChartExtensionState(name="avwap", params={"anchors": []})]
+        state.extensions = [ChartExtensionState(name="avwap", params={"anchors": []})]
         runtime = _runtime(state, cache, store)
         runtime.render_all(series)
 
@@ -445,7 +445,7 @@ def test_runtime_skips_avwap_drag_redraw_until_anchor_bar_changes(tmp_path: Path
         )
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [ChartExtensionState(name="avwap", params={"anchors": []})]
+        state.extensions = [ChartExtensionState(name="avwap", params={"anchors": []})]
         runtime = _runtime(state, cache, store)
         runtime.render_all(series)
 
@@ -473,7 +473,7 @@ def test_runtime_removes_avwap_anchor_through_store(tmp_path: Path) -> None:
         )
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [
+        state.extensions = [
             ChartExtensionState(
                 name="avwap",
                 params={"anchors": []},
@@ -511,7 +511,7 @@ def test_runtime_uses_indicator_owned_avwap_config(tmp_path: Path) -> None:
         )
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([persisted])
-        state.indicators = [
+        state.extensions = [
             ChartExtensionState(
                 name="avwap",
                 params={"anchors": []},
@@ -588,17 +588,17 @@ def _runtime(
     store: AvwapAnchorStore | RecordingStore | None = None,
 ) -> ChartExtensionRuntime:
     handlers = [store] if store is not None else None
-    indicator_store = ChartExtensionStore(state, cache, handlers)
+    extension_store = ChartExtensionStore(state, cache, handlers)
     return ChartExtensionRuntime(
         state,
         cache,
-        indicator_store,
+        extension_store,
         lookback_days=600,
     )
 
 
 def _put_avwap_anchor(cache: Cache, anchor: AnchorRecord) -> AnchorRecord:
-    record = cache.put_indicator_record(
+    record = cache.put_extension_record(
         "avwap.anchors",
         anchor.symbol,
         anchor.anchor_ts,
@@ -628,7 +628,7 @@ def _get_avwap_anchors(cache: Cache, symbol: str) -> list[AnchorRecord]:
             show_anchor=bool(record.payload["show_anchor"]),
             anchor_id=record.record_id,
         )
-        for record in cache.get_indicator_records("avwap.anchors", symbol)
+        for record in cache.get_extension_records("avwap.anchors", symbol)
     ]
 
 

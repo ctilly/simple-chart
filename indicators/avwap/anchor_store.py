@@ -21,7 +21,7 @@ class AvwapAnchorStore:
     def load_for_symbol(self, symbol: str) -> None:
         self._anchors = [
             _record_to_anchor(record)
-            for record in self._context.get_indicator_records(
+            for record in self._context.get_extension_records(
                 _AVWAP_ANCHOR_STORE_KEY,
                 symbol,
             )
@@ -46,7 +46,7 @@ class AvwapAnchorStore:
             return
         if mutation.operation == "add_anchor":
             self.add_anchor(mutation.payload)
-            self.prepare_active_indicators()
+            self.prepare_active_extensions()
         elif mutation.operation == "update_anchor":
             self.update_anchor(mutation.payload["anchor"])
         elif mutation.operation == "restore_anchors":
@@ -66,7 +66,7 @@ class AvwapAnchorStore:
             label=str(payload["label"]),
             color=str(payload["color"]),
         )
-        persisted = self._context.put_indicator_record(
+        persisted = self._context.put_extension_record(
             _AVWAP_ANCHOR_STORE_KEY,
             record.symbol,
             record.anchor_ts,
@@ -77,7 +77,7 @@ class AvwapAnchorStore:
     def update_anchor(self, anchor: AnchorRecord) -> None:
         if anchor.anchor_id is None:
             return
-        self._context.update_indicator_record(
+        self._context.update_extension_record(
             anchor.anchor_id,
             anchor.anchor_ts,
             _anchor_payload(anchor),
@@ -93,20 +93,20 @@ class AvwapAnchorStore:
     def delete_anchor(self, anchor: AnchorRecord) -> None:
         if anchor.anchor_id is None:
             return
-        self._context.delete_indicator_record(anchor.anchor_id)
+        self._context.delete_extension_record(anchor.anchor_id)
         self._anchors = [
             current for current in self._anchors
             if current.anchor_id != anchor.anchor_id
         ]
 
-    def prepare_active_indicators(self) -> None:
+    def prepare_active_extensions(self) -> None:
         if self._anchors:
-            self._context.ensure_indicator_state("avwap", {"anchors": []})
+            self._context.ensure_extension_state("avwap", {"anchors": []})
 
     def _cleanup_deleted_anchor(self, anchor: AnchorRecord) -> None:
         self._context.remove_series_visibility("avwap", avwap_anchor_key(anchor))
         if not self._anchors:
-            self._context.remove_indicator_state("avwap")
+            self._context.remove_extension_state("avwap")
 
 
 def _anchor_payload(anchor: AnchorRecord) -> dict[str, Any]:

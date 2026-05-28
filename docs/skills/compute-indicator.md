@@ -265,7 +265,7 @@ plugin package whose name does not start with `_`, plus user plugin `.py` files
 from `~/.simplechart/plugins/`. No app/controller import wiring is needed — the
 `register_extension()` call at the bottom of the file fires on import.
 
-### 7c. Add to INITIAL_INDICATORS (optional)
+### 7c. Add to INITIAL_EXTENSIONS (optional)
 
 File: `app/controller.py`
 
@@ -289,7 +289,7 @@ After all steps are complete:
 5. Switch timeframes and confirm the values remain correct
 6. If a kernel was added, optionally compile it: `python scripts/build_compiled.py`
 7. Run these checks:
-   `python -m compileall app chart indicators simplechart tests`
+   `python -m compileall app chart data indicators simplechart tools tests`
    `python -m pytest`
 8. If you need a focused mypy check, ask the user before choosing the target,
    then run:

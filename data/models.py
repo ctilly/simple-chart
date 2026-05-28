@@ -96,36 +96,16 @@ class OHLCVSeries:
     bars is sorted oldest-first. This matches the natural order for indicator
     computation (indicators read left to right) and for SQLite queries
     (ORDER BY timestamp ASC).
-
-    loaded_range_start and loaded_range_end describe the calendar window that
-    was requested from the data layer, NOT necessarily the timestamps of the
-    first and last bar. There may be gaps (weekends, holidays, halted trading).
-
-    The controller uses loaded_range_start to determine whether it needs to
-    fetch older bars when the user pans left past the current window.
     """
 
     symbol: str
     timeframe: Timeframe
     bars: list[Bar] = field(default_factory=list)
-    loaded_range_start: datetime | None = None   # UTC
-    loaded_range_end: datetime | None = None     # UTC
-
     def __len__(self) -> int:
         return len(self.bars)
 
     def __bool__(self) -> bool:
         return len(self.bars) > 0
-
-    @property
-    def newest_bar(self) -> Bar | None:
-        """The most recent bar, or None if the series is empty."""
-        return self.bars[-1] if self.bars else None
-
-    @property
-    def oldest_bar(self) -> Bar | None:
-        """The oldest bar, or None if the series is empty."""
-        return self.bars[0] if self.bars else None
 
 
 @dataclass(frozen=True)

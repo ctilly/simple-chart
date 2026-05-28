@@ -2,8 +2,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.indicator_runtime import ChartExtensionRuntime
-from app.indicator_store import AppChartExtensionStoreContext, ChartExtensionStore
+from app.extension_runtime import ChartExtensionRuntime
+from app.extension_store import AppChartExtensionStoreContext, ChartExtensionStore
 from app.state import State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
@@ -41,6 +41,29 @@ def test_fib_preview_upward_swing_wick_levels() -> None:
     assert render.markers[0].text == "0%"
     assert render.markers[-2].text == "S"
     assert render.markers[-1].text == "E"
+
+
+def test_fib_preview_keys_stay_stable_across_pointer_bars() -> None:
+    indicator = FibonacciRetracementIndicator()
+    series = _series()
+    start = indicator.start_drawing(
+        series,
+        indicator.default_params(),
+        _event(series, 1, 100.0),
+    )
+    assert start.session is not None
+
+    first = indicator.preview_drawing(series, start.session, _event(series, 3, 111.0))
+    second = indicator.preview_drawing(series, start.session, _event(series, 4, 90.0))
+
+    assert first is not None
+    assert second is not None
+    assert [segment.key for segment in first.segments] == [
+        segment.key for segment in second.segments
+    ]
+    assert [marker.key for marker in first.markers] == [
+        marker.key for marker in second.markers
+    ]
 
 
 def test_fib_preview_updates_continuously_with_pointer_y_on_same_bar() -> None:
@@ -124,6 +147,46 @@ def test_fib_commit_deactivates_and_scopes_to_exact_timeframe(tmp_path: Path) ->
     assert result.deactivate_tool
     assert len(daily_render.segments) == 6
     assert intraday_render.segments == []
+
+
+def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        start = runtime.start_drawing(
+            "fib_retracement",
+            series,
+            runtime.chart_event(series, 1.0, 100.0),
+        )
+        assert start.session is not None
+        runtime.advance_drawing(series, start.session, runtime.chart_event(series, 3.0, 111.0))
+        runtime.render_all(series)
+
+        request = runtime.config_request("fib_retracement_ref_-1")
+        assert request is not None
+        edited = dict(request.params)
+        edited["show_0_0"] = False
+        runtime.apply_config("fib_retracement_ref_-1", edited)
+        runtime.render_all(series)
+
+        hit = runtime.drawing_hit_test(series, runtime.chart_event(series, 3.0, 107.46))
+        assert hit is not None
+        assert hit.handle_key == "fib_retracement_ref_-1_ref_236"
+        assert runtime.begin_drag(series, runtime.chart_event(series, 3.0, 107.46))
+        render_pass = runtime.drag_to(series, runtime.chart_event(series, 4.0, 90.0))
+
+    assert render_pass is not None
+    assert {segment.key for segment in render_pass.render.segments} == {
+        "fib_retracement_ref_-1_ref_236",
+        "fib_retracement_ref_-1_ref_382",
+        "fib_retracement_ref_-1_ref_500",
+        "fib_retracement_ref_-1_ref_618",
+        "fib_retracement_ref_-1_ref_1000",
+    }
 
 
 def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:

@@ -9,7 +9,7 @@ This repository is installed from source, not packaged as a native installer.
 3. Read `pyproject.toml`.
 4. Create a Python 3.13 virtual environment.
 5. Install with `python -m pip install -e .` for normal app use, or
-   `python -m pip install -e ".[dev]"` if you will build indicators, run tests,
+   `python -m pip install -e ".[dev]"` if you will build extensions, run tests,
    type-check, or compile kernels.
 6. Launch with `simplechart`.
 7. On Linux only, if the user wants a menu launcher, run:
@@ -19,16 +19,20 @@ This repository is installed from source, not packaged as a native installer.
 
 Use `pip install -e ".[dev]"` whenever you will:
 
-- build a custom indicator (project plugin, or any user plugin that needs a
-  compiled kernel)
+- build a custom extension: compute indicator, interactive indicator, or drawing
+  tool
+- build any user plugin that needs a compiled kernel
 - run `pytest`
 - run `mypy`
+- run `ruff` or audit dead code with `vulture`
 - compile kernels via `scripts/build_compiled.py`
 
 The dev extras add:
 
 - `pytest` and `pytest-qt` — verification
 - `mypy` — type checking and mypyc compilation
+- `ruff` — fast linting
+- `vulture` — dead-code audit tool; review findings manually
 - `setuptools` — required by the mypyc build step in
   `scripts/build_compiled.py`
 
@@ -55,6 +59,8 @@ The normal install is sufficient for plain `.py` user plugins dropped into
   indicators
 - `docs/skills/interactive-indicator.md` — step-by-step skill file for
   interactive indicators (drag handles, context actions, persistent state)
+- `docs/skills/drawing-tool.md` — step-by-step skill file for toolbar drawing
+  tools such as vertical lines and Fibonacci retracements
 - `scripts/install_linux_desktop.py` — optional Linux desktop integration that
   writes the installed launcher with the active environment's `simplechart`
   path

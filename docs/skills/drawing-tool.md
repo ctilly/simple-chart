@@ -27,8 +27,8 @@ Read this entire file before writing any code.
   drawing/drag/hit-test hooks, and the store-handler + store-context protocols.
 - `simplechart/extensions/_drawing_store.py` — the `DrawingStore` base and
   `AxisPolicy`; the persistence framework every tool uses.
-- `app/indicator_runtime.py` — generic event/drawing/drag/config/remove routing.
-- `app/indicator_store.py` — the store-handler boundary and app store context.
+- `app/extension_runtime.py` — generic event/drawing/drag/config/remove routing.
+- `app/extension_store.py` — the store-handler boundary and app store context.
 
 Reference tools — model new tools on these:
 
@@ -61,7 +61,7 @@ The two independent axes:
 `DrawingStore` handles all of it: SQLite-vs-memory routing, timeframe
 tagging/filtering, id assignment (durable records get the positive SQLite row
 id; volatile records get a negative id), and ensuring/removing the tool's
-indicator state as drawings appear and disappear on the current timeframe. The
+extension state as drawings appear and disappear on the current timeframe. The
 tool only declares the two policies and implements the record hooks.
 
 For a `USER` axis, store the per-drawing choice as a bool field on the record and

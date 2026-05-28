@@ -4,7 +4,7 @@
 --
 -- Tables:
 --   bars              — cached OHLCV data from the data provider
---   indicator_records — plugin-owned persisted records
+--   extension_records — plugin-owned persisted records
 --   watchlist         — user-curated symbols
 --
 -- Run once on first launch via cache.py:init_db().
@@ -41,12 +41,12 @@ CREATE TABLE IF NOT EXISTS bars (
 );
 
 
--- indicator_records
+-- extension_records
 -- ----------------------------------------------------------------------------
--- Generic persistence for indicator plugins. The app stores and orders opaque
--- JSON payloads; each indicator owns the payload schema behind its store_key.
+-- Generic persistence for extension plugins. The app stores and orders opaque
+-- JSON payloads; each extension owns the payload schema behind its store_key.
 
-CREATE TABLE IF NOT EXISTS indicator_records (
+CREATE TABLE IF NOT EXISTS extension_records (
     record_id INTEGER PRIMARY KEY AUTOINCREMENT,
     store_key TEXT    NOT NULL,
     symbol    TEXT    NOT NULL,
@@ -56,8 +56,8 @@ CREATE TABLE IF NOT EXISTS indicator_records (
     UNIQUE (store_key, record_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_indicator_records_store_symbol
-    ON indicator_records (store_key, symbol, sort_key);
+CREATE INDEX IF NOT EXISTS idx_extension_records_store_symbol
+    ON extension_records (store_key, symbol, sort_key);
 
 
 -- watchlist

@@ -65,8 +65,9 @@ class VerticalLineIndicator(ChartExtension):
         params: dict[str, Any],
     ) -> ChartExtensionRender:
         render = ChartExtensionRender()
+        timestamps = _series_timestamps(series)
         for line in _lines_for_symbol(params, series.symbol):
-            x_index = _timestamp_to_nearest_index(line.timestamp_ms, series)
+            x_index = _timestamp_to_nearest_index(line.timestamp_ms, timestamps)
             if x_index is None:
                 continue
             render.vertical_lines.append(
@@ -114,11 +115,12 @@ class VerticalLineIndicator(ChartExtension):
         event: ChartEvent,
         visible_keys: set[str],
     ) -> HitTestResult | None:
+        timestamps = _series_timestamps(series)
         for line in _lines_for_symbol(params, series.symbol):
             key = vertical_line_key(line)
             if key not in visible_keys:
                 continue
-            x_index = _timestamp_to_nearest_index(line.timestamp_ms, series)
+            x_index = _timestamp_to_nearest_index(line.timestamp_ms, timestamps)
             if x_index is None:
                 continue
             if abs(event.x - float(x_index)) <= _HIT_BUFFER:
@@ -270,16 +272,16 @@ def _lines_for_symbol(
     ]
 
 
+def _series_timestamps(series: OHLCVSeries) -> list[int]:
+    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+
+
 def _timestamp_to_nearest_index(
     timestamp_ms: int,
-    series: OHLCVSeries,
+    timestamps: list[int],
 ) -> int | None:
-    if not series.bars:
+    if not timestamps:
         return None
-    timestamps = [
-        int(bar.timestamp.timestamp() * 1000)
-        for bar in series.bars
-    ]
     idx = bisect_left(timestamps, timestamp_ms)
     candidates: list[int] = []
     if idx < len(timestamps):

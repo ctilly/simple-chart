@@ -22,16 +22,16 @@ from data.models import Timeframe
 @dataclass
 class ChartExtensionState:
     """
-    The active configuration for one indicator instance.
+    The active configuration for one chart extension instance.
 
     name       — registry key (e.g. "sma", "avwap")
     params     — the current parameter dict (from default_params(), possibly
                  edited by the user via the config dialog)
-    visible    — whether the indicator's render items are currently shown
+    visible    — whether the extension's render items are currently shown
     series_keys — the keys last returned by compute(), used to update the
                  PlotManager and legend when params change
     series_visibility — optional per-series visibility overrides for
-                 indicators that emit multiple independent series
+                 extensions that emit multiple independent series
 
     One ChartExtensionState entry exists per chart extension instance on the chart.
     Multiple SMAs (50-day and 200-day) are two separate entries with the
@@ -52,7 +52,7 @@ class State:
 
     symbol      — the currently loaded ticker symbol (e.g. "QQQ")
     timeframe   — the currently active timeframe
-    indicators  — ordered list of active indicator instances; order
+    extensions  — ordered list of active extension instances; order
                   determines draw order on the chart
 
     symbol and timeframe start as None — the app shows an empty chart
@@ -61,15 +61,15 @@ class State:
 
     symbol:     str | None = None
     timeframe:  Timeframe  = Timeframe.DAILY
-    indicators: list[ChartExtensionState] = field(default_factory=list)
+    extensions: list[ChartExtensionState] = field(default_factory=list)
 
     def get_extension(self, name: str) -> ChartExtensionState | None:
-        """Return the first indicator instance with the given name, or None."""
-        return next((i for i in self.indicators if i.name == name), None)
+        """Return the first extension instance with the given name, or None."""
+        return next((i for i in self.extensions if i.name == name), None)
 
     def get_extension_by_series_key(self, series_key: str) -> ChartExtensionState | None:
-        """Return the indicator that owns a given series key, or None."""
+        """Return the extension that owns a given series key, or None."""
         return next(
-            (i for i in self.indicators if series_key in i.series_keys),
+            (i for i in self.extensions if series_key in i.series_keys),
             None,
         )

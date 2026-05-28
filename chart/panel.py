@@ -4,11 +4,11 @@ chart/panel.py
 A Panel wraps one finplot axis — one horizontal region of the chart.
 
 A typical SimpleChart layout has two always-visible panels:
-  - Price panel  (candlesticks + chart indicators like MA and AVWAP)
+  - Price panel  (candlesticks + chart extensions like MA and AVWAP)
   - Volume panel (volume bars below the price panel)
 
-Up to three indicator panels sit below volume. They are pre-allocated at
-startup with zero height and revealed when a panel indicator is added.
+Up to three extension panels sit below volume. They are pre-allocated at
+startup with zero height and revealed when a panel extension is added.
 See chart/window.py for slot management and chart/viewport.py for the
 viewport behavior that is installed on first use.
 
@@ -28,7 +28,7 @@ from typing import Any
 class PanelType(Enum):
     PRICE     = auto()
     VOLUME    = auto()
-    INDICATOR = auto()
+    EXTENSION = auto()
 
 
 class Panel:
@@ -54,25 +54,13 @@ class Panel:
         self.panel_type = panel_type
         self.ratio = ratio
 
-    @property
-    def is_price(self) -> bool:
-        return self.panel_type == PanelType.PRICE
-
-    @property
-    def is_volume(self) -> bool:
-        return self.panel_type == PanelType.VOLUME
-
-    @property
-    def is_indicator(self) -> bool:
-        return self.panel_type == PanelType.INDICATOR
-
 
 @dataclass
-class IndicatorPanelSlot:
+class ExtensionPanelSlot:
     """
-    One of three pre-allocated indicator panel slots below the volume panel.
+    One of three pre-allocated extension panel slots below the volume panel.
 
-    name is the render_target() string of the indicator currently
+    name is the render_target() string of the extension currently
     occupying this slot, or None if the slot is unoccupied.
 
     behavior_installed tracks whether viewport behavior (y-autoscale patch,

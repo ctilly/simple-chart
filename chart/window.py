@@ -4,16 +4,16 @@ chart/window.py
 The chart widget — the finplot area plus the legend strip.
 
 This is a QWidget (not QMainWindow) containing everything visual that
-is specific to the chart: candlesticks, volume, indicator lines, and
+is specific to the chart: candlesticks, volume, extension lines, and
 the legend. The overall application window (symbol bar, timeframe
 buttons, menu bar) is assembled in app/controller.py.
 
 Layout:
     ┌─────────────────────────────────────┐
-    │ Legend strip (indicator labels)      │
+    │ Legend strip (extension labels)      │
     ├─────────────────────────────────────┤
     │                                      │
-    │  Price panel (candles + indicators)  │
+    │  Price panel (candles + extensions)  │
     │                                      │
     ├─────────────────────────────────────┤
     │  Volume panel                        │
@@ -36,10 +36,10 @@ from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from chart.interactions import ChartInteractions
 from chart.legend import ChartLegend
-from chart.panel import IndicatorPanelSlot, Panel, PanelType
+from chart.panel import ExtensionPanelSlot, Panel, PanelType
 from chart.plot_manager import PlotManager
 from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
-from chart.viewport import install_indicator_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
+from chart.viewport import install_extension_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
 
 
 class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
@@ -69,8 +69,8 @@ class ChartWidget(QWidget):
     chart-interaction handlers (bar_clicked, etc.) before showing the window.
 
     Public interface used by the controller:
-        plot_manager   — draw/update/remove data and indicators
-        legend         — add/remove/toggle indicator labels
+        plot_manager   — draw/update/remove data and extensions
+        legend         — add/remove/toggle extension labels
         interactions   — register click handlers
     """
 
@@ -109,12 +109,12 @@ class ChartWidget(QWidget):
         create_plot_widget(master, rows=5) returns five axes:
           axes[0] — price panel  (stretch 4)
           axes[1] — volume panel (stretch 1)
-          axes[2–4] — indicator panel slots (stretch 0 — invisible until assigned)
+          axes[2–4] — extension panel slots (stretch 0 — invisible until assigned)
 
-        The three indicator slots are pre-allocated so they live in the
+        The three extension slots are pre-allocated so they live in the
         same _FinplotMaster. finplot's x-axis linking discovers axes via
         master.axs, which only covers axes in the same master widget. If
-        indicator panels were created dynamically in a separate widget,
+        extension panels were created dynamically in a separate widget,
         they would not be found and would fall out of x-sync after redraws.
         """
         # Set finplot globals before create_plot_widget, which calls
@@ -152,7 +152,7 @@ class ChartWidget(QWidget):
         price_ax.showGrid(x=True, y=True, alpha=0.06)
 
         price_ax.crosshair.infos.append(
-            lambda x, y, xtext, ytext: (xtext, "%.2f" % y)
+            lambda x, y, xtext, _ytext: (xtext, "%.2f" % y)
         )
 
         install_viewport_behavior(price_ax, volume_ax)
@@ -160,17 +160,17 @@ class ChartWidget(QWidget):
         self._price_panel  = Panel(price_ax,  PanelType.PRICE,  ratio=4)
         self._volume_panel = Panel(volume_ax, PanelType.VOLUME, ratio=1)
 
-        self._indicator_slots: list[IndicatorPanelSlot] = [
-            IndicatorPanelSlot(Panel(axes[i + 2], PanelType.INDICATOR, ratio=0))
+        self._extension_slots: list[ExtensionPanelSlot] = [
+            ExtensionPanelSlot(Panel(axes[i + 2], PanelType.EXTENSION, ratio=0))
             for i in range(3)
         ]
         self._cancel_cb: Callable[[], None] | None = None
 
-        # Hide all indicator slots — they become visible only when assigned.
-        for slot in self._indicator_slots:
+        # Hide all extension slots — they become visible only when assigned.
+        for slot in self._extension_slots:
             slot.panel.ax.hide()
 
-        all_axes = [price_ax, volume_ax] + [s.panel.ax for s in self._indicator_slots]
+        all_axes = [price_ax, volume_ax] + [s.panel.ax for s in self._extension_slots]
         sync_x_axis_labels(all_axes)
 
     def _build_layout(self) -> None:
@@ -186,7 +186,7 @@ class ChartWidget(QWidget):
         self._plot_manager = PlotManager(
             self._price_panel,
             self._volume_panel,
-            self._indicator_slots,
+            self._extension_slots,
         )
         self._interactions = ChartInteractions(self._price_panel.ax, self._master)
 
@@ -227,10 +227,10 @@ class ChartWidget(QWidget):
 
     def _all_axes(self) -> list[object]:
         return [self._price_panel.ax, self._volume_panel.ax] + [
-            s.panel.ax for s in self._indicator_slots
+            s.panel.ax for s in self._extension_slots
         ]
 
-    def ensure_indicator_panel(self, name: str) -> Panel:
+    def ensure_extension_panel(self, name: str) -> Panel:
         """
         Return the Panel for the given render_target name, allocating a
         slot if needed.
@@ -242,11 +242,11 @@ class ChartWidget(QWidget):
 
         Raises RuntimeError if all three slots are occupied by other names.
         """
-        for slot in self._indicator_slots:
+        for slot in self._extension_slots:
             if slot.name == name:
                 return slot.panel
 
-        for i, slot in enumerate(self._indicator_slots):
+        for i, slot in enumerate(self._extension_slots):
             if slot.name is None:
                 slot.name = name
                 # Lift the hard height cap before setting stretch so the row
@@ -255,17 +255,17 @@ class ChartWidget(QWidget):
                 self._master.ci.layout.setRowStretchFactor(i + 2, 2)
                 slot.panel.ax.show()
                 if not slot.behavior_installed:
-                    install_indicator_panel_behavior(slot.panel.ax, self._price_panel.ax)
+                    install_extension_panel_behavior(slot.panel.ax, self._price_panel.ax)
                     slot.behavior_installed = True
                 sync_x_axis_labels(self._all_axes())
                 return slot.panel
 
         raise RuntimeError(
-            "All 3 indicator panel slots are in use. "
-            "Remove an existing panel indicator before adding another."
+            "All 3 extension panel slots are in use. "
+            "Remove an existing panel extension before adding another."
         )
 
-    def release_indicator_panel(self, name: str) -> None:
+    def release_extension_panel(self, name: str) -> None:
         """
         Release the slot assigned to name, hiding the panel.
 
@@ -274,7 +274,7 @@ class ChartWidget(QWidget):
         first use is left in place (it survives axis resets and will be
         valid if the slot is reused).
         """
-        for i, slot in enumerate(self._indicator_slots):
+        for i, slot in enumerate(self._extension_slots):
             if slot.name == name:
                 slot.panel.ax.reset()
                 slot.panel.ax.hide()
@@ -286,16 +286,16 @@ class ChartWidget(QWidget):
 
     def clear_all(self) -> None:
         """
-        Remove all chart content and release all indicator panel slots.
+        Remove all chart content and release all extension panel slots.
 
         Called by the controller on symbol load to give a clean slate
         before drawing new data. Equivalent to clearing price, volume, and
-        all indicator panels simultaneously.
+        all extension panels simultaneously.
         """
         self._plot_manager.clear_all()
-        for slot in self._indicator_slots:
+        for slot in self._extension_slots:
             if slot.name is not None:
-                self.release_indicator_panel(slot.name)
+                self.release_extension_panel(slot.name)
 
     def on_cancel(self, callback: Callable[[], None]) -> None:
         self._cancel_cb = callback

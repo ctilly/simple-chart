@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import bisect
 from typing import Any
 
-from app.indicator_store import ChartExtensionStore
+from app.extension_store import ChartExtensionStore
 from app.state import ChartExtensionState, State
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
@@ -43,58 +43,58 @@ class ChartExtensionRuntime:
         self,
         state: State,
         cache: Cache,
-        indicator_store: ChartExtensionStore,
+        extension_store: ChartExtensionStore,
         lookback_days: int,
     ) -> None:
         self._state = state
         self._cache = cache
-        self._indicator_store = indicator_store
+        self._extension_store = extension_store
         self._lookback_days = lookback_days
         self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
 
     def render_all(self, series: OHLCVSeries) -> list[ChartExtensionRenderPass]:
-        self._indicator_store.prepare_active_indicators()
+        self._extension_store.prepare_active_extensions()
         daily_bars = self._daily_bars_for(series)
 
         passes: list[ChartExtensionRenderPass] = []
-        for ind_state in self._state.indicators:
-            ind_state.params = self._indicator_store.params_for(
-                ind_state.name,
-                ind_state.params,
+        for ext_state in self._state.extensions:
+            ext_state.params = self._extension_store.params_for(
+                ext_state.name,
+                ext_state.params,
             )
-            passes.append(self.render_one(ind_state, series, daily_bars))
+            passes.append(self.render_one(ext_state, series, daily_bars))
         return passes
 
     def render_one(
         self,
-        ind_state: ChartExtensionState,
+        ext_state: ChartExtensionState,
         series: OHLCVSeries,
         daily_bars: list[Bar],
     ) -> ChartExtensionRenderPass:
-        indicator = get_extension(ind_state.name)
+        extension = get_extension(ext_state.name)
         # _daily_bars is a transient compute input (daily history for intraday
         # MA warmup). Merge it into a throwaway params dict for this render only,
-        # never into the persisted ind_state.params — otherwise the full bar list
+        # never into the persisted ext_state.params — otherwise the full bar list
         # rides into per-symbol saved state and gets deep-copied on every switch.
-        params = {**ind_state.params, "_daily_bars": daily_bars}
-        render = indicator.render(series, params)
-        ind_state.series_keys = [
+        params = {**ext_state.params, "_daily_bars": daily_bars}
+        render = extension.render(series, params)
+        ext_state.series_keys = [
             series_render.key for series_render in render.series
         ] + [
             segment.key for segment in render.segments
         ] + [
             line.key for line in render.vertical_lines
         ]
-        ind_state.series_visibility = {
-            key: ind_state.series_visibility[key]
-            for key in ind_state.series_keys
-            if key in ind_state.series_visibility
+        ext_state.series_visibility = {
+            key: ext_state.series_visibility[key]
+            for key in ext_state.series_keys
+            if key in ext_state.series_visibility
         }
         return ChartExtensionRenderPass(
-            state=ind_state,
+            state=ext_state,
             render=render,
-            render_target=indicator.render_target(),
+            render_target=extension.render_target(),
         )
 
     def chart_event(
@@ -123,11 +123,11 @@ class ChartExtensionRuntime:
     ) -> list[ChartExtensionAction]:
         actions: list[ChartExtensionAction] = []
         for name, cls in all_extensions().items():
-            indicator = cls()
-            ind_state = self._state.get_extension(name)
-            params = ind_state.params if ind_state is not None else indicator.default_params()
-            params = self._indicator_store.params_for(name, params)
-            actions.extend(indicator.context_actions(series, params, event))
+            extension = cls()
+            ext_state = self._state.get_extension(name)
+            params = ext_state.params if ext_state is not None else extension.default_params()
+            params = self._extension_store.params_for(name, params)
+            actions.extend(extension.context_actions(series, params, event))
         return actions
 
     def apply_action(
@@ -136,11 +136,11 @@ class ChartExtensionRuntime:
         action: ChartExtensionAction,
         event: ChartEvent,
     ) -> None:
-        indicator = get_extension(action.extension_name)
-        ind_state = self._state.get_extension(action.extension_name)
-        params = ind_state.params if ind_state is not None else indicator.default_params()
-        params = self._indicator_store.params_for(action.extension_name, params)
-        mutation = indicator.apply_action(series, params, action.action_key, event)
+        extension = get_extension(action.extension_name)
+        ext_state = self._state.get_extension(action.extension_name)
+        params = ext_state.params if ext_state is not None else extension.default_params()
+        params = self._extension_store.params_for(action.extension_name, params)
+        mutation = extension.apply_action(series, params, action.action_key, event)
         if mutation is not None:
             self.apply_mutation(mutation)
 
@@ -151,25 +151,25 @@ class ChartExtensionRuntime:
     ) -> bool:
         best_state: ChartExtensionState | None = None
         best_hit = None
-        for ind_state in self._state.indicators:
-            indicator = get_extension(ind_state.name)
-            params = self._params_for_state(ind_state)
+        for ext_state in self._state.extensions:
+            extension = get_extension(ext_state.name)
+            params = self._params_for_state(ext_state)
             visible_keys = {
                 key
-                for key in ind_state.series_keys
-                if ind_state.series_visibility.get(key, ind_state.visible)
+                for key in ext_state.series_keys
+                if ext_state.series_visibility.get(key, ext_state.visible)
             }
-            hit = indicator.hit_test(series, params, event, visible_keys)
+            hit = extension.hit_test(series, params, event, visible_keys)
             if hit is None:
                 continue
             if best_hit is None or hit.priority > best_hit.priority:
-                best_state = ind_state
+                best_state = ext_state
                 best_hit = hit
         if best_state is None or best_hit is None:
             return False
-        indicator = get_extension(best_state.name)
+        extension = get_extension(best_state.name)
         self._drag_state = best_state
-        self._drag_session = indicator.begin_drag(
+        self._drag_session = extension.begin_drag(
             series,
             self._params_for_state(best_state),
             best_hit,
@@ -183,14 +183,14 @@ class ChartExtensionRuntime:
     ) -> ChartExtensionRenderPass | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        indicator = get_extension(self._drag_state.name)
-        render = indicator.drag_to(series, self._drag_session, event)
+        extension = get_extension(self._drag_state.name)
+        render = extension.drag_to(series, self._drag_session, event)
         if render is None:
             return None
         return ChartExtensionRenderPass(
             state=self._drag_state,
             render=render,
-            render_target=indicator.render_target(),
+            render_target=extension.render_target(),
         )
 
     def finish_drag(
@@ -200,8 +200,8 @@ class ChartExtensionRuntime:
     ) -> ChartExtensionMutation | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        indicator = get_extension(self._drag_state.name)
-        mutation = indicator.finish_drag(series, self._drag_session, event)
+        extension = get_extension(self._drag_state.name)
+        mutation = extension.finish_drag(series, self._drag_session, event)
         self._drag_state = None
         self._drag_session = None
         if mutation is not None:
@@ -211,8 +211,8 @@ class ChartExtensionRuntime:
     def cancel_drag(self) -> ChartExtensionMutation | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        indicator = get_extension(self._drag_state.name)
-        mutation = indicator.cancel_drag(self._drag_session)
+        extension = get_extension(self._drag_state.name)
+        mutation = extension.cancel_drag(self._drag_session)
         self._drag_state = None
         self._drag_session = None
         if mutation is not None:
@@ -225,11 +225,11 @@ class ChartExtensionRuntime:
         series: OHLCVSeries,
         event: ChartEvent,
     ) -> DrawingToolResult:
-        indicator = get_extension(extension_name)
-        ind_state = self._state.get_extension(extension_name)
-        params = ind_state.params if ind_state is not None else indicator.default_params()
-        params = self._indicator_store.params_for(extension_name, params)
-        result = indicator.start_drawing(series, params, event)
+        extension = get_extension(extension_name)
+        ext_state = self._state.get_extension(extension_name)
+        params = ext_state.params if ext_state is not None else extension.default_params()
+        params = self._extension_store.params_for(extension_name, params)
+        result = extension.start_drawing(series, params, event)
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
         return result
@@ -240,17 +240,17 @@ class ChartExtensionRuntime:
         event: ChartEvent,
     ) -> HitTestResult | None:
         best_hit = None
-        for ind_state in self._state.indicators:
-            indicator = get_extension(ind_state.name)
-            if indicator.add_mode() != ChartExtensionAddMode.TOOLBAR:
+        for ext_state in self._state.extensions:
+            extension = get_extension(ext_state.name)
+            if extension.add_mode() != ChartExtensionAddMode.TOOLBAR:
                 continue
-            params = self._params_for_state(ind_state)
+            params = self._params_for_state(ext_state)
             visible_keys = {
                 key
-                for key in ind_state.series_keys
-                if ind_state.series_visibility.get(key, ind_state.visible)
+                for key in ext_state.series_keys
+                if ext_state.series_visibility.get(key, ext_state.visible)
             }
-            hit = indicator.hit_test(series, params, event, visible_keys)
+            hit = extension.hit_test(series, params, event, visible_keys)
             if hit is None:
                 continue
             if best_hit is None or hit.priority > best_hit.priority:
@@ -263,14 +263,14 @@ class ChartExtensionRuntime:
         session: DrawingSession,
         event: ChartEvent,
     ) -> ChartExtensionRenderPass | None:
-        indicator = get_extension(session.extension_name)
-        render = indicator.preview_drawing(series, session, event)
+        extension = get_extension(session.extension_name)
+        render = extension.preview_drawing(series, session, event)
         if render is None:
             return None
         return ChartExtensionRenderPass(
             state=self._drawing_state(session, render),
             render=render,
-            render_target=indicator.render_target(),
+            render_target=extension.render_target(),
         )
 
     def advance_drawing(
@@ -279,8 +279,8 @@ class ChartExtensionRuntime:
         session: DrawingSession,
         event: ChartEvent,
     ) -> DrawingToolResult:
-        indicator = get_extension(session.extension_name)
-        result = indicator.advance_drawing(series, session, event)
+        extension = get_extension(session.extension_name)
+        result = extension.advance_drawing(series, session, event)
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
         return result
@@ -289,85 +289,85 @@ class ChartExtensionRuntime:
         self,
         session: DrawingSession,
     ) -> ChartExtensionMutation | None:
-        indicator = get_extension(session.extension_name)
-        mutation = indicator.cancel_drawing(session)
+        extension = get_extension(session.extension_name)
+        mutation = extension.cancel_drawing(session)
         if mutation is not None:
             self.apply_mutation(mutation)
         return mutation
 
     def apply_mutation(self, mutation: ChartExtensionMutation) -> None:
-        self._indicator_store.apply(mutation)
+        self._extension_store.apply(mutation)
 
     def toggle_visibility(self, series_key: str) -> tuple[list[str], bool] | None:
-        ind_state = self._state.get_extension_by_series_key(series_key)
-        if ind_state is None:
+        ext_state = self._state.get_extension_by_series_key(series_key)
+        if ext_state is None:
             return None
-        indicator = get_extension(ind_state.name)
-        params = self._params_for_state(ind_state)
-        if indicator.toggles_series_independently(series_key, params):
-            visible = not ind_state.series_visibility.get(series_key, ind_state.visible)
-            ind_state.series_visibility[series_key] = visible
+        extension = get_extension(ext_state.name)
+        params = self._params_for_state(ext_state)
+        if extension.toggles_series_independently(series_key, params):
+            visible = not ext_state.series_visibility.get(series_key, ext_state.visible)
+            ext_state.series_visibility[series_key] = visible
             return [series_key], visible
 
-        ind_state.visible = not ind_state.visible
-        return list(ind_state.series_keys), ind_state.visible
+        ext_state.visible = not ext_state.visible
+        return list(ext_state.series_keys), ext_state.visible
 
     def config_request(self, series_key: str) -> ChartExtensionConfig | None:
-        ind_state = self._state.get_extension_by_series_key(series_key)
-        if ind_state is None:
+        ext_state = self._state.get_extension_by_series_key(series_key)
+        if ext_state is None:
             return None
-        indicator = get_extension(ind_state.name)
-        params = self._params_for_state(ind_state)
-        request = indicator.config_for_series(series_key, params)
+        extension = get_extension(ext_state.name)
+        params = self._params_for_state(ext_state)
+        request = extension.config_for_series(series_key, params)
         if request is not None:
             return request
         return ChartExtensionConfig(
-            label=indicator.label(),
-            params=ind_state.params,
+            label=extension.label(),
+            params=ext_state.params,
         )
 
     def apply_config(self, series_key: str, params: dict[str, Any]) -> None:
-        ind_state = self._state.get_extension_by_series_key(series_key)
-        if ind_state is None:
+        ext_state = self._state.get_extension_by_series_key(series_key)
+        if ext_state is None:
             return
-        indicator = get_extension(ind_state.name)
-        mutation = indicator.apply_config_to_series(
+        extension = get_extension(ext_state.name)
+        mutation = extension.apply_config_to_series(
             series_key,
-            self._params_for_state(ind_state),
+            self._params_for_state(ext_state),
             params,
         )
         if mutation is not None:
             self.apply_mutation(mutation)
             return
-        ind_state.params = params
+        ext_state.params = params
 
     def remove(self, series_key: str) -> ChartExtensionRemoval | None:
-        ind_state = self._state.get_extension_by_series_key(series_key)
-        if ind_state is None:
+        ext_state = self._state.get_extension_by_series_key(series_key)
+        if ext_state is None:
             return None
-        indicator = get_extension(ind_state.name)
-        mutation = indicator.remove_series(
+        extension = get_extension(ext_state.name)
+        mutation = extension.remove_series(
             series_key,
-            self._params_for_state(ind_state),
+            self._params_for_state(ext_state),
         )
         if mutation is not None:
             self.apply_mutation(mutation)
             return ChartExtensionRemoval(
                 series_keys=[series_key],
-                render_target=indicator.render_target(),
+                render_target=extension.render_target(),
             )
 
-        render_target = indicator.render_target()
-        series_keys = list(ind_state.series_keys)
-        self._state.indicators = [
-            state for state in self._state.indicators
-            if state is not ind_state
+        render_target = extension.render_target()
+        series_keys = list(ext_state.series_keys)
+        self._state.extensions = [
+            state for state in self._state.extensions
+            if state is not ext_state
         ]
         release_panel = False
         if render_target != "chart":
             release_panel = not any(
                 get_extension(state.name).render_target() == render_target
-                for state in self._state.indicators
+                for state in self._state.extensions
             )
         return ChartExtensionRemoval(
             series_keys=series_keys,
@@ -375,8 +375,8 @@ class ChartExtensionRuntime:
             release_panel=release_panel,
         )
 
-    def _params_for_state(self, ind_state: ChartExtensionState) -> dict[str, Any]:
-        return self._indicator_store.params_for(ind_state.name, ind_state.params)
+    def _params_for_state(self, ext_state: ChartExtensionState) -> dict[str, Any]:
+        return self._extension_store.params_for(ext_state.name, ext_state.params)
 
     def _drawing_state(
         self,

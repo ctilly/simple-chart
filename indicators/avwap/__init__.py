@@ -511,6 +511,6 @@ def _copy_anchor(anchor: AnchorRecord) -> AnchorRecord:
     )
 
 
-from indicators.avwap.anchor_store import AvwapAnchorStore
+from indicators.avwap.anchor_store import AvwapAnchorStore  # noqa: E402
 
 register_store_handler(AvwapAnchorStore)

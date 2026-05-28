@@ -103,7 +103,7 @@ class ChartInteractions:
         if not self._drag_active:
             return False
         self._drag_active = False
-        self._set_indicator_drag_locked(False)
+        self._set_extension_drag_locked(False)
         self._price_ax.vb.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
         if self._drag_cancel_cb is not None:
             self._drag_cancel_cb()
@@ -133,7 +133,7 @@ class ChartInteractions:
             viewbox.mouseDragEvent,
         )
 
-        def _mouse_drag_event(self_vb: object, event: object, axis: object | None = None) -> None:
+        def _mouse_drag_event(_self_vb: object, event: object, axis: object | None = None) -> None:
             button = event.button()  # type: ignore[attr-defined]
             modifiers = event.modifiers()  # type: ignore[attr-defined]
             if button != Qt.MouseButton.LeftButton or modifiers != Qt.KeyboardModifier.NoModifier:
@@ -142,7 +142,7 @@ class ChartInteractions:
 
             if self._drag_active:
                 viewbox.win._isMouseLeftDrag = True
-                self._set_indicator_drag_locked(True)
+                self._set_extension_drag_locked(True)
                 if event.isFinish():  # type: ignore[attr-defined]
                     if (
                         self._scene_pos_in_price_panel(event)
@@ -155,7 +155,7 @@ class ChartInteractions:
                     self._drag_active = False
                     viewbox.win._isMouseLeftDrag = False
                     event.accept()  # type: ignore[attr-defined]
-                    self._set_indicator_drag_locked(False)
+                    self._set_extension_drag_locked(False)
                     return
 
                 if self._scene_pos_in_price_panel(event):
@@ -172,9 +172,9 @@ class ChartInteractions:
                 return
 
             if self._drag_start_cb is not None and self._button_down_in_price_panel(event):
-                if self._try_start_indicator_drag(viewbox, event):
+                if self._try_start_extension_drag(viewbox, event):
                     self._drag_active = True
-                    self._set_indicator_drag_locked(True)
+                    self._set_extension_drag_locked(True)
                     viewbox.win._isMouseLeftDrag = True
                     if self._drag_move_cb is not None:
                         pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
@@ -186,10 +186,10 @@ class ChartInteractions:
 
         viewbox.mouseDragEvent = types.MethodType(_mouse_drag_event, viewbox)
 
-    def _set_indicator_drag_locked(self, locked: bool) -> None:
-        self._price_ax.vb.win._simplechart_indicator_drag_active = locked  # type: ignore[attr-defined]
+    def _set_extension_drag_locked(self, locked: bool) -> None:
+        self._price_ax.vb.win._simplechart_extension_drag_active = locked  # type: ignore[attr-defined]
 
-    def _try_start_indicator_drag(self, viewbox: object, event: object) -> bool:
+    def _try_start_extension_drag(self, viewbox: object, event: object) -> bool:
         if self._drag_start_cb is None:
             return False
 

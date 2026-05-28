@@ -76,7 +76,7 @@ class SymbolBar(QWidget):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.setFixedWidth(40)
-            btn.clicked.connect(lambda checked, t=tf: self._on_timeframe_clicked(t))
+            btn.clicked.connect(lambda _checked, t=tf: self._on_timeframe_clicked(t))
             self._tf_buttons[tf] = btn
             layout.addWidget(btn)
 
@@ -87,11 +87,6 @@ class SymbolBar(QWidget):
     def set_symbol(self, symbol: str) -> None:
         """Update the symbol field (called after a successful load)."""
         self._symbol_input.setText(symbol.upper())
-
-    def set_timeframe(self, tf: Timeframe) -> None:
-        """Update the active timeframe highlight without emitting a signal."""
-        self._active_timeframe = tf
-        self._highlight(tf)
 
     # ------------------------------------------------------------------
     # Private

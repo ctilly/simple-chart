@@ -1,3 +1,4 @@
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -73,6 +74,12 @@ def test_render_primitives_are_public_api() -> None:
     assert public_get_extension("rsi").name() == "rsi"
     assert "rsi" in public_all_extensions()
     assert public_register_store_handler is register_store_handler
+
+
+def test_marker_render_is_price_chart_only() -> None:
+    field_names = {field.name for field in fields(MarkerRender)}
+
+    assert "render_target" not in field_names
 
 
 class _NoOpIndicator(ChartExtension):

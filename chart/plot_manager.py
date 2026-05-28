@@ -6,8 +6,8 @@ where finplot draw calls are made.
 
 Responsibilities:
   - Draw and update candlesticks and volume bars when a new symbol loads
-  - Create, update, and remove indicator render items
-  - Show/hide indicator render items (for legend toggles)
+  - Create, update, and remove extension render items
+  - Show/hide extension render items (for legend toggles)
   - Clear everything when switching symbols
 
 Why a dedicated manager?
@@ -33,7 +33,7 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from chart.panel import IndicatorPanelSlot, Panel
+from chart.panel import ExtensionPanelSlot, Panel
 from chart.styles import (
     BACKGROUND,
     CANDLE_DOWN,
@@ -64,20 +64,20 @@ class PlotManager:
     Central registry of finplot plot handles.
 
     One PlotManager exists per chart window. The controller calls its
-    methods whenever data or indicator state changes.
+    methods whenever data or extension state changes.
     """
 
     def __init__(
         self,
         price_panel: Panel,
         volume_panel: Panel,
-        indicator_slots: list[IndicatorPanelSlot],
+        extension_slots: list[ExtensionPanelSlot],
     ) -> None:
         self._price_panel     = price_panel
         self._volume_panel    = volume_panel
-        self._indicator_slots = indicator_slots
+        self._extension_slots = extension_slots
 
-        # Keys follow the render keys produced by indicators.
+        # Keys follow the render keys produced by extensions.
         self._plots: dict[str, object] = {}
         self._segments: dict[str, tuple[object, object]] = {}
         self._vertical_lines: dict[str, tuple[object, object]] = {}
@@ -89,8 +89,8 @@ class PlotManager:
         self._volume_plot: object | None = None
 
         # DatetimeIndex of the most recently drawn bar series. Stored so
-        # indicator plots can use the same time axis as the candles.
-        # Without this, finplot aligns indicators by integer array position
+        # extension plots can use the same time axis as the candles.
+        # Without this, finplot aligns extension lines by integer array position
         # rather than time, which breaks during pan/zoom.
         self._bar_index: pd.DatetimeIndex | None = None
 
@@ -109,7 +109,7 @@ class PlotManager:
         import finplot as fplt
 
         df = _series_to_candle_df(series)
-        self._bar_index = df.index  # save for indicator alignment
+        self._bar_index = df.index  # save for extension alignment
 
         if self._candle_plot is not None:
             self._candle_plot.update_data(df)  # type: ignore[attr-defined]
@@ -162,10 +162,10 @@ class PlotManager:
         apply_interaction_modes(self._price_panel.ax, self._volume_panel.ax)
 
     # ------------------------------------------------------------------
-    # Indicators
+    # Extensions
     # ------------------------------------------------------------------
 
-    def update_indicator(
+    def update_extension(
         self,
         series_key: str,
         values: np.ndarray,
@@ -175,11 +175,11 @@ class PlotManager:
         render_target: str = "chart",
     ) -> None:
         """
-        Draw or update a single indicator plot line.
+        Draw or update a single extension plot line.
 
         render_target routes the draw to the correct axis:
-          "chart"      → price panel (default, chart indicators)
-          any other str → the indicator panel slot assigned that name
+          "chart"      → price panel (default, chart extensions)
+          any other str → the extension panel slot assigned that name
 
         If a plot for series_key already exists, its data is updated in
         place. If it does not exist, a new line is created on the
@@ -194,7 +194,7 @@ class PlotManager:
 
         # Wrap the numpy array in a pandas Series with the same DatetimeIndex
         # as the candles. Without this, finplot uses integer array positions
-        # as x-coordinates, which causes indicator lines to drift during
+        # as x-coordinates, which causes extension lines to drift during
         # pan/zoom because finplot's x-indexed mode can't reconcile the two
         # datasrcs.
         if self._bar_index is not None:
@@ -298,17 +298,17 @@ class PlotManager:
         """Return the finplot axis for the given render_target string."""
         if render_target == "chart":
             return self._price_panel.ax
-        for slot in self._indicator_slots:
+        for slot in self._extension_slots:
             if slot.name == render_target:
                 return slot.panel.ax
-        raise KeyError(f"No indicator panel slot assigned for target {render_target!r}")
+        raise KeyError(f"No extension panel slot assigned for target {render_target!r}")
 
-    def remove_indicator(self, series_key: str) -> None:
+    def remove_extension(self, series_key: str) -> None:
         """
-        Remove an indicator plot line from the chart.
+        Remove an extension render item from the chart.
 
-        Called when the user deletes an indicator-owned render item or
-        removes an indicator entirely.
+        Called when the user deletes an extension-owned render item or
+        removes an extension entirely.
         """
         if series_key in self._plots:
             handle = self._plots.pop(series_key)
@@ -319,7 +319,7 @@ class PlotManager:
 
     def set_visible(self, series_key: str, visible: bool) -> None:
         """
-        Show or hide an indicator plot line without removing it.
+        Show or hide an extension render item without removing it.
 
         Used by the legend toggle — hiding keeps the plot handle alive
         so it can be shown again without recomputing.
@@ -333,32 +333,12 @@ class PlotManager:
         if series_key in self._markers:
             self._markers[series_key].setVisible(visible)  # type: ignore[attr-defined]
 
-    def clear_indicators(self) -> None:
-        """
-        Remove all indicator lines. Called when switching symbols.
-
-        Candles and volume are replaced via draw_candles/draw_volume,
-        so they are not cleared here.
-        """
-        for handle in self._plots.values():
-            handle.ax.removeItem(handle)  # type: ignore[attr-defined]
-        self._plots.clear()
-        for item, target_ax in self._segments.values():
-            target_ax.removeItem(item)  # type: ignore[attr-defined]
-        self._segments.clear()
-        for item, target_ax in self._vertical_lines.values():
-            target_ax.removeItem(item)  # type: ignore[attr-defined]
-        self._vertical_lines.clear()
-        for handle in self._markers.values():
-            self._price_panel.ax.removeItem(handle)
-        self._markers.clear()
-
     def clear_all(self) -> None:
         """Remove everything including candles and volume."""
         # ax.reset() (set up by finplot on each axis) removes all items from
         # the scene and calls vb.reset() — which clears standalones, rois, and
         # datasrc. This is more thorough than calling removeItem individually
-        # and prevents indicator plots from one symbol bleeding onto another.
+        # and prevents extension plots from one symbol bleeding onto another.
         self._price_panel.ax.reset()
         self._volume_panel.ax.reset()
 
@@ -371,7 +351,7 @@ class PlotManager:
         self._bar_index   = None
 
     def active_series_keys(self) -> list[str]:
-        """Return the keys of all currently drawn indicator series."""
+        """Return the keys of all currently drawn extension render items."""
         return (
             list(self._plots.keys())
             + list(self._segments.keys())
@@ -388,12 +368,13 @@ class PlotManager:
         axes = [self._price_panel.ax]
         axes.extend(
             slot.panel.ax
-            for slot in self._indicator_slots
+            for slot in self._extension_slots
             if slot.name is not None
         )
         return axes
 
     def update_marker(self, marker: MarkerRender) -> None:
+        """Draw or update a marker on the main price panel."""
         x_value = _x_value_for_index(
             float(marker.x_index),
             self._bar_index,

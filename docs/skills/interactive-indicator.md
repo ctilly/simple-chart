@@ -19,8 +19,8 @@ Read these files before classifying the work:
 
 - `simplechart/api.py` — public plugin API. Indicator behavior imports from here.
 - `simplechart/plugins.py` — plugin loading model.
-- `app/indicator_runtime.py` — generic event/render/config/remove routing.
-- `app/indicator_store.py` — generic store-handler boundary.
+- `app/extension_runtime.py` — generic event/render/config/remove routing.
+- `app/extension_store.py` — generic store-handler boundary.
 
 After the indicator is classified, read only the reference files needed for the
 capabilities you will implement:
@@ -171,7 +171,7 @@ or what decision was made, and wait for explicit user approval before continuing
    - Add focused tests for render keys, context action, drag, config/remove, and store behavior.
    - Run:
      `python -m pytest`
-     `python -m compileall app chart indicators simplechart tests`
+     `python -m compileall app chart data indicators simplechart tools tests`
    - If you need a focused mypy check, ask the user before choosing the target,
      then run:
      `python -m mypy --follow-imports=skip path/to/touched_file.py`

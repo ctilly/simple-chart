@@ -4,15 +4,15 @@ app/controller.py
 Central coordinator for SimpleChart.
 
 The controller is the only place that holds references to all four layers
-simultaneously (data, indicators, chart, app state). All cross-layer
+simultaneously (data, extensions, chart, app state). All cross-layer
 workflows live here.
 
 Workflows:
   load_symbol()       — user enters a symbol or changes timeframe
-  chart action        — user right-clicks a bar to run indicator actions
-  toggle_indicator()  — user clicks a legend label to show/hide
-  configure_indicator() — user right-clicks a legend label to edit params
-  remove_indicator()  — user removes an indicator via legend context menu
+  chart action        — user right-clicks a bar to run extension actions
+  toggle_extension()  — user clicks a legend label to show/hide
+  configure_extension() — user right-clicks a legend label to edit params
+  remove_extension()  — user removes an extension via legend context menu
 
 Data fetch strategy:
   1. Maintain daily reference bars before intraday loads.
@@ -26,9 +26,9 @@ Threading:
   while the fetch is in progress. Results are delivered back to the main
   thread via Qt signals.
 
-Initial workspace indicator set:
-  On first load the controller adds the indicators defined in
-  INITIAL_INDICATORS below. The user can add or remove indicators during
+Initial workspace extension set:
+  On first load the controller adds the extensions defined in
+  INITIAL_EXTENSIONS below. The user can add or remove extensions during
   a session. In a future version this will be persisted to the config.
 """
 
@@ -49,9 +49,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.indicator_config import IndicatorConfigDialog
-from app.indicator_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
-from app.indicator_store import ChartExtensionStore
+from app.extension_config import ExtensionConfigDialog
+from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
+from app.extension_store import ChartExtensionStore
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
@@ -80,11 +80,11 @@ load_plugins()
 
 
 # ------------------------------------------------------------------
-# Initial indicator set loaded on every symbol
+# Initial extension set loaded on every symbol
 # ------------------------------------------------------------------
 # Each entry is (extension_name, params). Adjust to taste.
 
-INITIAL_INDICATORS: list[tuple[str, dict[str, Any]]] = [
+INITIAL_EXTENSIONS: list[tuple[str, dict[str, Any]]] = [
     ("sma", {"days":  5, "color": "#FFA500", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # amber
     ("sma", {"days": 20, "color": "#00CED1", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # teal
     ("sma", {"days": 50, "color": "#1E90FF", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # blue
@@ -203,10 +203,6 @@ def _fetch_series(
         symbol=symbol,
         timeframe=timeframe,
         bars=bars,
-        loaded_range_start=datetime.fromtimestamp(
-            lookback_ms / 1000, tz=timezone.utc
-        ),
-        loaded_range_end=now,
     )
 
 
@@ -259,18 +255,18 @@ class MainWindow(QMainWindow):
         # App state
         # ------------------------------------------------------------------
         self._state = State()
-        self._indicator_store = ChartExtensionStore(self._state, self._cache)
-        self._indicator_runtime = ChartExtensionRuntime(
+        self._extension_store = ChartExtensionStore(self._state, self._cache)
+        self._extension_runtime = ChartExtensionRuntime(
             self._state,
             self._cache,
-            self._indicator_store,
+            self._extension_store,
             _DEFAULT_LOOKBACK_DAYS,
         )
         self._active_drawing_tool: str | None = None
         self._drawing_session: DrawingSession | None = None
         self._preview_keys: set[str] = set()
-        for name, params in INITIAL_INDICATORS:
-            self._state.indicators.append(
+        for name, params in INITIAL_EXTENSIONS:
+            self._state.extensions.append(
                 ChartExtensionState(name=name, params=dict(params))
             )
 
@@ -309,10 +305,10 @@ class MainWindow(QMainWindow):
 
         self._symbol_bar = SymbolBar()
         self._chart      = ChartWidget(
-            on_toggle=self._on_indicator_toggled,
-            on_configure=self._on_indicator_configure,
-            on_remove=self._on_indicator_remove,
-            on_add=self._on_add_indicator,
+            on_toggle=self._on_extension_toggled,
+            on_configure=self._on_extension_configure,
+            on_remove=self._on_extension_remove,
+            on_add=self._on_add_extension,
             on_drawing_tool=self._on_drawing_tool_selected,
             drawing_tools=self._drawing_tool_entries(),
         )
@@ -345,8 +341,8 @@ class MainWindow(QMainWindow):
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
         self._current_series: OHLCVSeries | None = None
 
-        # The symbol for which self._state.indicators currently holds state.
-        # Used to save/restore per-symbol indicator state on symbol switch.
+        # The symbol for which self._state.extensions currently holds state.
+        # Used to save/restore per-symbol extension state on symbol switch.
         self._loaded_symbol: str | None = None
         self._per_symbol_state: dict[str, list[ChartExtensionState]] = {}
 
@@ -407,7 +403,7 @@ class MainWindow(QMainWindow):
 
     def _on_fetch_done(self, series: OHLCVSeries) -> None:
         """Called on the main thread when the background fetch completes."""
-        # Save indicator state for the symbol we're leaving.
+        # Save extension state for the symbol we're leaving.
         if self._loaded_symbol is not None and self._loaded_symbol != series.symbol:
             self._per_symbol_state[self._loaded_symbol] = [
                 ChartExtensionState(
@@ -416,14 +412,14 @@ class MainWindow(QMainWindow):
                     visible=s.visible,
                     series_visibility=copy.deepcopy(s.series_visibility),
                 )
-                for s in self._state.indicators
+                for s in self._state.extensions
                 if all_extensions()[s.name]().preserve_ui_state_per_symbol()
             ]
 
-        # Restore or initialize indicator state for the arriving symbol.
+        # Restore or initialize extension state for the arriving symbol.
         if self._loaded_symbol != series.symbol:
             if series.symbol in self._per_symbol_state:
-                self._state.indicators = [
+                self._state.extensions = [
                     ChartExtensionState(
                         name=s.name,
                         params=copy.deepcopy(s.params),
@@ -433,14 +429,14 @@ class MainWindow(QMainWindow):
                     for s in self._per_symbol_state[series.symbol]
                 ]
             else:
-                self._state.indicators = [
+                self._state.extensions = [
                     ChartExtensionState(name=name, params=dict(params))
-                    for name, params in INITIAL_INDICATORS
+                    for name, params in INITIAL_EXTENSIONS
                 ]
 
         self._loaded_symbol = series.symbol
         self._current_series = series
-        self._indicator_store.load_for_symbol(series.symbol)
+        self._extension_store.load_for_symbol(series.symbol)
         self._render(series)
         self._symbol_bar.set_symbol(series.symbol)
         self._watchlist.set_active_symbol(series.symbol)
@@ -454,7 +450,7 @@ class MainWindow(QMainWindow):
 
     def _render(self, series: OHLCVSeries) -> None:
         """
-        Draw candles, volume, and all active indicators for the series.
+        Draw candles, volume, and all active extensions for the series.
         Called after a successful fetch, and after a timeframe switch.
         """
         if not series.bars:
@@ -471,25 +467,25 @@ class MainWindow(QMainWindow):
         pm.draw_candles(series)
         pm.draw_volume(series)
 
-        render_passes = self._indicator_runtime.render_all(series)
+        render_passes = self._extension_runtime.render_all(series)
         for render_pass in render_passes:
-            self._draw_indicator_render(render_pass)
-        self._remove_stale_indicator_renders(render_passes)
+            self._draw_extension_render(render_pass)
+        self._remove_stale_extension_renders(render_passes)
 
         pm.refresh()
 
-    def _draw_indicator_render(
+    def _draw_extension_render(
         self,
         render_pass: ChartExtensionRenderPass,
     ) -> None:
         """
         Push one runtime render result to the PlotManager and legend.
         """
-        # For panel indicators, claim a slot before drawing. If all three
-        # slots are occupied, warn the user and skip this indicator.
+        # For panel extensions, claim a slot before drawing. If all three
+        # slots are occupied, warn the user and skip this extension.
         if render_pass.render_target != RENDER_CHART:
             try:
-                self._chart.ensure_indicator_panel(render_pass.render_target)
+                self._chart.ensure_extension_panel(render_pass.render_target)
             except RuntimeError as exc:
                 QMessageBox.warning(self, "Panel Limit Reached", str(exc))
                 return
@@ -551,7 +547,7 @@ class MainWindow(QMainWindow):
         is_reference = series_render.reference
         if not is_reference:
             visible = visible and series_render.visible
-        pm.update_indicator(
+        pm.update_extension(
             series_key,
             series_render.values,
             series_render.color,
@@ -562,9 +558,9 @@ class MainWindow(QMainWindow):
         pm.set_visible(series_key, visible)
         if is_reference or not update_legend:
             return
-        self._chart.legend.add_indicator(series_key, series_render.label, series_render.color)
+        self._chart.legend.add_extension(series_key, series_render.label, series_render.color)
         self._chart.legend.update_color(series_key, series_render.color)
-        self._chart.legend.set_indicator_visible(series_key, visible)
+        self._chart.legend.set_extension_visible(series_key, visible)
 
     def _draw_segment(
         self,
@@ -579,9 +575,9 @@ class MainWindow(QMainWindow):
         pm.update_horizontal_segment(segment)
         if segment.reference or not update_legend:
             return
-        self._chart.legend.add_indicator(segment.key, segment.label, segment.color)
+        self._chart.legend.add_extension(segment.key, segment.label, segment.color)
         self._chart.legend.update_color(segment.key, segment.color)
-        self._chart.legend.set_indicator_visible(segment.key, visible)
+        self._chart.legend.set_extension_visible(segment.key, visible)
 
     def _draw_vertical_line(
         self,
@@ -612,12 +608,12 @@ class MainWindow(QMainWindow):
         pm = self._chart.plot_manager
         new_keys = self._render_keys(render_pass.render)
         for stale_key in self._preview_keys - new_keys:
-            pm.remove_indicator(stale_key)
+            pm.remove_extension(stale_key)
             pm.remove_marker(stale_key)
 
         with pm.preserving_viewport():
             for series_render in render_pass.render.series:
-                pm.update_indicator(
+                pm.update_extension(
                     series_render.key,
                     series_render.values,
                     series_render.color,
@@ -641,7 +637,7 @@ class MainWindow(QMainWindow):
         pm = self._chart.plot_manager
         with pm.preserving_viewport():
             for key in self._preview_keys:
-                pm.remove_indicator(key)
+                pm.remove_extension(key)
                 pm.remove_marker(key)
         self._preview_keys.clear()
         pm.refresh(preserve_view=True)
@@ -660,16 +656,16 @@ class MainWindow(QMainWindow):
     def _on_bar_clicked(self, x_pos: float, y_pos: float) -> None:
         if self._current_series is None or self._active_drawing_tool is None:
             return
-        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
+        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
         if self._drawing_session is None:
-            result = self._indicator_runtime.start_drawing(
+            result = self._extension_runtime.start_drawing(
                 self._active_drawing_tool,
                 self._current_series,
                 event,
             )
             self._handle_drawing_result(result)
             return
-        result = self._indicator_runtime.advance_drawing(
+        result = self._extension_runtime.advance_drawing(
             self._current_series,
             self._drawing_session,
             event,
@@ -679,8 +675,8 @@ class MainWindow(QMainWindow):
     def _on_mouse_move(self, x_pos: float, y_pos: float) -> None:
         if self._current_series is None or self._drawing_session is None:
             return
-        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
-        render_pass = self._indicator_runtime.preview_drawing(
+        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        render_pass = self._extension_runtime.preview_drawing(
             self._current_series,
             self._drawing_session,
             event,
@@ -706,56 +702,56 @@ class MainWindow(QMainWindow):
             if result.deactivate_tool:
                 self._active_drawing_tool = None
             if result.mutation is not None:
-                self._reload_indicators(draw_bars=False, preserve_view=True)
+                self._reload_extensions(draw_bars=False, preserve_view=True)
             return
         self._drawing_session = result.session
 
     def _on_cancel_shortcut(self) -> None:
         if self._drawing_session is None:
             return
-        mutation = self._indicator_runtime.cancel_drawing(self._drawing_session)
+        mutation = self._extension_runtime.cancel_drawing(self._drawing_session)
         self._drawing_session = None
         self._clear_preview_render()
         if mutation is not None:
-            self._reload_indicators(draw_bars=False, preserve_view=True)
+            self._reload_extensions(draw_bars=False, preserve_view=True)
 
     def _on_drag_start(self, x_pos: float, y_pos: float) -> bool:
         if self._current_series is None:
             return False
-        event = self._indicator_runtime.chart_event(
+        event = self._extension_runtime.chart_event(
             self._current_series,
             x_pos,
             y_pos,
         )
-        return bool(self._indicator_runtime.begin_drag(self._current_series, event))
+        return bool(self._extension_runtime.begin_drag(self._current_series, event))
 
     def _on_drag_move(self, x_pos: float, y_pos: float) -> None:
         if self._current_series is None:
             return
-        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
-        render_pass = self._indicator_runtime.drag_to(self._current_series, event)
+        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        render_pass = self._extension_runtime.drag_to(self._current_series, event)
         if render_pass is not None:
             self._draw_drag_render(render_pass)
 
     def _on_drag_finish(self, x_pos: float, y_pos: float) -> None:
         if self._current_series is None:
             return
-        event = self._indicator_runtime.chart_event(self._current_series, x_pos, y_pos)
-        render_pass = self._indicator_runtime.drag_to(self._current_series, event)
+        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        render_pass = self._extension_runtime.drag_to(self._current_series, event)
         if render_pass is not None:
             self._draw_drag_render(render_pass)
-        self._indicator_runtime.finish_drag(self._current_series, event)
-        self._reload_indicators(draw_bars=False, preserve_view=True)
+        self._extension_runtime.finish_drag(self._current_series, event)
+        self._reload_extensions(draw_bars=False, preserve_view=True)
 
     def _on_drag_cancel(self) -> None:
-        self._indicator_runtime.cancel_drag()
-        self._reload_indicators(draw_bars=False, preserve_view=True)
+        self._extension_runtime.cancel_drag()
+        self._reload_extensions(draw_bars=False, preserve_view=True)
 
     def _on_bar_right_clicked(self, x_pos: float, y_pos: float) -> None:
         """Right-click on a bar: show context menu."""
         if self._current_series is None:
             return
-        event = self._indicator_runtime.chart_event(
+        event = self._extension_runtime.chart_event(
             self._current_series,
             x_pos,
             y_pos,
@@ -763,7 +759,7 @@ class MainWindow(QMainWindow):
         )
         if self._drawing_session is None and self._show_drawing_context_menu(event):
             return
-        actions = self._indicator_runtime.context_actions(self._current_series, event)
+        actions = self._extension_runtime.context_actions(self._current_series, event)
         if not actions:
             return
         menu = QMenu(self)
@@ -774,45 +770,45 @@ class MainWindow(QMainWindow):
         selected = menu.exec(QCursor.pos())
         for qaction, action in qactions:
             if selected == qaction:
-                self._indicator_runtime.apply_action(
+                self._extension_runtime.apply_action(
                     self._current_series,
                     action,
                     event,
                 )
-                self._reload_indicators()
+                self._reload_extensions()
                 return
 
     def _show_drawing_context_menu(self, event: ChartEvent) -> bool:
         if self._current_series is None:
             return False
-        hit = self._indicator_runtime.drawing_hit_test(self._current_series, event)
+        hit = self._extension_runtime.drawing_hit_test(self._current_series, event)
         if hit is None:
             return False
 
         menu = QMenu(self)
         configure_action = None
-        if self._indicator_runtime.config_request(hit.handle_key) is not None:
+        if self._extension_runtime.config_request(hit.handle_key) is not None:
             configure_action = menu.addAction("Configure...")
         remove_action = menu.addAction("Remove")
         selected = menu.exec(QCursor.pos())
 
         if configure_action is not None and selected == configure_action:
-            self._on_indicator_configure(hit.handle_key)
+            self._on_extension_configure(hit.handle_key)
             return True
         if selected == remove_action:
-            self._on_indicator_remove(hit.handle_key)
+            self._on_extension_remove(hit.handle_key)
             return True
         return True
 
-    def _reload_indicators(
+    def _reload_extensions(
         self,
         *,
         draw_bars: bool = True,
         preserve_view: bool = True,
     ) -> None:
         """
-        Re-read bars from cache and recompute all indicators.
-        Used after indicator action/remove/config changes — does not re-fetch
+        Re-read bars from cache and re-render all extensions.
+        Used after extension action/remove/config changes — does not re-fetch
         from the provider.
         """
         if self._state.symbol is None:
@@ -851,7 +847,7 @@ class MainWindow(QMainWindow):
         # (e.g. the lookback boundary shifted by a second and dropped the
         # oldest bar), pd.Series(values, index=self._bar_index) will raise
         # a length-mismatch ValueError. Refreshing candles here keeps
-        # _bar_index aligned, which also ensures indicator color changes
+        # _bar_index aligned, which also ensures extension color changes
         # (which call update_data) take effect without a timeframe reload.
         pm = self._chart.plot_manager
         if draw_bars:
@@ -863,20 +859,20 @@ class MainWindow(QMainWindow):
                 pm.draw_candles(series)
                 pm.draw_volume(series)
 
-        render_passes = self._indicator_runtime.render_all(series)
+        render_passes = self._extension_runtime.render_all(series)
 
         if preserve_view:
             with pm.preserving_viewport():
                 for render_pass in render_passes:
-                    self._draw_indicator_render(render_pass)
-                self._remove_stale_indicator_renders(render_passes)
+                    self._draw_extension_render(render_pass)
+                self._remove_stale_extension_renders(render_passes)
         else:
             for render_pass in render_passes:
-                self._draw_indicator_render(render_pass)
-            self._remove_stale_indicator_renders(render_passes)
+                self._draw_extension_render(render_pass)
+            self._remove_stale_extension_renders(render_passes)
         pm.refresh(preserve_view=preserve_view)
 
-    def _remove_stale_indicator_renders(
+    def _remove_stale_extension_renders(
         self,
         render_passes: list[ChartExtensionRenderPass],
     ) -> None:
@@ -903,8 +899,8 @@ class MainWindow(QMainWindow):
         pm = self._chart.plot_manager
         for series_key in pm.active_series_keys():
             if series_key not in active_series_keys:
-                pm.remove_indicator(series_key)
-                self._chart.legend.remove_indicator(series_key)
+                pm.remove_extension(series_key)
+                self._chart.legend.remove_extension(series_key)
         for marker_key in pm.active_marker_keys():
             if marker_key not in active_marker_keys:
                 pm.remove_marker(marker_key)
@@ -914,47 +910,47 @@ class MainWindow(QMainWindow):
     # ChartExtension toggle and configuration
     # ------------------------------------------------------------------
 
-    def _on_indicator_toggled(self, series_key: str) -> None:
-        """Show or hide all render items belonging to the indicator."""
-        result = self._indicator_runtime.toggle_visibility(series_key)
+    def _on_extension_toggled(self, series_key: str) -> None:
+        """Show or hide all render items belonging to the extension."""
+        result = self._extension_runtime.toggle_visibility(series_key)
         if result is None:
             return
         pm = self._chart.plot_manager
         keys, visible = result
         for key in keys:
             pm.set_visible(key, visible)
-            self._chart.legend.set_indicator_visible(key, visible)
+            self._chart.legend.set_extension_visible(key, visible)
 
-    def _on_indicator_configure(self, series_key: str) -> None:
-        """Open the config dialog for the indicator owning series_key."""
-        request = self._indicator_runtime.config_request(series_key)
+    def _on_extension_configure(self, series_key: str) -> None:
+        """Open the config dialog for the extension owning series_key."""
+        request = self._extension_runtime.config_request(series_key)
         if request is None:
             return
-        dialog = IndicatorConfigDialog(
-            indicator_label=request.label,
+        dialog = ExtensionConfigDialog(
+            extension_label=request.label,
             params=request.params,
             parent=self,
         )
-        if dialog.exec() == IndicatorConfigDialog.DialogCode.Accepted:
-            self._indicator_runtime.apply_config(series_key, dialog.result_params())
-            self._reload_indicators(draw_bars=False)
+        if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted:
+            self._extension_runtime.apply_config(series_key, dialog.result_params())
+            self._reload_extensions(draw_bars=False)
 
-    def _on_indicator_remove(self, series_key: str) -> None:
+    def _on_extension_remove(self, series_key: str) -> None:
         """
-        Remove an indicator-owned render item from the chart.
+        Remove an extension-owned render item from the chart.
         """
-        removal = self._indicator_runtime.remove(series_key)
+        removal = self._extension_runtime.remove(series_key)
         if removal is None:
             return
         pm = self._chart.plot_manager
         with pm.preserving_viewport():
             for key in removal.series_keys:
-                pm.remove_indicator(key)
-                self._chart.legend.remove_indicator(key)
+                pm.remove_extension(key)
+                self._chart.legend.remove_extension(key)
             if removal.release_panel:
-                self._chart.release_indicator_panel(removal.render_target)
+                self._chart.release_extension_panel(removal.render_target)
 
-        self._reload_indicators(draw_bars=False, preserve_view=True)
+        self._reload_extensions(draw_bars=False, preserve_view=True)
 
     # ------------------------------------------------------------------
     # Watchlist
@@ -976,10 +972,10 @@ class MainWindow(QMainWindow):
         self._cache.remove_from_watchlist(symbol)
         self._watchlist.remove_symbol(symbol)
 
-    def _on_add_indicator(self) -> None:
+    def _on_add_extension(self) -> None:
         """
-        Show a menu of available indicator types, then open a config dialog
-        for the selected type. On accept, add the new indicator to state and
+        Show a menu of dialog-added extension types, open a config dialog
+        for the selected type, then add the new extension to state and
         redraw.
         """
         registry = all_extensions()
@@ -1002,17 +998,17 @@ class MainWindow(QMainWindow):
             return
 
         name, cls = actions[action]
-        indicator = cls()
-        dialog = IndicatorConfigDialog(
-            indicator_label=indicator.label(),
-            params=indicator.default_params(),
+        extension = cls()
+        dialog = ExtensionConfigDialog(
+            extension_label=extension.label(),
+            params=extension.default_params(),
             parent=self,
         )
-        if dialog.exec() == IndicatorConfigDialog.DialogCode.Accepted:
-            self._state.indicators.append(
+        if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted:
+            self._state.extensions.append(
                 ChartExtensionState(name=name, params=dialog.result_params())
             )
-            self._reload_indicators()
+            self._reload_extensions()
 
     def _drawing_tool_entries(self) -> list[tuple[str, str]]:
         registry = all_extensions()
@@ -1024,7 +1020,7 @@ class MainWindow(QMainWindow):
 
     def _on_drawing_tool_selected(self, extension_name: str) -> None:
         if self._drawing_session is not None:
-            self._indicator_runtime.cancel_drawing(self._drawing_session)
+            self._extension_runtime.cancel_drawing(self._drawing_session)
             self._drawing_session = None
             self._clear_preview_render()
         self._active_drawing_tool = extension_name

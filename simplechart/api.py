@@ -87,7 +87,7 @@ EXPORTS
   SeriesRender                 Render description for a line series
   HorizontalSegmentRender      Render description for a horizontal line segment
   VerticalLineRender           Render description for a full-height vertical line
-  MarkerRender                 Render description for a chart marker
+  MarkerRender                 Render description for a price-chart marker
   ChartExtensionRender         Render output produced by an extension
   ChartEvent                   Generic chart interaction event
   ChartExtensionAction         User-triggered extension action
@@ -130,7 +130,7 @@ from simplechart.extensions._base import (  # noqa: F401
     HitTestResult,              # interactive handle hit-test result
     HorizontalSegmentRender,    # horizontal line segment render primitive
     LINE_STYLE_OPTIONS,         # ["solid", "dash", "dot", "dash_dot"]
-    MarkerRender,               # chart marker render primitive
+    MarkerRender,               # price-chart marker render primitive
     SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
     SeriesRender,               # line series render primitive
     VerticalLineRender,         # full-height vertical line render primitive

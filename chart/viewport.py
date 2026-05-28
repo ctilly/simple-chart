@@ -33,9 +33,6 @@ import pyqtgraph as pg
 from PyQt6.QtCore import Qt
 
 _AXIS_ZOOM_SENSITIVITY = 1.003
-_MANUAL_Y_DRAG_PIXELS = 6.0
-_MIN_V_ZOOM_SCALE = 0.02
-_MAX_V_ZOOM_SCALE = 50.0
 _MAX_Y_OVERSHOOT_RATIO = 0.25
 _PAN_AXIS_LOCK_PIXELS = 4.0
 
@@ -59,7 +56,6 @@ class _DragEventLike(Protocol):
     def buttonDownPos(self, button: Qt.MouseButton | None = None) -> _PointLike: ...
     def isFinish(self) -> bool: ...
     def lastPos(self) -> _PointLike: ...
-    def lastScreenPos(self) -> _PointLike: ...
     def modifiers(self) -> Qt.KeyboardModifier: ...
     def pos(self) -> _PointLike: ...
     def scenePos(self) -> _PointLike: ...
@@ -82,14 +78,13 @@ class _YScaleLike(Protocol):
 
 class _WindowStateLike(Protocol):
     _isMouseLeftDrag: bool
-    _simplechart_indicator_drag_active: bool
+    _simplechart_extension_drag_active: bool
 
 
 class _ViewBoxLike(Protocol):
     childGroup: object
     datasrc: _DataSourceLike | None
     datasrc_or_standalone: _DataSourceLike | None
-    force_range_update: int
     init_steps: int
     master_viewbox: object | None
     max_zoom_points_f: float
@@ -101,8 +96,8 @@ class _ViewBoxLike(Protocol):
     x_indexed: bool
     yscale: _YScaleLike
 
-    def mapToView(self, point: _PointLike) -> _PointLike: ...
-    def mapSceneToView(self, point: _PointLike) -> _PointLike: ...
+    def mapToView(self, _point: _PointLike) -> _PointLike: ...
+    def mapSceneToView(self, _point: _PointLike) -> _PointLike: ...
     def linkedView(self, axis: int) -> object | None: ...
     def mouseDragEvent(self, event: _DragEventLike, axis: int | None = None) -> None: ...
     def translateBy(self, t: object | None = None, x: float | None = None, y: float | None = None) -> None: ...
@@ -112,7 +107,6 @@ class _ViewBoxLike(Protocol):
     def targetRect(self) -> _RectLike: ...
     def update_y_zoom(self, x0: float | None = None, x1: float | None = None) -> bool | None: ...
     def viewRect(self) -> _RectLike: ...
-    def zoom_changed(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -203,7 +197,7 @@ def sync_x_axis_labels(axes: list[object]) -> None:
     """
     Enable x-axis labels on the bottommost visible panel; hide on all others.
 
-    Called once after initial setup and again whenever an indicator panel
+    Called once after initial setup and again whenever an extension panel
     slot is shown or hidden, so the time labels always sit on the panel
     the user can actually see.
     """
@@ -218,9 +212,9 @@ def sync_x_axis_labels(axes: list[object]) -> None:
             set_visible_fn(xaxis=(ax is bottom_ax))
 
 
-def install_indicator_panel_behavior(panel_ax: object, price_ax: object) -> None:
+def install_extension_panel_behavior(panel_ax: object, price_ax: object) -> None:
     """
-    Patch an indicator panel viewbox to follow the price panel's x-range
+    Patch an extension panel viewbox to follow the price panel's x-range
     and auto-scale its own y-range.
 
     Called once per slot on first assignment. Mirrors the volume panel
@@ -234,25 +228,25 @@ def install_indicator_panel_behavior(panel_ax: object, price_ax: object) -> None
     panel_vb.setMouseEnabled(x=True, y=False)
     # Explicit x-link ensures _linked_x_viewboxes() finds this panel when
     # walking from the price viewbox, so _persist_current_x_range() keeps
-    # the indicator datasrc's init_x0/init_x1 in sync with the price panel.
+    # the extension datasrc's init_x0/init_x1 in sync with the price panel.
     panel_vb.setXLink(price_vb)  # type: ignore[attr-defined]
     _patch_update_y_zoom(panel_vb)
     _patch_mouse_drag(panel_vb, allow_vertical_pan=False)
     _patch_x_axis_format(panel_ax)
-    _patch_indicator_axis_format(panel_ax)
+    _patch_extension_axis_format(panel_ax)
 
 
-def _patch_indicator_axis_format(indicator_ax: object) -> None:
+def _patch_extension_axis_format(extension_ax: object) -> None:
     """
-    Reduce tick density on an indicator panel's y-axis.
+    Reduce tick density on an extension panel's y-axis.
 
     pyqtgraph's default tick density is tuned for price charts with many
-    decimal places. ChartExtension panels (e.g. RSI 0–100) need fewer, more
+    decimal places. Extension panels (e.g. RSI 0–100) need fewer, more
     widely spaced ticks so labels don't overlap.
     """
-    axes = getattr(indicator_ax, "axes", {})
+    axes = getattr(extension_ax, "axes", {})
     right_axis = axes.get("right", {}).get("item")
-    if right_axis is None or getattr(right_axis, "_simplechart_ind_fmt_patch", False):
+    if right_axis is None or getattr(right_axis, "_simplechart_ext_fmt_patch", False):
         return
 
     set_tick_density = getattr(right_axis, "setTickDensity", None)
@@ -266,7 +260,7 @@ def _patch_indicator_axis_format(indicator_ax: object) -> None:
             textFillLimits=[(0, 0.6)],  # stop adding labels above 60% fill
         )
 
-    right_axis._simplechart_ind_fmt_patch = True
+    right_axis._simplechart_ext_fmt_patch = True
 
 
 def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:
@@ -354,7 +348,7 @@ def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> Non
         if (
             is_left_drag
             and no_modifier_drag
-            and getattr(self.win, "_simplechart_indicator_drag_active", False)
+            and getattr(self.win, "_simplechart_extension_drag_active", False)
         ):
             self.win._isMouseLeftDrag = True
             event.accept()
@@ -797,12 +791,11 @@ def _patch_volume_axis_format(volume_ax: object) -> None:
     if right_axis is None or getattr(right_axis, "_simplechart_vol_fmt_patch", False):
         return
 
-    # Replace tick level generation with a single level of evenly-spaced ticks
-    # so every tick is the same size and labeled. pyqtgraph's default returns
-    # major + minor + sub-minor levels which produces unlabeled clutter ticks.
-    original_tickValues = right_axis.tickValues
-
-    def _vol_tick_values(minVal: float, maxVal: float, size: float) -> list[tuple[float, list[float]]]:
+    def _vol_tick_values(
+        minVal: float,
+        maxVal: float,
+        _size: float,
+    ) -> list[tuple[float, list[float]]]:
         if maxVal <= minVal:
             return [(1, [])]
         span = maxVal - minVal
@@ -841,7 +834,7 @@ def _patch_volume_axis_format(volume_ax: object) -> None:
     crosshair = getattr(volume_ax, "crosshair", None)
     if crosshair is not None:
         crosshair.infos.append(
-            lambda x, y, xtext, ytext: (xtext, fmt_volume(y))
+            lambda x, y, xtext, _ytext: (xtext, fmt_volume(y))
         )
 
 
