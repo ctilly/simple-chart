@@ -67,12 +67,13 @@ from indicators.avwap._kernel import avwap_multi as _avwap_multi_kernel
 from indicators.avwap.models import AnchorRecord
 
 _AVWAP_PALETTE: list[str] = [
-    "#00FF88",
+    "#800080",
     "#FFB000",
     "#00BFFF",
     "#FF5C8A",
+    "#6A5ACD",
+    "#00FF88",
     "#B388FF",
-    "#7CFF00",
 ]
 _ANCHOR_HIT_BUFFER_FRACTION = 0.35
 _ANCHOR_HIT_MIN_PRICE_FRACTION = 0.0004

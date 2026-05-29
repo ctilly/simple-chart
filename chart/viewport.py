@@ -30,11 +30,15 @@ from weakref import WeakKeyDictionary
 
 import finplot as fplt
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
+from PyQt6.QtGui import QNativeGestureEvent
+
 
 _AXIS_ZOOM_SENSITIVITY = 1.003
 _MAX_Y_OVERSHOOT_RATIO = 0.25
 _PAN_AXIS_LOCK_PIXELS = 4.0
+_NATIVE_GESTURE_FRAME_MS = 16
+_NATIVE_ZOOM_SENSITIVITY = 0.8
 
 
 class _PointLike(Protocol):
@@ -288,6 +292,7 @@ def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:
     _patch_update_y_zoom(price_vb)
     _patch_update_y_zoom(volume_vb)
 
+    _install_native_gesture_handler(price_vb)
     _patch_mouse_drag(price_vb, allow_vertical_pan=True)
     _patch_mouse_drag(volume_vb, allow_vertical_pan=False)
 
@@ -324,6 +329,168 @@ def unlock_x_pan(ax: object) -> None:
         xMax=x_max,
     )
     _force_x_limits(viewbox, x_min=x_min, x_max=x_max)
+
+
+class _NativeGestureHandler(QObject):
+    def __init__(self, master: QObject, viewbox: _ViewBoxLike) -> None:
+        super().__init__(master)
+        self._master = master
+        self._viewbox = viewbox
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._flush_pending)
+        self._active = False
+        self._pending_pan_x = 0.0
+        self._pending_pan_y = 0.0
+        self._pending_zoom = 0.0
+        self._pending_center: _PointLike | None = None
+        self._total_pan_x = 0.0
+        self._total_pan_y = 0.0
+
+    def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
+        if event is None or event.type() != QEvent.Type.NativeGesture:
+            return super().eventFilter(watched, event)
+        if not isinstance(event, QNativeGestureEvent):
+            return super().eventFilter(watched, event)
+
+        gesture_name = _enum_name(event.gestureType())
+        if gesture_name == "BeginNativeGesture":
+            self._begin()
+            event.accept()
+            return True
+        if gesture_name == "EndNativeGesture":
+            self._finish()
+            event.accept()
+            return True
+        if gesture_name == "PanNativeGesture":
+            delta = event.delta()
+            self._pending_pan_x += delta.x()
+            self._pending_pan_y += delta.y()
+            self._total_pan_x += delta.x()
+            self._total_pan_y += delta.y()
+            self._pending_center = self._event_center(event)
+            self._schedule_flush()
+            event.accept()
+            return True
+        if gesture_name == "ZoomNativeGesture":
+            self._pending_zoom += event.value()
+            self._pending_center = self._event_center(event)
+            self._schedule_flush()
+            event.accept()
+            return True
+        if gesture_name == "RotateNativeGesture":
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
+
+    def _begin(self) -> None:
+        self._active = True
+        self._pending_pan_x = 0.0
+        self._pending_pan_y = 0.0
+        self._pending_zoom = 0.0
+        self._pending_center = None
+        self._total_pan_x = 0.0
+        self._total_pan_y = 0.0
+        self._viewbox.win._isMouseLeftDrag = True
+
+    def _finish(self) -> None:
+        self._flush_pending()
+        _persist_current_x_range(self._viewbox)
+        if abs(self._total_pan_y) > abs(self._total_pan_x):
+            self._viewbox.v_autozoom = False
+        else:
+            refresh_all_y_zoom = getattr(self._viewbox, "refresh_all_y_zoom", None)
+            if callable(refresh_all_y_zoom):
+                refresh_all_y_zoom()
+        self._viewbox.win._isMouseLeftDrag = False
+        self._active = False
+
+    def _schedule_flush(self) -> None:
+        if not self._active:
+            self._begin()
+        if not self._timer.isActive():
+            self._timer.start(_NATIVE_GESTURE_FRAME_MS)
+
+    def _flush_pending(self) -> None:
+        pan_x = self._pending_pan_x
+        pan_y = self._pending_pan_y
+        zoom = self._pending_zoom
+        center = self._pending_center
+        self._pending_pan_x = 0.0
+        self._pending_pan_y = 0.0
+        self._pending_zoom = 0.0
+        self._pending_center = None
+
+        if pan_x != 0.0 or pan_y != 0.0:
+            _translate_by_pixels(self._viewbox, pan_x, pan_y)
+        if zoom != 0.0:
+            _zoom_by_native_delta(self._viewbox, zoom, center)
+
+    def _event_center(self, event: QNativeGestureEvent) -> _PointLike:
+        map_to_scene = getattr(self._master, "mapToScene", None)
+        if callable(map_to_scene):
+            position = event.position()
+            to_point = getattr(position, "toPoint", None)
+            scene_pos = map_to_scene(to_point() if callable(to_point) else position)
+            return self._viewbox.mapSceneToView(scene_pos)
+
+        target = self._viewbox.targetRect()
+        return _DragDelta(
+            _x=(target.left() + target.right()) / 2.0,
+            _y=(target.top() + target.bottom()) / 2.0,
+        )
+
+
+def _install_native_gesture_handler(viewbox: _ViewBoxLike) -> None:
+    master = viewbox.win
+    if not isinstance(master, QObject) or getattr(master, "_simplechart_native_gesture_handler", None) is not None:
+        return
+    handler = _NativeGestureHandler(master, viewbox)
+    master.installEventFilter(handler)
+    master._simplechart_native_gesture_handler = handler  # type: ignore[attr-defined]
+
+
+def _enum_name(value: object) -> str:
+    name = getattr(value, "name", None)
+    if isinstance(name, str):
+        return name
+    return str(value)
+
+
+def _translate_by_pixels(viewbox: _ViewBoxLike, pixel_x: float, pixel_y: float) -> None:
+    delta = pg.Point(pixel_x, pixel_y) * -1
+    transform = getattr(viewbox.childGroup, "transform")()
+    inverse_transform = pg.functions.invertQTransform(transform)
+    transformed_delta = inverse_transform.map(delta) - inverse_transform.map(pg.Point(0.0, 0.0))
+
+    _force_x_limits(viewbox)
+    viewbox._resetTarget()
+    viewbox.translateBy(x=transformed_delta.x(), y=transformed_delta.y())
+    viewbox.sigRangeChangedManually.emit(viewbox.state["mouseEnabled"])  # type: ignore[attr-defined]
+
+
+def _zoom_by_native_delta(
+    viewbox: _ViewBoxLike,
+    zoom_delta: float,
+    center: _PointLike | None,
+) -> None:
+    scale = _native_zoom_scale(zoom_delta)
+    target = viewbox.targetRect()
+    if center is None:
+        center = _DragDelta(
+            _x=(target.left() + target.right()) / 2.0,
+            _y=(target.top() + target.bottom()) / 2.0,
+        )
+    x0 = center.x() + (target.left() - center.x()) * scale
+    x1 = center.x() + (target.right() - center.x()) * scale
+    viewbox.update_y_zoom(x0, x1)
+
+
+def _native_zoom_scale(zoom_delta: float) -> float:
+    amount = abs(zoom_delta) * _NATIVE_ZOOM_SENSITIVITY
+    if zoom_delta > 0:
+        return max(0.2, 1.0 / (1.0 + amount))
+    return min(5.0, 1.0 + amount)
 
 
 def _patch_mouse_drag(viewbox: _ViewBoxLike, *, allow_vertical_pan: bool) -> None:
