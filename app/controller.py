@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 from app.extension_config import ExtensionConfigDialog
 from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
 from app.extension_store import ChartExtensionStore
+from app.header_bar import AppHeader
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
@@ -282,10 +283,18 @@ class MainWindow(QMainWindow):
             "}"
         )
 
-        # Top-level layout: watchlist sidebar on the left, chart area on the right.
-        main_layout = QHBoxLayout(frame)
+        # Top-level layout: app header above the watchlist/chart workspace.
+        root_layout = QVBoxLayout(frame)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self._app_header = AppHeader()
+        root_layout.addWidget(self._app_header)
+
+        main_layout = QHBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
+        root_layout.addLayout(main_layout)
 
         # Watchlist sidebar
         self._watchlist = WatchlistWidget(
@@ -297,7 +306,7 @@ class MainWindow(QMainWindow):
         self._watchlist.symbol_selected.connect(self._on_watchlist_symbol_selected)
         main_layout.addWidget(self._watchlist)
 
-        # Chart area: symbol bar on top, chart below
+        # Chart area: symbol controls above the chart.
         chart_area = QWidget()
         chart_layout = QVBoxLayout(chart_area)
         chart_layout.setContentsMargins(0, 0, 0, 0)
