@@ -18,6 +18,7 @@ shows the last successfully loaded symbol.
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QWidget,
@@ -35,6 +36,11 @@ _TIMEFRAME_LABELS: list[tuple[Timeframe, str]] = [
     (Timeframe.MIN65,  "65m"),
     (Timeframe.DAILY,  "D"),
     (Timeframe.WEEKLY, "W"),
+]
+
+_SHORTCUT_MESSAGES: list[str] = [
+    "<b>Ctrl+r</b>: Reset Chart View",
+    "<b>Esc</b>: Cancel Drawing",
 ]
 
 # MIN1 is intentionally excluded — it is an internal base timeframe
@@ -81,6 +87,11 @@ class SymbolBar(QWidget):
             layout.addWidget(btn)
 
         layout.addStretch()
+        self._shortcut_message = QLabel("&nbsp;&nbsp;&nbsp;".join(_SHORTCUT_MESSAGES))
+        self._shortcut_message.setStyleSheet(
+            "color: #555555; font-size: 12px; padding: 0 6px;"
+        )
+        layout.addWidget(self._shortcut_message)
         self.setLayout(layout)
         self._highlight(self._active_timeframe)
 

@@ -346,6 +346,7 @@ class _NativeGestureHandler(QObject):
         self._pending_center: _PointLike | None = None
         self._total_pan_x = 0.0
         self._total_pan_y = 0.0
+        self._pan_axis: int | None = None
 
     def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
         if event is None or event.type() != QEvent.Type.NativeGesture:
@@ -391,17 +392,14 @@ class _NativeGestureHandler(QObject):
         self._pending_center = None
         self._total_pan_x = 0.0
         self._total_pan_y = 0.0
+        self._pan_axis = None
         self._viewbox.win._isMouseLeftDrag = True
 
     def _finish(self) -> None:
         self._flush_pending()
         _persist_current_x_range(self._viewbox)
-        if abs(self._total_pan_y) > abs(self._total_pan_x):
+        if self._pan_axis == 1:
             self._viewbox.v_autozoom = False
-        else:
-            refresh_all_y_zoom = getattr(self._viewbox, "refresh_all_y_zoom", None)
-            if callable(refresh_all_y_zoom):
-                refresh_all_y_zoom()
         self._viewbox.win._isMouseLeftDrag = False
         self._active = False
 
@@ -422,9 +420,19 @@ class _NativeGestureHandler(QObject):
         self._pending_center = None
 
         if pan_x != 0.0 or pan_y != 0.0:
-            _translate_by_pixels(self._viewbox, pan_x, pan_y)
+            axis = self._native_pan_axis()
+            if axis is not None:
+                _translate_by_pixels(self._viewbox, pan_x, pan_y, axis=axis)
         if zoom != 0.0:
             _zoom_by_native_delta(self._viewbox, zoom, center)
+
+    def _native_pan_axis(self) -> int | None:
+        if self._pan_axis is not None:
+            return self._pan_axis
+        if max(abs(self._total_pan_x), abs(self._total_pan_y)) < _PAN_AXIS_LOCK_PIXELS:
+            return None
+        self._pan_axis = 0 if abs(self._total_pan_x) >= abs(self._total_pan_y) else 1
+        return self._pan_axis
 
     def _event_center(self, event: QNativeGestureEvent) -> _PointLike:
         map_to_scene = getattr(self._master, "mapToScene", None)
@@ -457,7 +465,13 @@ def _enum_name(value: object) -> str:
     return str(value)
 
 
-def _translate_by_pixels(viewbox: _ViewBoxLike, pixel_x: float, pixel_y: float) -> None:
+def _translate_by_pixels(
+    viewbox: _ViewBoxLike,
+    pixel_x: float,
+    pixel_y: float,
+    *,
+    axis: int | None,
+) -> None:
     delta = pg.Point(pixel_x, pixel_y) * -1
     transform = getattr(viewbox.childGroup, "transform")()
     inverse_transform = pg.functions.invertQTransform(transform)
@@ -465,8 +479,12 @@ def _translate_by_pixels(viewbox: _ViewBoxLike, pixel_x: float, pixel_y: float) 
 
     _force_x_limits(viewbox)
     viewbox._resetTarget()
-    viewbox.translateBy(x=transformed_delta.x(), y=transformed_delta.y())
-    viewbox.sigRangeChangedManually.emit(viewbox.state["mouseEnabled"])  # type: ignore[attr-defined]
+    x_shift = transformed_delta.x() if axis in (None, 0) else None
+    y_shift = transformed_delta.y() if axis in (None, 1) else None
+
+    if x_shift is not None or y_shift is not None:
+        viewbox.translateBy(x=x_shift, y=y_shift)
+        viewbox.sigRangeChangedManually.emit(viewbox.state["mouseEnabled"])  # type: ignore[attr-defined]
 
 
 def _zoom_by_native_delta(
@@ -483,7 +501,10 @@ def _zoom_by_native_delta(
         )
     x0 = center.x() + (target.left() - center.x()) * scale
     x1 = center.x() + (target.right() - center.x()) * scale
-    viewbox.update_y_zoom(x0, x1)
+    if x1 - x0 <= 1:
+        return
+    _force_x_limits(viewbox)
+    viewbox.set_range(x0, target.top(), x1, target.bottom())
 
 
 def _native_zoom_scale(zoom_delta: float) -> float:
