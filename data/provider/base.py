@@ -10,6 +10,7 @@ it has no knowledge of which provider is active or how it works internally.
 A provider is responsible for:
   - Fetching OHLCV bars for a symbol, timeframe, and time range
   - Returning bars as a list[Bar] sorted oldest-first
+  - Fetching current market snapshots for one or more symbols
   - Raising UnsupportedTimeframeError for timeframes it cannot supply natively
 
 Non-native timeframes (39m, 65m) are NOT the provider's problem. The
@@ -20,7 +21,7 @@ and resampling. The provider only needs to handle what it can fetch directly.
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from data.models import Bar, Timeframe
+from data.models import Bar, MarketSnapshot, Timeframe
 
 
 class UnsupportedTimeframeError(Exception):
@@ -61,6 +62,15 @@ class DataProvider(ABC):
         Raises:
             UnsupportedTimeframeError: if this provider cannot supply the
                 requested timeframe natively.
+        """
+
+    @abstractmethod
+    def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+        """
+        Fetch current market snapshots for symbols.
+
+        Returns a mapping keyed by normalized symbol. Missing symbols may be
+        omitted when the provider has no current market data for them.
         """
 
     @abstractmethod

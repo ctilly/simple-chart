@@ -17,13 +17,13 @@ shadowing the yfinance package on import.
 """
 
 import math
+from datetime import datetime, timezone
 from typing import Any, cast
-from datetime import datetime
 
 import pandas as pd
 import yfinance as yf
 
-from data.models import Bar, Timeframe
+from data.models import Bar, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, UnsupportedTimeframeError
 
 
@@ -85,6 +85,16 @@ class YFinanceProvider(DataProvider):
 
         return _rows_to_bars(df)
 
+    def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
+        requested = _unique_symbols(symbols)
+        if not requested:
+            return {}
+
+        snapshots = _fetch_batch_daily_snapshots(requested)
+        missing = [symbol for symbol in requested if symbol not in snapshots]
+        snapshots.update(_fetch_fast_info_snapshots(missing))
+        return snapshots
+
     def native_timeframes(self) -> list[Timeframe]:
         return [
             Timeframe.MIN1,
@@ -99,6 +109,175 @@ class YFinanceProvider(DataProvider):
 # ------------------------------------------------------------------
 # Private helpers
 # ------------------------------------------------------------------
+
+
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for symbol in symbols:
+        normalized = symbol.strip().upper()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return unique
+
+
+def _fetch_batch_daily_snapshots(symbols: list[str]) -> dict[str, MarketSnapshot]:
+    try:
+        df = yf.download(
+            symbols,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            timeout=5,
+        )
+    except Exception:
+        return {}
+    if df is None or df.empty:
+        return {}
+    return _snapshots_from_downloaded_history(symbols, df)
+
+
+def _snapshots_from_downloaded_history(
+    symbols: list[str],
+    df: pd.DataFrame,
+) -> dict[str, MarketSnapshot]:
+    snapshots: dict[str, MarketSnapshot] = {}
+    if isinstance(df.columns, pd.MultiIndex):
+        available_symbols = set(str(value).upper() for value in df.columns.get_level_values(0))
+        for symbol in symbols:
+            if symbol not in available_symbols:
+                continue
+            snapshot = _snapshot_from_daily_history(symbol, df[symbol])
+            if snapshot is not None:
+                snapshots[symbol] = snapshot
+        return snapshots
+
+    if len(symbols) == 1:
+        snapshot = _snapshot_from_daily_history(symbols[0], df)
+        if snapshot is not None:
+            snapshots[symbols[0]] = snapshot
+    return snapshots
+
+
+def _fetch_fast_info_snapshots(symbols: list[str]) -> dict[str, MarketSnapshot]:
+    snapshots: dict[str, MarketSnapshot] = {}
+    for symbol in symbols:
+        ticker = yf.Ticker(symbol)
+        try:
+            fast_info = ticker.get_fast_info()
+            snapshot = _snapshot_from_fast_info(symbol, fast_info)
+        except Exception:
+            snapshot = None
+        if snapshot is None or snapshot.change_percent is None:
+            try:
+                history_snapshot = _snapshot_from_daily_history(
+                    symbol,
+                    ticker.history(period="5d", interval="1d", auto_adjust=True),
+                )
+            except Exception:
+                history_snapshot = None
+            if history_snapshot is not None:
+                snapshot = history_snapshot
+        if snapshot is not None:
+            snapshots[symbol] = snapshot
+    return snapshots
+
+
+def _snapshot_from_fast_info(symbol: str, fast_info: Any) -> MarketSnapshot | None:
+    last_price = _optional_finite_float(fast_info.get("lastPrice"))
+    previous_close = _optional_finite_float(fast_info.get("regularMarketPreviousClose"))
+    if previous_close is None:
+        previous_close = _optional_finite_float(fast_info.get("previousClose"))
+    return _snapshot_from_price_fields(symbol, last_price, previous_close, None)
+
+
+def _snapshot_from_price_fields(
+    symbol: str,
+    last_price: float | None,
+    previous_close: float | None,
+    timestamp: datetime | None,
+) -> MarketSnapshot | None:
+    if last_price is None and previous_close is None:
+        return None
+    change: float | None = None
+    change_percent: float | None = None
+    if last_price is not None and previous_close is not None:
+        change = last_price - previous_close
+        if previous_close != 0:
+            change_percent = change / previous_close * 100
+    return MarketSnapshot(
+        symbol=symbol.upper(),
+        last_price=last_price,
+        change=change,
+        change_percent=change_percent,
+        previous_close=previous_close,
+        timestamp=timestamp,
+    )
+
+
+def _snapshot_from_daily_history(symbol: str, df: pd.DataFrame) -> MarketSnapshot | None:
+    if df.empty or "Close" not in df.columns:
+        return None
+
+    close_rows: list[tuple[object, float]] = []
+    for timestamp, row in df.iterrows():
+        close = _optional_finite_float(row["Close"])
+        if close is not None:
+            close_rows.append((timestamp, close))
+    if len(close_rows) < 2:
+        return None
+
+    latest_timestamp, latest_close = close_rows[-1]
+    _, previous_close = close_rows[-2]
+    return _snapshot_from_price_fields(
+        symbol,
+        latest_close,
+        previous_close,
+        _normalize_timestamp(latest_timestamp),
+    )
+
+
+def _snapshot_from_pricing_data(data: dict[str, Any]) -> MarketSnapshot | None:
+    raw_symbol = data.get("id")
+    if not isinstance(raw_symbol, str) or not raw_symbol:
+        return None
+    return MarketSnapshot(
+        symbol=raw_symbol.upper(),
+        last_price=_optional_finite_float(data.get("price")),
+        change=_optional_finite_float(data.get("change")),
+        change_percent=_optional_finite_float(data.get("change_percent")),
+        previous_close=_optional_finite_float(data.get("previous_close")),
+        timestamp=_optional_timestamp(data.get("time")),
+    )
+
+
+def _optional_finite_float(value: object) -> float | None:
+    if not isinstance(value, str | int | float):
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _optional_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str | int | float):
+        return None
+    try:
+        timestamp = float(value)
+    except ValueError:
+        return None
+    if not math.isfinite(timestamp):
+        return None
+    if timestamp > 10_000_000_000:
+        timestamp = timestamp / 1000
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
 
 def _rows_to_bars(df: pd.DataFrame) -> list[Bar]:
     """

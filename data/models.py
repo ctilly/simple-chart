@@ -109,6 +109,16 @@ class OHLCVSeries:
 
 
 @dataclass(frozen=True)
+class MarketSnapshot:
+    symbol: str
+    last_price: float | None
+    change: float | None
+    change_percent: float | None
+    previous_close: float | None
+    timestamp: datetime | None
+
+
+@dataclass(frozen=True)
 class ChartExtensionStoreRecord:
     record_id: int
     store_key: str

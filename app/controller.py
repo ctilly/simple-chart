@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -59,7 +59,7 @@ from app.watchlist import WatchlistWidget
 from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import OHLCVSeries, Timeframe
+from data.models import MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider import get_provider
 from simplechart.api import (
     ChartEvent,
@@ -103,6 +103,7 @@ _DEFAULT_LOOKBACK_DAYS = 600
 # Use 55 / 6 to stay comfortably inside the window.
 _INTRADAY_SHORT_LOOKBACK = 6     # for 1m only
 _INTRADAY_MEDIUM_LOOKBACK = 55   # for 5m/15m/30m/39m/65m
+_SNAPSHOT_REFRESH_MS = 60_000
 
 
 def _lookback_days(tf: Timeframe) -> int:
@@ -160,6 +161,22 @@ class _FetchWorker(QObject):
             )
             self.finished.emit(series)
 
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class _SnapshotWorker(QObject):
+    finished: pyqtSignal = pyqtSignal(object)   # emits dict[str, MarketSnapshot]
+    error:    pyqtSignal = pyqtSignal(str)
+
+    def __init__(self, aggregator: Aggregator, symbols: list[str]) -> None:
+        super().__init__()
+        self._aggregator = aggregator
+        self._symbols = list(symbols)
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(self._aggregator.fetch_snapshots(self._symbols))
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -347,6 +364,12 @@ class MainWindow(QMainWindow):
         self._fetch_thread: QThread | None = None
         self._fetch_worker: _FetchWorker | None = None
 
+        self._snapshot_thread: QThread | None = None
+        self._snapshot_worker: _SnapshotWorker | None = None
+        self._snapshot_timer = QTimer(self)
+        self._snapshot_timer.setInterval(_SNAPSHOT_REFRESH_MS)
+        self._snapshot_timer.timeout.connect(self._refresh_watchlist_snapshots)
+
         # Most recently loaded series — used to convert bar index to timestamp
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
         self._current_series: OHLCVSeries | None = None
@@ -362,6 +385,8 @@ class MainWindow(QMainWindow):
         self._state.symbol = initial_symbol
         self._symbol_bar.set_symbol(initial_symbol)
         self._load()
+        self._snapshot_timer.start()
+        self._refresh_watchlist_snapshots()
 
     # ------------------------------------------------------------------
     # Symbol and timeframe loading
@@ -976,6 +1001,7 @@ class MainWindow(QMainWindow):
         """Persist and display a new watchlist entry."""
         self._cache.add_to_watchlist(symbol)
         self._watchlist.add_symbol(symbol)
+        self._refresh_watchlist_snapshots()
 
     def _on_watchlist_remove(self, symbol: str) -> None:
         """Remove a watchlist entry from DB and UI."""
@@ -985,6 +1011,44 @@ class MainWindow(QMainWindow):
     def _on_watchlist_reorder(self, symbols: list[str]) -> None:
         """Persist reordered watchlist symbols."""
         self._cache.reorder_watchlist(symbols)
+
+    def _refresh_watchlist_snapshots(self) -> None:
+        if self._snapshot_thread is not None and self._snapshot_thread.isRunning():
+            return
+        symbols = self._watchlist.symbols()
+        if not symbols:
+            return
+
+        worker = _SnapshotWorker(self._aggregator, symbols)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_watchlist_snapshots)
+        worker.error.connect(self._on_watchlist_snapshot_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+
+        self._snapshot_thread = thread
+        self._snapshot_worker = worker
+        thread.start()
+
+    def _on_watchlist_snapshots(
+        self,
+        snapshots: dict[str, MarketSnapshot],
+    ) -> None:
+        current_symbols = set(self._watchlist.symbols())
+        self._watchlist.set_percent_changes(
+            {
+                symbol: snapshot.change_percent
+                for symbol, snapshot in snapshots.items()
+                if symbol in current_symbols
+            }
+        )
+
+    def _on_watchlist_snapshot_error(self, message: str) -> None:
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(f"Watchlist quotes unavailable: {message}", 5000)
 
     def _on_add_extension(self) -> None:
         """
@@ -1041,6 +1105,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: object) -> None:
         """Clean up on close."""
+        if self._snapshot_timer.isActive():
+            self._snapshot_timer.stop()
+        if self._snapshot_thread and self._snapshot_thread.isRunning():
+            self._snapshot_thread.quit()
+            self._snapshot_thread.wait()
         if self._fetch_thread and self._fetch_thread.isRunning():
             self._fetch_thread.quit()
             self._fetch_thread.wait()

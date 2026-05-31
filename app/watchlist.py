@@ -15,8 +15,9 @@ in sync after its own DB writes succeed.
 """
 
 from collections.abc import Callable
+from typing import cast
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QDropEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -34,8 +35,68 @@ from PyQt6.QtWidgets import (
 )
 
 
+def _format_percent_change(percent_change: float | None) -> str:
+    if percent_change is None:
+        return "--"
+    sign = "+" if percent_change > 0 else ""
+    return f"{sign}{percent_change:.2f}%"
+
+
+def _percent_color(percent_change: float | None) -> str:
+    if percent_change is None:
+        return "#888888"
+    if percent_change > 0:
+        return "#1f8f45"
+    if percent_change < 0:
+        return "#c7392f"
+    return "#666666"
+
+
+class SymbolTileWidget(QWidget):
+    def __init__(self, symbol: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._symbol = symbol
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setObjectName("watchlistSymbolTile")
+        self.setStyleSheet("QWidget#watchlistSymbolTile { background: transparent; }")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(4)
+
+        self._symbol_label = QLabel(symbol, self)
+        self._symbol_label.setObjectName("watchlistSymbolLabel")
+        self._symbol_label.setStyleSheet("color: #222222; font-weight: 400;")
+        layout.addWidget(self._symbol_label)
+
+        layout.addStretch(1)
+
+        self._percent_label = QLabel("--", self)
+        self._percent_label.setObjectName("watchlistPercentLabel")
+        self._percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._percent_label.setMinimumWidth(52)
+        layout.addWidget(self._percent_label)
+        self.set_percent_change(None)
+
+    @property
+    def symbol(self) -> str:
+        return self._symbol
+
+    def percent_text(self) -> str:
+        return self._percent_label.text()
+
+    def set_percent_change(self, percent_change: float | None) -> None:
+        self._percent_label.setText(_format_percent_change(percent_change))
+        self._percent_label.setStyleSheet(
+            f"color: {_percent_color(percent_change)}; font-size: 11px; font-weight: 600;"
+        )
+
+
 class SymbolListWidget(QListWidget):
     """Flat watchlist symbol list with selection, context menu, and drag order."""
+
+    def _symbol_for_item(self, item: QListWidgetItem) -> str:
+        return cast(str, item.data(Qt.ItemDataRole.UserRole))
 
     symbol_clicked: pyqtSignal = pyqtSignal(str)
     remove_requested: pyqtSignal = pyqtSignal(str)
@@ -67,7 +128,7 @@ class SymbolListWidget(QListWidget):
 
     def symbols(self) -> list[str]:
         return [
-            item.text()
+            self._symbol_for_item(item)
             for index in range(self.count())
             if (item := self.item(index)) is not None
         ]
@@ -75,24 +136,45 @@ class SymbolListWidget(QListWidget):
     def add_symbol(self, symbol: str) -> None:
         if symbol in self.symbols():
             return
-        item = QListWidgetItem(symbol)
+        item = QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, symbol)
         item.setFlags(item.flags() | Qt.ItemFlag.ItemIsDragEnabled)
+        item.setSizeHint(QSize(0, 30))
         self.addItem(item)
+        self.setItemWidget(item, SymbolTileWidget(symbol, self))
 
     def remove_symbol(self, symbol: str) -> None:
         for index in range(self.count()):
             item = self.item(index)
-            if item is not None and item.text() == symbol:
+            if item is not None and self._symbol_for_item(item) == symbol:
                 self.takeItem(index)
                 return
 
     def set_active_symbol(self, symbol: str) -> None:
         for index in range(self.count()):
             item = self.item(index)
-            if item is not None and item.text() == symbol:
+            if item is not None and self._symbol_for_item(item) == symbol:
                 self.setCurrentRow(index)
                 return
         self.clearSelection()
+
+    def set_percent_changes(self, percent_changes: dict[str, float | None]) -> None:
+        for index in range(self.count()):
+            item = self.item(index)
+            if item is None:
+                continue
+            tile = self.itemWidget(item)
+            if isinstance(tile, SymbolTileWidget) and self._symbol_for_item(item) in percent_changes:
+                tile.set_percent_change(percent_changes[self._symbol_for_item(item)])
+
+    def tile_for_symbol(self, symbol: str) -> SymbolTileWidget | None:
+        for index in range(self.count()):
+            item = self.item(index)
+            if item is None or self._symbol_for_item(item) != symbol:
+                continue
+            tile = self.itemWidget(item)
+            return tile if isinstance(tile, SymbolTileWidget) else None
+        return None
 
     def dropEvent(self, event: QDropEvent | None) -> None:
         if event is None:
@@ -104,7 +186,7 @@ class SymbolListWidget(QListWidget):
             self.order_changed.emit(after)
 
     def _handle_item_clicked(self, item: QListWidgetItem) -> None:
-        self.symbol_clicked.emit(item.text())
+        self.symbol_clicked.emit(self._symbol_for_item(item))
 
     def _show_context_menu(self, pos: QPoint) -> None:
         item = self.itemAt(pos)
@@ -114,7 +196,7 @@ class SymbolListWidget(QListWidget):
         remove_action = menu.addAction("Remove")
         action = menu.exec(self.mapToGlobal(pos))
         if action == remove_action:
-            self.remove_requested.emit(item.text())
+            self.remove_requested.emit(self._symbol_for_item(item))
 
 
 class WatchlistWidget(QWidget):
@@ -188,6 +270,9 @@ class WatchlistWidget(QWidget):
 
     def set_active_symbol(self, symbol: str) -> None:
         self._list.set_active_symbol(symbol)
+
+    def set_percent_changes(self, percent_changes: dict[str, float | None]) -> None:
+        self._list.set_percent_changes(percent_changes)
 
     def _toggle_add_popup(self) -> None:
         if self._popup is None:
