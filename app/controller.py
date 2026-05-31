@@ -301,6 +301,7 @@ class MainWindow(QMainWindow):
             symbols=self._cache.get_watchlist(),
             on_add=self._on_watchlist_add,
             on_remove=self._on_watchlist_remove,
+            on_reorder=self._on_watchlist_reorder,
             parent=frame,
         )
         self._watchlist.symbol_selected.connect(self._on_watchlist_symbol_selected)
@@ -980,6 +981,10 @@ class MainWindow(QMainWindow):
         """Remove a watchlist entry from DB and UI."""
         self._cache.remove_from_watchlist(symbol)
         self._watchlist.remove_symbol(symbol)
+
+    def _on_watchlist_reorder(self, symbols: list[str]) -> None:
+        """Persist reordered watchlist symbols."""
+        self._cache.reorder_watchlist(symbols)
 
     def _on_add_extension(self) -> None:
         """

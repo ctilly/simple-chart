@@ -3,10 +3,9 @@
 Simple Chart is designed to be simple and easy to use; no cruft or complicated UI.  It runs natively on Linux, and supported on Mac and Windows, fully extensible, customizable, and FREE.  
 Extensible because it comes equipped with a robust Indicator and Tool API so you can build your own custom indicators and tools. The API is built specifically to faciliate agentic coding with your AI platform of choice. 
 Customizable because the application is open source and you are free to change it to whatever suits your personal preference.
-The app is free, source code and all.  It is licensed though make sure you comply with the lice
+The app is free, source code and all.  It is licensed though make sure you comply with the license.  
 
-This guide starts with chart navigation and the built-in indicators. More
-topics can be added as the app grows.
+
 
 ## Chart Navigation
 

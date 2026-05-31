@@ -63,9 +63,10 @@ CREATE INDEX IF NOT EXISTS idx_extension_records_store_symbol
 -- watchlist
 -- ----------------------------------------------------------------------------
 -- User-curated list of symbols for quick chart navigation.
--- Symbols are displayed in insertion order (ORDER BY rowid ASC).
+-- Symbols are displayed by sort_order ASC.
 -- The PRIMARY KEY on symbol prevents duplicates.
 
 CREATE TABLE IF NOT EXISTS watchlist (
-    symbol TEXT PRIMARY KEY
+    symbol     TEXT    PRIMARY KEY,
+    sort_order INTEGER NOT NULL
 );

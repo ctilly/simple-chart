@@ -60,6 +60,30 @@ class Cache:
         """Run schema.sql to create tables if they don't exist yet."""
         ddl = _SCHEMA_PATH.read_text()
         self._conn.executescript(ddl)
+        self._migrate_watchlist_sort_order()
+
+    def _migrate_watchlist_sort_order(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(watchlist)")
+        }
+        if "sort_order" in columns:
+            return
+
+        with self._conn:
+            self._conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+            )
+            rows = self._conn.execute(
+                "SELECT rowid, symbol FROM watchlist ORDER BY rowid ASC"
+            ).fetchall()
+            self._conn.executemany(
+                "UPDATE watchlist SET sort_order = ? WHERE symbol = ?",
+                [
+                    (index, row["symbol"])
+                    for index, row in enumerate(rows)
+                ],
+            )
 
     def close(self) -> None:
         self._conn.close()
@@ -172,18 +196,22 @@ class Cache:
     # ------------------------------------------------------------------
 
     def get_watchlist(self) -> list[str]:
-        """Return watchlist symbols in insertion order."""
+        """Return watchlist symbols in user-defined order."""
         cursor = self._conn.execute(
-            "SELECT symbol FROM watchlist ORDER BY rowid ASC"
+            "SELECT symbol FROM watchlist ORDER BY sort_order ASC, symbol ASC"
         )
         return [row[0] for row in cursor]
 
     def add_to_watchlist(self, symbol: str) -> None:
         """Add a symbol to the watchlist. No-op if already present."""
+        row = self._conn.execute(
+            "SELECT MAX(sort_order) FROM watchlist"
+        ).fetchone()
+        next_order = 0 if row[0] is None else int(row[0]) + 1
         with self._conn:
             self._conn.execute(
-                "INSERT OR IGNORE INTO watchlist (symbol) VALUES (?)",
-                (symbol,),
+                "INSERT OR IGNORE INTO watchlist (symbol, sort_order) VALUES (?, ?)",
+                (symbol, next_order),
             )
 
     def remove_from_watchlist(self, symbol: str) -> None:
@@ -192,6 +220,17 @@ class Cache:
             self._conn.execute(
                 "DELETE FROM watchlist WHERE symbol = ?",
                 (symbol,),
+            )
+
+    def reorder_watchlist(self, symbols: list[str]) -> None:
+        """Persist the user-defined order for the current watchlist symbols."""
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE watchlist SET sort_order = ? WHERE symbol = ?",
+                [
+                    (index, symbol)
+                    for index, symbol in enumerate(symbols)
+                ],
             )
 
     # ------------------------------------------------------------------
