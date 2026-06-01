@@ -48,7 +48,7 @@ from chart.viewport import (
     snapshot_viewports,
     unlock_x_pan,
 )
-from data.models import OHLCVSeries
+from data.models import OHLCVSeries, Timeframe
 from simplechart.api import HorizontalSegmentRender, MarkerRender, VerticalLineRender
 
 _LINE_STYLES: dict[str, Qt.PenStyle] = {
@@ -450,10 +450,17 @@ def _bar_datetime_index(series: OHLCVSeries) -> pd.Index:
     """
     Return the UTC DatetimeIndex finplot uses as the source x-axis.
     """
-    return pd.DatetimeIndex(
-        [bar.timestamp for bar in series.bars],
-        dtype="datetime64[ns, UTC]",
-    )
+    timestamps: list[pd.Timestamp] = []
+    for bar in series.bars:
+        timestamp = pd.Timestamp(bar.timestamp)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
+        if series.timeframe in (Timeframe.DAILY, Timeframe.WEEKLY):
+            timestamp = timestamp.normalize() + pd.Timedelta(hours=12)
+        timestamps.append(timestamp)
+    return pd.DatetimeIndex(timestamps, dtype="datetime64[ns, UTC]")
 
 
 def _series_to_candle_df(series: OHLCVSeries) -> pd.DataFrame:
