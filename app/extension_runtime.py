@@ -85,6 +85,10 @@ class ChartExtensionRuntime:
             segment.key for segment in render.segments
         ] + [
             line.key for line in render.vertical_lines
+        ] + [
+            line.key for line in render.horizontal_lines
+        ] + [
+            label.key for label in render.axis_price_labels
         ]
         ext_state.series_visibility = {
             key: ext_state.series_visibility[key]
@@ -103,6 +107,8 @@ class ChartExtensionRuntime:
         x: float,
         y: float = 0.0,
         button: str = "left",
+        pixel_size_x: float = 0.0,
+        pixel_size_y: float = 0.0,
     ) -> ChartEvent:
         bar_index = self._nearest_bar_index(series, x)
         timestamp_ms = None
@@ -114,6 +120,8 @@ class ChartExtensionRuntime:
             bar_index=bar_index,
             timestamp_ms=timestamp_ms,
             button=button,
+            pixel_size_x=pixel_size_x,
+            pixel_size_y=pixel_size_y,
         )
 
     def context_actions(
@@ -389,6 +397,10 @@ class ChartExtensionRuntime:
             segment.key for segment in render.segments
         ] + [
             line.key for line in render.vertical_lines
+        ] + [
+            line.key for line in render.horizontal_lines
+        ] + [
+            label.key for label in render.axis_price_labels
         ]
         return ChartExtensionState(
             name=session.extension_name,

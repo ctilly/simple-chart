@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 )
 
 from chart.styles import LEGEND_FONT_SIZE
+from simplechart.api import ToolIconSpec
 
 
 class ExtensionLabel(QLabel):
@@ -113,7 +114,7 @@ class DrawingToolPalette(QWidget):
 
     def __init__(
         self,
-        tools: list[tuple[str, str]],
+        tools: list[tuple[str, str, ToolIconSpec | None]],
         on_drawing_tool: Callable[[str], None],
         parent: QWidget | None = None,
     ) -> None:
@@ -182,10 +183,10 @@ class DrawingToolPalette(QWidget):
         tool_layout.setContentsMargins(6, 0, 6, 0)
         tool_layout.setSpacing(4)
 
-        for tool_name, tool_label in tools:
+        for tool_name, tool_label, icon_spec in tools:
             button = QToolButton(tool_row)
             button.setObjectName(f"drawingToolButton_{tool_name}")
-            button.setIcon(_tool_icon(tool_name, button))
+            button.setIcon(_tool_icon(icon_spec, button))
             button.setIconSize(QSize(20, 20))
             button.setToolTip(tool_label)
             button.setFixedSize(28, 28)
@@ -272,7 +273,7 @@ class ChartLegend(QWidget):
         on_remove:    Callable[[str], None],
         on_add:       Callable[[], None],
         on_drawing_tool: Callable[[str], None],
-        drawing_tools: list[tuple[str, str]],
+        drawing_tools: list[tuple[str, str, ToolIconSpec | None]],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -398,25 +399,18 @@ class ChartLegend(QWidget):
         return parent.mapFromGlobal(global_position)
 
 
-def _tool_icon(tool_name: str, widget: QWidget) -> QIcon:
+def _tool_icon(spec: ToolIconSpec | None, widget: QWidget) -> QIcon:
+    if spec is None:
+        style = widget.style()
+        assert style is not None
+        return style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+
     pixmap = QPixmap(24, 24)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor("#555555"), 2)
-    painter.setPen(pen)
-    if tool_name == "vertical_line":
-        painter.drawLine(12, 4, 12, 20)
-        painter.drawLine(7, 4, 17, 4)
-        painter.drawLine(7, 20, 17, 20)
-    elif tool_name == "fib_retracement":
-        for y, length in ((5, 18), (9, 14), (14, 11), (19, 18)):
-            painter.drawLine(3, y, 3 + length, y)
-    else:
-        style = widget.style()
-        assert style is not None
-        icon = style.standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
-        painter.end()
-        return icon
+    painter.setPen(QPen(QColor(spec.color), spec.line_width))
+    for line in spec.lines:
+        painter.drawLine(line.x1, line.y1, line.x2, line.y2)
     painter.end()
     return QIcon(pixmap)

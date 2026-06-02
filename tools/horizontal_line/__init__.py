@@ -1,44 +1,43 @@
-from bisect import bisect_left
 from typing import Any
 
 import numpy as np
 
-from tools.vertical_line.models import VerticalLineRecord
-from tools.vertical_line.session_store import (
-    VerticalLineStore,
-    vertical_line_key,
+from tools.horizontal_line.models import HorizontalLineRecord
+from tools.horizontal_line.session_store import (
+    HorizontalLineStore,
+    horizontal_line_key,
 )
 from simplechart.api import (
+    AxisPriceLabelRender,
     ChartEvent,
-    ChoiceParam,
-    DragSession,
-    DrawingToolResult,
-    HitTestResult,
     ChartExtension,
     ChartExtensionAddMode,
     ChartExtensionConfig,
     ChartExtensionMutation,
     ChartExtensionRender,
+    ChoiceParam,
+    DragSession,
+    DrawingToolResult,
+    HitTestResult,
+    HorizontalLineRender,
     LINE_STYLE_OPTIONS,
     OHLCVSeries,
     ToolIconLine,
     ToolIconSpec,
-    VerticalLineRender,
     register_extension,
     register_store_handler,
 )
 
 _DEFAULT_COLOR = "#7a7f8c"
-_HIT_BUFFER = 0.55
 
 
-class VerticalLineIndicator(ChartExtension):
+class HorizontalLineIndicator(ChartExtension):
 
     def name(self) -> str:
-        return "vertical_line"
+        return "horizontal_line"
 
     def label(self) -> str:
-        return "Vertical Line"
+        return "Horizontal Line"
 
     def default_params(self) -> dict[str, Any]:
         return {
@@ -53,9 +52,9 @@ class VerticalLineIndicator(ChartExtension):
 
     def toolbar_icon(self) -> ToolIconSpec:
         return ToolIconSpec(lines=(
-            ToolIconLine(12, 4, 12, 20),
-            ToolIconLine(7, 4, 17, 4),
-            ToolIconLine(7, 20, 17, 20),
+            ToolIconLine(4, 12, 20, 12),
+            ToolIconLine(4, 7, 4, 17),
+            ToolIconLine(20, 7, 20, 17),
         ))
 
     def preserve_ui_state_per_symbol(self) -> bool:
@@ -74,19 +73,25 @@ class VerticalLineIndicator(ChartExtension):
         params: dict[str, Any],
     ) -> ChartExtensionRender:
         render = ChartExtensionRender()
-        timestamps = _series_timestamps(series)
         for line in _lines_for_symbol(params, series.symbol):
-            x_index = _timestamp_to_nearest_index(line.timestamp_ms, timestamps)
-            if x_index is None:
-                continue
-            render.vertical_lines.append(
-                VerticalLineRender(
-                    key=vertical_line_key(line),
-                    x_index=float(x_index),
-                    label="Vertical Line",
+            key = horizontal_line_key(line)
+            render.horizontal_lines.append(
+                HorizontalLineRender(
+                    key=key,
+                    y_value=line.price,
+                    label="Horizontal Line",
                     color=line.color,
                     line_width=line.line_width,
                     line_style=line.line_style,
+                )
+            )
+            render.axis_price_labels.append(
+                AxisPriceLabelRender(
+                    key=key,
+                    y_value=line.price,
+                    text=f"{line.price:.2f}",
+                    fill_color=line.color,
+                    text_color=_contrasting_text(line.color),
                 )
             )
         return render
@@ -97,11 +102,9 @@ class VerticalLineIndicator(ChartExtension):
         params: dict[str, Any],
         event: ChartEvent,
     ) -> DrawingToolResult:
-        if event.timestamp_ms is None:
-            return DrawingToolResult()
-        record = VerticalLineRecord(
+        record = HorizontalLineRecord(
             symbol=series.symbol,
-            timestamp_ms=event.timestamp_ms,
+            price=float(event.y),
             timeframe=series.timeframe.value,
             color=str(params.get("color", _DEFAULT_COLOR)),
             line_width=float(params.get("line_width", 1.0)),
@@ -124,15 +127,14 @@ class VerticalLineIndicator(ChartExtension):
         event: ChartEvent,
         visible_keys: set[str],
     ) -> HitTestResult | None:
-        timestamps = _series_timestamps(series)
+        # Buffer in price units derived from a pixel target. Falls back to a
+        # small fixed price band when pixel_size is unavailable (test path).
+        buffer = 5.0 * event.pixel_size_y if event.pixel_size_y > 0 else 0.5
         for line in _lines_for_symbol(params, series.symbol):
-            key = vertical_line_key(line)
+            key = horizontal_line_key(line)
             if key not in visible_keys:
                 continue
-            x_index = _timestamp_to_nearest_index(line.timestamp_ms, timestamps)
-            if x_index is None:
-                continue
-            if abs(event.x - float(x_index)) <= _HIT_BUFFER:
+            if abs(event.y - line.price) <= buffer:
                 return HitTestResult(
                     extension_name=self.name(),
                     handle_key=key,
@@ -165,7 +167,7 @@ class VerticalLineIndicator(ChartExtension):
         if updated is None:
             return None
         session.working_params["lines"] = [
-            updated if vertical_line_key(line) == session.handle_key else line
+            updated if horizontal_line_key(line) == session.handle_key else line
             for line in session.working_params["lines"]
         ]
         return self.render(series, {"lines": [updated]})
@@ -177,7 +179,7 @@ class VerticalLineIndicator(ChartExtension):
         event: ChartEvent,
     ) -> ChartExtensionMutation | None:
         self.drag_to(series, session, event)
-        line = vertical_line_for_key(
+        line = horizontal_line_for_key(
             session.working_params["lines"],
             session.handle_key,
         )
@@ -193,8 +195,6 @@ class VerticalLineIndicator(ChartExtension):
         self,
         session: DragSession,
     ) -> ChartExtensionMutation | None:
-        # Dragging only produces preview renders; the store is untouched, so a
-        # cancel needs no mutation — the controller re-renders from store state.
         return None
 
     def config_for_series(
@@ -202,11 +202,11 @@ class VerticalLineIndicator(ChartExtension):
         series_key: str,
         params: dict[str, Any],
     ) -> ChartExtensionConfig | None:
-        line = vertical_line_for_key(params.get("lines", []), series_key)
+        line = horizontal_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
         return ChartExtensionConfig(
-            label="Vertical Line",
+            label="Horizontal Line",
             params={
                 "color": line.color,
                 "line_width": line.line_width,
@@ -222,16 +222,16 @@ class VerticalLineIndicator(ChartExtension):
         params: dict[str, Any],
         edited_params: dict[str, Any],
     ) -> ChartExtensionMutation | None:
-        line = vertical_line_for_key(params.get("lines", []), series_key)
+        line = horizontal_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
         return ChartExtensionMutation(
             extension_name=self.name(),
             operation="update",
             payload={
-                "record": VerticalLineRecord(
+                "record": HorizontalLineRecord(
                     symbol=line.symbol,
-                    timestamp_ms=line.timestamp_ms,
+                    price=line.price,
                     timeframe=line.timeframe,
                     color=str(edited_params["color"]),
                     line_width=float(edited_params["line_width"]),
@@ -248,7 +248,7 @@ class VerticalLineIndicator(ChartExtension):
         series_key: str,
         params: dict[str, Any],
     ) -> ChartExtensionMutation | None:
-        line = vertical_line_for_key(params.get("lines", []), series_key)
+        line = horizontal_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
         return ChartExtensionMutation(
@@ -258,15 +258,18 @@ class VerticalLineIndicator(ChartExtension):
         )
 
 
-def vertical_line_for_key(
-    lines: list[VerticalLineRecord],
+def horizontal_line_for_key(
+    lines: list[HorizontalLineRecord],
     series_key: str,
-) -> VerticalLineRecord | None:
-    if series_key.startswith("vertical_line_ts_"):
-        timestamp_ms = int(series_key.removeprefix("vertical_line_ts_"))
-        return next((line for line in lines if line.timestamp_ms == timestamp_ms), None)
-    if series_key.startswith("vertical_line_"):
-        line_id = int(series_key.removeprefix("vertical_line_"))
+) -> HorizontalLineRecord | None:
+    if series_key.startswith("horizontal_line_price_"):
+        scaled = int(series_key.removeprefix("horizontal_line_price_"))
+        return next(
+            (line for line in lines if int(line.price * 1_000_000) == scaled),
+            None,
+        )
+    if series_key.startswith("horizontal_line_"):
+        line_id = int(series_key.removeprefix("horizontal_line_"))
         return next((line for line in lines if line.line_id == line_id), None)
     return None
 
@@ -274,49 +277,26 @@ def vertical_line_for_key(
 def _lines_for_symbol(
     params: dict[str, Any],
     symbol: str,
-) -> list[VerticalLineRecord]:
+) -> list[HorizontalLineRecord]:
     return [
         line for line in params.get("lines", [])
         if line.symbol == symbol
     ]
 
 
-def _series_timestamps(series: OHLCVSeries) -> list[int]:
-    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
-
-
-def _timestamp_to_nearest_index(
-    timestamp_ms: int,
-    timestamps: list[int],
-) -> int | None:
-    if not timestamps:
-        return None
-    idx = bisect_left(timestamps, timestamp_ms)
-    candidates: list[int] = []
-    if idx < len(timestamps):
-        candidates.append(idx)
-    if idx > 0:
-        candidates.append(idx - 1)
-    if not candidates:
-        return None
-    return min(candidates, key=lambda candidate: abs(timestamps[candidate] - timestamp_ms))
-
-
 def _updated_drag_line(
     session: DragSession,
     event: ChartEvent,
-) -> VerticalLineRecord | None:
-    if event.timestamp_ms is None:
-        return None
-    line = vertical_line_for_key(
+) -> HorizontalLineRecord | None:
+    line = horizontal_line_for_key(
         session.working_params["lines"],
         session.handle_key,
     )
     if line is None:
         return None
-    return VerticalLineRecord(
+    return HorizontalLineRecord(
         symbol=line.symbol,
-        timestamp_ms=event.timestamp_ms,
+        price=float(event.y),
         timeframe=line.timeframe,
         color=line.color,
         line_width=line.line_width,
@@ -327,11 +307,22 @@ def _updated_drag_line(
     )
 
 
+def _contrasting_text(hex_color: str) -> str:
+    color = hex_color.lstrip("#")
+    if len(color) != 6:
+        return "#ffffff"
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#000000" if luminance >= 128 else "#ffffff"
+
+
 def _choice_value(value: Any) -> str:
     if isinstance(value, ChoiceParam):
         return value.value
     return str(value)
 
 
-register_extension(VerticalLineIndicator)
-register_store_handler(VerticalLineStore)
+register_extension(HorizontalLineIndicator)
+register_store_handler(HorizontalLineStore)

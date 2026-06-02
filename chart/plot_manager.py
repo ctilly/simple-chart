@@ -25,12 +25,13 @@ Note on pandas:
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any, cast
+from dataclasses import dataclass
+from typing import Any, Callable, cast
 
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QFont
 
 from chart.panel import ExtensionPanelSlot, Panel
@@ -49,7 +50,13 @@ from chart.viewport import (
     unlock_x_pan,
 )
 from data.models import OHLCVSeries, Timeframe
-from simplechart.api import HorizontalSegmentRender, MarkerRender, VerticalLineRender
+from simplechart.api import (
+    AxisPriceLabelRender,
+    HorizontalLineRender,
+    HorizontalSegmentRender,
+    MarkerRender,
+    VerticalLineRender,
+)
 
 _LINE_STYLES: dict[str, Qt.PenStyle] = {
     "solid":    Qt.PenStyle.SolidLine,
@@ -57,6 +64,15 @@ _LINE_STYLES: dict[str, Qt.PenStyle] = {
     "dot":      Qt.PenStyle.DotLine,
     "dash_dot": Qt.PenStyle.DashDotLine,
 }
+
+
+@dataclass
+class _AxisPriceLabelHandle:
+    text_item: object
+    viewbox: object
+    scene: object
+    reposition: Callable[[object, object], None]
+    y_value: float
 
 
 class PlotManager:
@@ -81,6 +97,8 @@ class PlotManager:
         self._plots: dict[str, object] = {}
         self._segments: dict[str, tuple[object, object]] = {}
         self._vertical_lines: dict[str, tuple[object, object]] = {}
+        self._horizontal_lines: dict[str, tuple[object, object]] = {}
+        self._axis_price_labels: dict[str, _AxisPriceLabelHandle] = {}
         self._markers: dict[str, object] = {}
 
         # Candle and volume handles are separate — they are always present
@@ -274,6 +292,56 @@ class PlotManager:
         target_ax.addItem(item)  # type: ignore[attr-defined]
         self._vertical_lines[line.key] = (item, target_ax)
 
+    def update_horizontal_line(self, line: HorizontalLineRender) -> None:
+        self.remove_horizontal_line(line.key)
+        target_ax = self._resolve_ax(line.render_target)
+        pen_style = _LINE_STYLES.get(line.line_style, Qt.PenStyle.SolidLine)
+        item = pg.InfiniteLine(
+            pos=line.y_value,
+            angle=0,
+            movable=False,
+            pen=pg.mkPen(
+                color=line.color,
+                width=line.line_width,
+                style=pen_style,
+            ),
+        )
+        item.setVisible(line.visible)
+        target_ax.addItem(item)  # type: ignore[attr-defined]
+        self._horizontal_lines[line.key] = (item, target_ax)
+
+    def update_axis_price_label(self, label: AxisPriceLabelRender) -> None:
+        self.remove_axis_price_label(label.key)
+        target_ax = self._resolve_ax(label.render_target)
+        viewbox = target_ax.vb  # type: ignore[attr-defined]
+        scene = viewbox.scene()
+        text_item = pg.TextItem(
+            text=label.text,
+            color=label.text_color,
+            anchor=(0.0, 0.5),
+            fill=pg.mkBrush(label.fill_color),
+            border=pg.mkPen(label.fill_color),
+        )
+        text_item.setVisible(label.visible)
+        scene.addItem(text_item)
+
+        y_holder = [label.y_value]
+
+        def reposition(*_args: object) -> None:
+            scene_x = viewbox.sceneBoundingRect().right()
+            scene_y = viewbox.mapViewToScene(QPointF(0.0, y_holder[0])).y()
+            text_item.setPos(scene_x, scene_y)
+
+        viewbox.sigRangeChanged.connect(reposition)
+        reposition()
+        self._axis_price_labels[label.key] = _AxisPriceLabelHandle(
+            text_item=text_item,
+            viewbox=viewbox,
+            scene=scene,
+            reposition=reposition,
+            y_value=label.y_value,
+        )
+
     @contextmanager
     def preserving_viewport(self) -> Iterator[None]:
         snapshot = snapshot_viewports(self._viewport_axes())
@@ -315,6 +383,8 @@ class PlotManager:
             handle.ax.removeItem(handle)  # type: ignore[attr-defined]
         self.remove_horizontal_segment(series_key)
         self.remove_vertical_line(series_key)
+        self.remove_horizontal_line(series_key)
+        self.remove_axis_price_label(series_key)
         self.remove_marker(series_key)
 
     def set_visible(self, series_key: str, visible: bool) -> None:
@@ -330,6 +400,10 @@ class PlotManager:
             self._segments[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._vertical_lines:
             self._vertical_lines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
+        if series_key in self._horizontal_lines:
+            self._horizontal_lines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
+        if series_key in self._axis_price_labels:
+            self._axis_price_labels[series_key].text_item.setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._markers:
             self._markers[series_key].setVisible(visible)  # type: ignore[attr-defined]
 
@@ -342,9 +416,16 @@ class PlotManager:
         self._price_panel.ax.reset()
         self._volume_panel.ax.reset()
 
+        # ax.reset() removes items inside the viewbox; axis price labels are
+        # scene-level items that survive otherwise, so disconnect their signals
+        # and pull them off the scene explicitly.
+        for label_key in list(self._axis_price_labels):
+            self.remove_axis_price_label(label_key)
+
         self._plots.clear()
         self._segments.clear()
         self._vertical_lines.clear()
+        self._horizontal_lines.clear()
         self._markers.clear()
         self._candle_plot = None
         self._volume_plot = None
@@ -356,6 +437,8 @@ class PlotManager:
             list(self._plots.keys())
             + list(self._segments.keys())
             + list(self._vertical_lines.keys())
+            + list(self._horizontal_lines.keys())
+            + list(self._axis_price_labels.keys())
         )
 
     def active_marker_keys(self) -> list[str]:
@@ -416,6 +499,21 @@ class PlotManager:
         if line_key in self._vertical_lines:
             item, target_ax = self._vertical_lines.pop(line_key)
             target_ax.removeItem(item)  # type: ignore[attr-defined]
+
+    def remove_horizontal_line(self, line_key: str) -> None:
+        if line_key in self._horizontal_lines:
+            item, target_ax = self._horizontal_lines.pop(line_key)
+            target_ax.removeItem(item)  # type: ignore[attr-defined]
+
+    def remove_axis_price_label(self, label_key: str) -> None:
+        handle = self._axis_price_labels.pop(label_key, None)
+        if handle is None:
+            return
+        try:
+            handle.viewbox.sigRangeChanged.disconnect(handle.reposition)  # type: ignore[attr-defined]
+        except (TypeError, RuntimeError):
+            pass
+        handle.scene.removeItem(handle.text_item)  # type: ignore[attr-defined]
 
     def remove_marker(self, marker_key: str) -> None:
         # O(1) via the tracking dict — avoids scanning every item on the axis on

@@ -16,6 +16,12 @@ def test_vertical_line_declares_toolbar_add_mode() -> None:
     assert VerticalLineIndicator().add_mode() == ChartExtensionAddMode.TOOLBAR
 
 
+def test_vertical_line_provides_toolbar_icon() -> None:
+    spec = VerticalLineIndicator().toolbar_icon()
+    assert spec is not None
+    assert len(spec.lines) == 3
+
+
 def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()

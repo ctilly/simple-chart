@@ -67,11 +67,14 @@ from simplechart.api import (
     DrawingSession,
     DrawingToolResult,
     ChartExtensionAddMode,
+    AxisPriceLabelRender,
     ChartExtensionRender,
+    HorizontalLineRender,
     HorizontalSegmentRender,
     LINE_STYLE_OPTIONS,
     RENDER_CHART,
     SeriesRender,
+    ToolIconSpec,
     VerticalLineRender,
     all_extensions,
 )
@@ -563,9 +566,15 @@ class MainWindow(QMainWindow):
         for segment in render.segments:
             rendered_keys.add(segment.key)
             self._draw_segment(segment, ind_state, update_legend)
-        for line in render.vertical_lines:
-            rendered_keys.add(line.key)
-            self._draw_vertical_line(line, ind_state)
+        for vline in render.vertical_lines:
+            rendered_keys.add(vline.key)
+            self._draw_vertical_line(vline, ind_state)
+        for hline in render.horizontal_lines:
+            rendered_keys.add(hline.key)
+            self._draw_horizontal_line(hline, ind_state)
+        for label in render.axis_price_labels:
+            rendered_keys.add(label.key)
+            self._draw_axis_price_label(label, ind_state)
         return rendered_keys
 
     def _draw_series(
@@ -623,6 +632,24 @@ class MainWindow(QMainWindow):
         line.visible = visible and line.visible
         self._chart.plot_manager.update_vertical_line(line)
 
+    def _draw_horizontal_line(
+        self,
+        line: HorizontalLineRender,
+        ind_state: ChartExtensionState,
+    ) -> None:
+        visible = ind_state.series_visibility.get(line.key, ind_state.visible)
+        line.visible = visible and line.visible
+        self._chart.plot_manager.update_horizontal_line(line)
+
+    def _draw_axis_price_label(
+        self,
+        label: AxisPriceLabelRender,
+        ind_state: ChartExtensionState,
+    ) -> None:
+        visible = ind_state.series_visibility.get(label.key, ind_state.visible)
+        label.visible = visible and label.visible
+        self._chart.plot_manager.update_axis_price_label(label)
+
     def _draw_markers(
         self,
         render: ChartExtensionRender,
@@ -659,8 +686,12 @@ class MainWindow(QMainWindow):
                 pm.set_visible(series_render.key, series_render.visible)
             for segment in render_pass.render.segments:
                 pm.update_horizontal_segment(segment)
-            for line in render_pass.render.vertical_lines:
-                pm.update_vertical_line(line)
+            for vline in render_pass.render.vertical_lines:
+                pm.update_vertical_line(vline)
+            for hline in render_pass.render.horizontal_lines:
+                pm.update_horizontal_line(hline)
+            for label in render_pass.render.axis_price_labels:
+                pm.update_axis_price_label(label)
             for marker in render_pass.render.markers:
                 pm.update_marker(marker)
         self._preview_keys = new_keys
@@ -681,6 +712,8 @@ class MainWindow(QMainWindow):
         keys = {series.key for series in render.series}
         keys.update(segment.key for segment in render.segments)
         keys.update(line.key for line in render.vertical_lines)
+        keys.update(line.key for line in render.horizontal_lines)
+        keys.update(label.key for label in render.axis_price_labels)
         keys.update(marker.key for marker in render.markers)
         return keys
 
@@ -688,10 +721,13 @@ class MainWindow(QMainWindow):
     # Chart interaction workflow
     # ------------------------------------------------------------------
 
-    def _on_bar_clicked(self, x_pos: float, y_pos: float) -> None:
+    def _on_bar_clicked(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None or self._active_drawing_tool is None:
             return
-        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        event = self._extension_runtime.chart_event(
+            self._current_series, x_pos, y_pos,
+            pixel_size_x=px_x, pixel_size_y=px_y,
+        )
         if self._drawing_session is None:
             result = self._extension_runtime.start_drawing(
                 self._active_drawing_tool,
@@ -707,10 +743,13 @@ class MainWindow(QMainWindow):
         )
         self._handle_drawing_result(result)
 
-    def _on_mouse_move(self, x_pos: float, y_pos: float) -> None:
+    def _on_mouse_move(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None or self._drawing_session is None:
             return
-        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        event = self._extension_runtime.chart_event(
+            self._current_series, x_pos, y_pos,
+            pixel_size_x=px_x, pixel_size_y=px_y,
+        )
         render_pass = self._extension_runtime.preview_drawing(
             self._current_series,
             self._drawing_session,
@@ -750,28 +789,36 @@ class MainWindow(QMainWindow):
         if mutation is not None:
             self._reload_extensions(draw_bars=False, preserve_view=True)
 
-    def _on_drag_start(self, x_pos: float, y_pos: float) -> bool:
+    def _on_drag_start(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> bool:
         if self._current_series is None:
             return False
         event = self._extension_runtime.chart_event(
             self._current_series,
             x_pos,
             y_pos,
+            pixel_size_x=px_x,
+            pixel_size_y=px_y,
         )
         return bool(self._extension_runtime.begin_drag(self._current_series, event))
 
-    def _on_drag_move(self, x_pos: float, y_pos: float) -> None:
+    def _on_drag_move(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None:
             return
-        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        event = self._extension_runtime.chart_event(
+            self._current_series, x_pos, y_pos,
+            pixel_size_x=px_x, pixel_size_y=px_y,
+        )
         render_pass = self._extension_runtime.drag_to(self._current_series, event)
         if render_pass is not None:
             self._draw_drag_render(render_pass)
 
-    def _on_drag_finish(self, x_pos: float, y_pos: float) -> None:
+    def _on_drag_finish(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None:
             return
-        event = self._extension_runtime.chart_event(self._current_series, x_pos, y_pos)
+        event = self._extension_runtime.chart_event(
+            self._current_series, x_pos, y_pos,
+            pixel_size_x=px_x, pixel_size_y=px_y,
+        )
         render_pass = self._extension_runtime.drag_to(self._current_series, event)
         if render_pass is not None:
             self._draw_drag_render(render_pass)
@@ -782,7 +829,7 @@ class MainWindow(QMainWindow):
         self._extension_runtime.cancel_drag()
         self._reload_extensions(draw_bars=False, preserve_view=True)
 
-    def _on_bar_right_clicked(self, x_pos: float, y_pos: float) -> None:
+    def _on_bar_right_clicked(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         """Right-click on a bar: show context menu."""
         if self._current_series is None:
             return
@@ -791,6 +838,8 @@ class MainWindow(QMainWindow):
             x_pos,
             y_pos,
             button="right",
+            pixel_size_x=px_x,
+            pixel_size_y=px_y,
         )
         if self._drawing_session is None and self._show_drawing_context_menu(event):
             return
@@ -925,6 +974,16 @@ class MainWindow(QMainWindow):
             line.key
             for render_pass in render_passes
             for line in render_pass.render.vertical_lines
+        )
+        active_series_keys.update(
+            line.key
+            for render_pass in render_passes
+            for line in render_pass.render.horizontal_lines
+        )
+        active_series_keys.update(
+            label.key
+            for render_pass in render_passes
+            for label in render_pass.render.axis_price_labels
         )
         active_marker_keys: set[str] = {
             marker.key
@@ -1088,10 +1147,10 @@ class MainWindow(QMainWindow):
             )
             self._reload_extensions()
 
-    def _drawing_tool_entries(self) -> list[tuple[str, str]]:
+    def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:
         registry = all_extensions()
         return [
-            (name, cls().label())
+            (name, cls().label(), cls().toolbar_icon())
             for name, cls in sorted(registry.items())
             if cls().add_mode() == ChartExtensionAddMode.TOOLBAR
         ]

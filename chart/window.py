@@ -40,6 +40,7 @@ from chart.panel import ExtensionPanelSlot, Panel, PanelType
 from chart.plot_manager import PlotManager
 from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
 from chart.viewport import install_extension_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
+from simplechart.api import ToolIconSpec
 
 
 class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
@@ -81,7 +82,7 @@ class ChartWidget(QWidget):
         on_remove:    Callable[[str], None],
         on_add:       Callable[[], None],
         on_drawing_tool: Callable[[str], None],
-        drawing_tools: list[tuple[str, str]],
+        drawing_tools: list[tuple[str, str, ToolIconSpec | None]],
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)

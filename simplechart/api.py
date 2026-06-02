@@ -87,6 +87,10 @@ EXPORTS
   SeriesRender                 Render description for a line series
   HorizontalSegmentRender      Render description for a horizontal line segment
   VerticalLineRender           Render description for a full-height vertical line
+  HorizontalLineRender         Render description for a full-width horizontal line
+  AxisPriceLabelRender         Render description for a price label on the price axis
+  ToolIconLine                 One line segment in a toolbar icon
+  ToolIconSpec                 Declarative spec for a tool's toolbar icon
   MarkerRender                 Render description for a price-chart marker
   ChartExtensionRender         Render output produced by an extension
   ChartEvent                   Generic chart interaction event
@@ -114,6 +118,7 @@ EXPORTS
 
 from simplechart.extensions._base import (  # noqa: F401
     RENDER_CHART,               # "chart" — default render_target() return value
+    AxisPriceLabelRender,       # axis-anchored price label render primitive
     ChartEvent,                 # generic chart interaction event
     ChartExtension,             # ABC: subclass this for every extension
     ChartExtensionAction,       # user-triggered extension action
@@ -128,11 +133,14 @@ from simplechart.extensions._base import (  # noqa: F401
     DrawingToolResult,          # drawing-tool advance result
     DragSession,                # active extension drag state
     HitTestResult,              # interactive handle hit-test result
+    HorizontalLineRender,       # full-width horizontal line render primitive
     HorizontalSegmentRender,    # horizontal line segment render primitive
     LINE_STYLE_OPTIONS,         # ["solid", "dash", "dot", "dash_dot"]
     MarkerRender,               # price-chart marker render primitive
     SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
     SeriesRender,               # line series render primitive
+    ToolIconLine,               # one line segment of a toolbar icon
+    ToolIconSpec,                # declarative toolbar icon for a tool
     VerticalLineRender,         # full-height vertical line render primitive
 )
 from simplechart.extensions._registry import (  # noqa: F401
@@ -158,6 +166,7 @@ from data.calendar import (    # noqa: F401
 
 __all__: list[str] = [
     "AxisPolicy",
+    "AxisPriceLabelRender",
     "Bar",
     "ChartEvent",
     "ChartExtension",
@@ -175,6 +184,7 @@ __all__: list[str] = [
     "DrawingToolResult",
     "DragSession",
     "HitTestResult",
+    "HorizontalLineRender",
     "HorizontalSegmentRender",
     "LINE_STYLE_OPTIONS",
     "MarkerRender",
@@ -182,6 +192,8 @@ __all__: list[str] = [
     "RENDER_CHART",
     "SeriesFill",
     "SeriesRender",
+    "ToolIconLine",
+    "ToolIconSpec",
     "VerticalLineRender",
     "bars_for_n_days",
     "register_extension",

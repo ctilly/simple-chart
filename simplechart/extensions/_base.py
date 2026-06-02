@@ -177,6 +177,44 @@ class VerticalLineRender:
 
 
 @dataclass
+class HorizontalLineRender:
+    key: str
+    y_value: float
+    label: str
+    color: str
+    line_width: float
+    line_style: str = "solid"
+    render_target: str = RENDER_CHART
+    visible: bool = True
+
+
+@dataclass
+class AxisPriceLabelRender:
+    key: str
+    y_value: float
+    text: str
+    fill_color: str
+    text_color: str
+    render_target: str = RENDER_CHART
+    visible: bool = True
+
+
+@dataclass(frozen=True)
+class ToolIconLine:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+
+@dataclass(frozen=True)
+class ToolIconSpec:
+    lines: tuple[ToolIconLine, ...]
+    color: str = "#555555"
+    line_width: int = 2
+
+
+@dataclass
 class MarkerRender:
     """
     Text marker anchored to a bar/price coordinate on the main price chart.
@@ -200,6 +238,8 @@ class ChartExtensionRender:
     series: list[SeriesRender] = field(default_factory=list)
     segments: list[HorizontalSegmentRender] = field(default_factory=list)
     vertical_lines: list[VerticalLineRender] = field(default_factory=list)
+    horizontal_lines: list[HorizontalLineRender] = field(default_factory=list)
+    axis_price_labels: list[AxisPriceLabelRender] = field(default_factory=list)
     markers: list[MarkerRender] = field(default_factory=list)
 
 
@@ -211,6 +251,8 @@ class ChartEvent:
     timestamp_ms: int | None
     button: str = "left"
     modifiers: frozenset[str] = field(default_factory=frozenset)
+    pixel_size_x: float = 0.0
+    pixel_size_y: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -485,6 +527,9 @@ class ChartExtension(ABC):
 
     def add_mode(self) -> ChartExtensionAddMode:
         return ChartExtensionAddMode.DIALOG
+
+    def toolbar_icon(self) -> "ToolIconSpec | None":
+        return None
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return True

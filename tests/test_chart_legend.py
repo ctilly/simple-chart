@@ -12,7 +12,7 @@ def test_chart_legend_toggles_drawing_tool_palette(qtbot) -> None:  # type: igno
         on_remove=lambda _: None,
         on_add=lambda: None,
         on_drawing_tool=selected.append,
-        drawing_tools=[("trendline", "Trend Line")],
+        drawing_tools=[("trendline", "Trend Line", None)],
     )
     qtbot.addWidget(legend)
     legend.show()

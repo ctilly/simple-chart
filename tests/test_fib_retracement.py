@@ -17,6 +17,12 @@ def test_fib_declares_toolbar_add_mode() -> None:
     assert FibonacciRetracementIndicator().add_mode() == ChartExtensionAddMode.TOOLBAR
 
 
+def test_fib_provides_toolbar_icon() -> None:
+    spec = FibonacciRetracementIndicator().toolbar_icon()
+    assert spec is not None
+    assert len(spec.lines) == 4
+
+
 def test_fib_preview_upward_swing_wick_levels() -> None:
     indicator = FibonacciRetracementIndicator()
     series = _series()

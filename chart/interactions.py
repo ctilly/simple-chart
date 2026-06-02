@@ -65,38 +65,38 @@ class ChartInteractions:
         """
         self._price_ax = price_ax
         self._master   = master
-        self._bar_clicked_cb:       Callable[[float, float], None] | None = None
-        self._bar_right_clicked_cb: Callable[[float, float], None] | None = None
-        self._drag_start_cb:  Callable[[float, float], bool] | None = None
-        self._drag_move_cb:   Callable[[float, float], None] | None = None
-        self._drag_finish_cb: Callable[[float, float], None] | None = None
+        self._bar_clicked_cb:       Callable[[float, float, float, float], None] | None = None
+        self._bar_right_clicked_cb: Callable[[float, float, float, float], None] | None = None
+        self._drag_start_cb:  Callable[[float, float, float, float], bool] | None = None
+        self._drag_move_cb:   Callable[[float, float, float, float], None] | None = None
+        self._drag_finish_cb: Callable[[float, float, float, float], None] | None = None
         self._drag_cancel_cb: Callable[[], None] | None = None
-        self._mouse_move_cb:  Callable[[float, float], None] | None = None
+        self._mouse_move_cb:  Callable[[float, float, float, float], None] | None = None
         self._drag_active = False
         self._connect()
         self._patch_drag_handler()
 
-    def on_bar_clicked(self, callback: Callable[[float, float], None]) -> None:
-        """Register a handler for left-click on a bar. Receives bar index."""
+    def on_bar_clicked(self, callback: Callable[[float, float, float, float], None]) -> None:
+        """Register a handler for left-click on a bar. Receives bar index, price, and pixel sizes."""
         self._bar_clicked_cb = callback
 
-    def on_bar_right_clicked(self, callback: Callable[[float, float], None]) -> None:
-        """Register a handler for right-click on a bar. Receives bar index."""
+    def on_bar_right_clicked(self, callback: Callable[[float, float, float, float], None]) -> None:
+        """Register a handler for right-click on a bar. Receives bar index, price, and pixel sizes."""
         self._bar_right_clicked_cb = callback
 
-    def on_drag_start(self, callback: Callable[[float, float], bool]) -> None:
+    def on_drag_start(self, callback: Callable[[float, float, float, float], bool]) -> None:
         self._drag_start_cb = callback
 
-    def on_drag_move(self, callback: Callable[[float, float], None]) -> None:
+    def on_drag_move(self, callback: Callable[[float, float, float, float], None]) -> None:
         self._drag_move_cb = callback
 
-    def on_drag_finish(self, callback: Callable[[float, float], None]) -> None:
+    def on_drag_finish(self, callback: Callable[[float, float, float, float], None]) -> None:
         self._drag_finish_cb = callback
 
     def on_drag_cancel(self, callback: Callable[[], None]) -> None:
         self._drag_cancel_cb = callback
 
-    def on_mouse_move(self, callback: Callable[[float, float], None]) -> None:
+    def on_mouse_move(self, callback: Callable[[float, float, float, float], None]) -> None:
         self._mouse_move_cb = callback
 
     def cancel_drag(self) -> bool:
@@ -149,7 +149,8 @@ class ChartInteractions:
                         and self._drag_finish_cb is not None
                     ):
                         pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
-                        self._drag_finish_cb(pos.x(), pos.y())
+                        px_x, px_y = self._view_pixel_size()
+                        self._drag_finish_cb(pos.x(), pos.y(), px_x, px_y)
                     else:
                         self.cancel_drag()
                     self._drag_active = False
@@ -161,7 +162,8 @@ class ChartInteractions:
                 if self._scene_pos_in_price_panel(event):
                     if self._drag_move_cb is not None:
                         pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
-                        self._drag_move_cb(pos.x(), pos.y())
+                        px_x, px_y = self._view_pixel_size()
+                        self._drag_move_cb(pos.x(), pos.y(), px_x, px_y)
                 else:
                     self.cancel_drag()
                 event.accept()  # type: ignore[attr-defined]
@@ -178,7 +180,8 @@ class ChartInteractions:
                     viewbox.win._isMouseLeftDrag = True
                     if self._drag_move_cb is not None:
                         pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
-                        self._drag_move_cb(pos.x(), pos.y())
+                        px_x, px_y = self._view_pixel_size()
+                        self._drag_move_cb(pos.x(), pos.y(), px_x, px_y)
                     event.accept()  # type: ignore[attr-defined]
                     return
 
@@ -193,12 +196,18 @@ class ChartInteractions:
         if self._drag_start_cb is None:
             return False
 
+        px_x, px_y = self._view_pixel_size()
         start_pos = viewbox.mapToView(event.buttonDownPos())  # type: ignore[attr-defined]
-        if self._drag_start_cb(start_pos.x(), start_pos.y()):
+        if self._drag_start_cb(start_pos.x(), start_pos.y(), px_x, px_y):
             return True
 
         current_pos = viewbox.mapToView(event.pos())  # type: ignore[attr-defined]
-        return self._drag_start_cb(current_pos.x(), current_pos.y())
+        return self._drag_start_cb(current_pos.x(), current_pos.y(), px_x, px_y)
+
+    def _view_pixel_size(self) -> tuple[float, float]:
+        """Return (data-units-per-pixel-x, data-units-per-pixel-y) from the price viewbox."""
+        size = self._price_ax.vb.viewPixelSize()  # type: ignore[attr-defined]
+        return float(size[0]), float(size[1])
 
     def _scene_pos_in_price_panel(self, event: object) -> bool:
         rect = self._price_ax.vb.sceneBoundingRect()  # type: ignore[attr-defined]
@@ -224,16 +233,17 @@ class ChartInteractions:
         pos = self._price_ax.vb.mapSceneToView(event.scenePos())  # type: ignore[attr-defined]
         x_pos: float = pos.x()
         y_pos: float = pos.y()
+        px_x, px_y = self._view_pixel_size()
 
         button = event.button()  # type: ignore[attr-defined]
 
         if button == Qt.MouseButton.LeftButton:
             if self._bar_clicked_cb is not None:
-                self._bar_clicked_cb(x_pos, y_pos)
+                self._bar_clicked_cb(x_pos, y_pos, px_x, px_y)
 
         elif button == Qt.MouseButton.RightButton:
             if self._bar_right_clicked_cb is not None:
-                self._bar_right_clicked_cb(x_pos, y_pos)
+                self._bar_right_clicked_cb(x_pos, y_pos, px_x, px_y)
 
     def _on_scene_mouse_moved(self, scene_pos: object) -> None:
         if self._mouse_move_cb is None:
@@ -242,4 +252,5 @@ class ChartInteractions:
         if not rect.contains(scene_pos):
             return
         pos = self._price_ax.vb.mapSceneToView(scene_pos)  # type: ignore[attr-defined]
-        self._mouse_move_cb(pos.x(), pos.y())
+        px_x, px_y = self._view_pixel_size()
+        self._mouse_move_cb(pos.x(), pos.y(), px_x, px_y)

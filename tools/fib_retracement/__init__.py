@@ -24,6 +24,8 @@ from simplechart.api import (
     LINE_STYLE_OPTIONS,
     MarkerRender,
     OHLCVSeries,
+    ToolIconLine,
+    ToolIconSpec,
     register_extension,
     register_store_handler,
 )
@@ -63,6 +65,12 @@ class FibonacciRetracementIndicator(ChartExtension):
 
     def add_mode(self) -> ChartExtensionAddMode:
         return ChartExtensionAddMode.TOOLBAR
+
+    def toolbar_icon(self) -> ToolIconSpec:
+        return ToolIconSpec(lines=tuple(
+            ToolIconLine(3, y, 3 + length, y)
+            for y, length in ((5, 18), (9, 14), (14, 11), (19, 18))
+        ))
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return False
