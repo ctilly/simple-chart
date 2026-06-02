@@ -17,6 +17,7 @@ from simplechart.extensions._base import (
     DragSession,
     DrawingSession,
     DrawingToolResult,
+    FloatParam,
     HitTestResult,
     HorizontalLineRender,
     HorizontalSegmentRender,
@@ -40,6 +41,7 @@ from simplechart.api import (
     DrawingSession as PublicDrawingSession,
     DrawingToolResult as PublicDrawingToolResult,
     DragSession as PublicDragSession,
+    FloatParam as PublicFloatParam,
     HitTestResult as PublicHitTestResult,
     HorizontalLineRender as PublicHorizontalLineRender,
     HorizontalSegmentRender as PublicHorizontalSegmentRender,
@@ -74,6 +76,7 @@ def test_render_primitives_are_public_api() -> None:
     assert PublicDrawingSession is DrawingSession
     assert PublicDrawingToolResult is DrawingToolResult
     assert PublicDragSession is DragSession
+    assert PublicFloatParam is FloatParam
     assert PublicHitTestResult is HitTestResult
     assert public_register_extension is register_extension
     assert public_get_extension("rsi").name() == "rsi"

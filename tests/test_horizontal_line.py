@@ -145,7 +145,8 @@ def test_horizontal_line_config_accepts_in_range_price(tmp_path: Path) -> None:
 
         request = runtime.config_request("horizontal_line_1")
         assert request is not None
-        assert request.params["price"] == 100.0
+        assert request.params["price"].value == 100.0
+        assert request.params["price"].step == 0.01
 
         edited = dict(request.params)
         edited["price"] = 120.0

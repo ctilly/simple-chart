@@ -18,6 +18,7 @@ from simplechart.api import (
     ChoiceParam,
     DragSession,
     DrawingToolResult,
+    FloatParam,
     HitTestResult,
     HorizontalLineRender,
     LINE_STYLE_OPTIONS,
@@ -208,7 +209,7 @@ class HorizontalLineIndicator(ChartExtension):
         return ChartExtensionConfig(
             label="Horizontal Line",
             params={
-                "price": line.price,
+                "price": FloatParam(line.price, step=0.01),
                 "color": line.color,
                 "line_width": line.line_width,
                 "line_style": ChoiceParam(line.line_style, LINE_STYLE_OPTIONS),
@@ -227,7 +228,7 @@ class HorizontalLineIndicator(ChartExtension):
         line = horizontal_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
-        new_price = float(edited_params["price"])
+        new_price = _float_value(edited_params["price"])
         if y_range is not None:
             y_min, y_max = y_range
             if new_price < y_min or new_price > y_max:
@@ -329,6 +330,12 @@ def _choice_value(value: Any) -> str:
     if isinstance(value, ChoiceParam):
         return value.value
     return str(value)
+
+
+def _float_value(value: Any) -> float:
+    if isinstance(value, FloatParam):
+        return value.value
+    return float(value)
 
 
 register_extension(HorizontalLineIndicator)

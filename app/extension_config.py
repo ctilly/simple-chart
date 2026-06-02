@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from simplechart.api import ChoiceParam
+from simplechart.api import ChoiceParam, FloatParam
 
 
 class ColorButton(QPushButton):
@@ -166,6 +166,14 @@ class ExtensionConfigDialog(QDialog):
             spin.setRange(1, 9999)
             spin.setValue(value)
             return spin
+
+        if isinstance(value, FloatParam):
+            dspin = QDoubleSpinBox()
+            dspin.setRange(value.minimum, value.maximum)
+            dspin.setDecimals(value.decimals)
+            dspin.setSingleStep(value.step)
+            dspin.setValue(value.value)
+            return dspin
 
         if isinstance(value, float):
             dspin = QDoubleSpinBox()

@@ -134,6 +134,15 @@ class ChoiceParam:
     options: list[str]
 
 
+@dataclass(frozen=True)
+class FloatParam:
+    value: float
+    minimum: float = 0.0
+    maximum: float = 1_000_000.0
+    step: float = 1.0
+    decimals: int = 2
+
+
 @dataclass
 class SeriesRender:
     key: str

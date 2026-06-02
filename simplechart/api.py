@@ -81,6 +81,7 @@ EXPORTS
   ChartExtension               ABC to subclass for every extension
   ChartExtensionAddMode        Declares where/how an extension can be added
   ChoiceParam                  Dropdown parameter (value + allowed options)
+  FloatParam                   Float parameter with range/step/decimals (spinner config)
   LINE_STYLE_OPTIONS           Standard line style strings for ChoiceParam
   RENDER_CHART                 render_target() constant for chart extensions
   SeriesFill                   Declares a shaded fill between two series
@@ -132,6 +133,7 @@ from simplechart.extensions._base import (  # noqa: F401
     DrawingSession,             # active toolbar drawing-tool state
     DrawingToolResult,          # drawing-tool advance result
     DragSession,                # active extension drag state
+    FloatParam,                 # float param with range/step/decimals
     HitTestResult,              # interactive handle hit-test result
     HorizontalLineRender,       # full-width horizontal line render primitive
     HorizontalSegmentRender,    # horizontal line segment render primitive
@@ -183,6 +185,7 @@ __all__: list[str] = [
     "DrawingStore",
     "DrawingToolResult",
     "DragSession",
+    "FloatParam",
     "HitTestResult",
     "HorizontalLineRender",
     "HorizontalSegmentRender",
