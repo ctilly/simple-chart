@@ -221,6 +221,7 @@ class VerticalLineIndicator(ChartExtension):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
+        y_range: tuple[float, float] | None = None,
     ) -> ChartExtensionMutation | None:
         line = vertical_line_for_key(params.get("lines", []), series_key)
         if line is None:

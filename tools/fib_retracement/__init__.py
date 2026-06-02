@@ -283,6 +283,7 @@ class FibonacciRetracementIndicator(ChartExtension):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
+        y_range: tuple[float, float] | None = None,
     ) -> ChartExtensionMutation | None:
         drawing = fib_drawing_for_key(params.get("drawings", []), series_key)
         if drawing is None:

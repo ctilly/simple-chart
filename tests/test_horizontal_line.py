@@ -128,6 +128,85 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
     assert state.get_extension("horizontal_line") is None
 
 
+def test_horizontal_line_config_accepts_in_range_price(tmp_path: Path) -> None:
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _daily_series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        runtime.start_drawing(
+            "horizontal_line",
+            series,
+            runtime.chart_event(series, 1.0, 100.0),
+        )
+        runtime.render_all(series)
+
+        request = runtime.config_request("horizontal_line_1")
+        assert request is not None
+        assert request.params["price"] == 100.0
+
+        edited = dict(request.params)
+        edited["price"] = 120.0
+        runtime.apply_config("horizontal_line_1", edited, y_range=(50.0, 200.0))
+        moved = runtime.render_all(series)[0].render.horizontal_lines[0]
+
+    assert moved.y_value == 120.0
+
+
+def test_horizontal_line_config_rejects_out_of_range_price(tmp_path: Path) -> None:
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _daily_series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        runtime.start_drawing(
+            "horizontal_line",
+            series,
+            runtime.chart_event(series, 1.0, 100.0),
+        )
+        runtime.render_all(series)
+
+        request = runtime.config_request("horizontal_line_1")
+        assert request is not None
+
+        edited = dict(request.params)
+        edited["price"] = 500.0
+        runtime.apply_config("horizontal_line_1", edited, y_range=(50.0, 200.0))
+        unchanged = runtime.render_all(series)[0].render.horizontal_lines[0]
+
+    assert unchanged.y_value == 100.0
+
+
+def test_horizontal_line_config_no_y_range_accepts_any_price(tmp_path: Path) -> None:
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _daily_series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        runtime.start_drawing(
+            "horizontal_line",
+            series,
+            runtime.chart_event(series, 1.0, 100.0),
+        )
+        runtime.render_all(series)
+
+        request = runtime.config_request("horizontal_line_1")
+        assert request is not None
+
+        edited = dict(request.params)
+        edited["price"] = 99999.0
+        runtime.apply_config("horizontal_line_1", edited)
+        moved = runtime.render_all(series)[0].render.horizontal_lines[0]
+
+    assert moved.y_value == 99999.0
+
+
 def _daily_series() -> OHLCVSeries:
     start = datetime(2026, 1, 2, tzinfo=timezone.utc)
     return OHLCVSeries(

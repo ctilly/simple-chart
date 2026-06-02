@@ -208,6 +208,7 @@ class HorizontalLineIndicator(ChartExtension):
         return ChartExtensionConfig(
             label="Horizontal Line",
             params={
+                "price": line.price,
                 "color": line.color,
                 "line_width": line.line_width,
                 "line_style": ChoiceParam(line.line_style, LINE_STYLE_OPTIONS),
@@ -221,17 +222,23 @@ class HorizontalLineIndicator(ChartExtension):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
+        y_range: tuple[float, float] | None = None,
     ) -> ChartExtensionMutation | None:
         line = horizontal_line_for_key(params.get("lines", []), series_key)
         if line is None:
             return None
+        new_price = float(edited_params["price"])
+        if y_range is not None:
+            y_min, y_max = y_range
+            if new_price < y_min or new_price > y_max:
+                return None
         return ChartExtensionMutation(
             extension_name=self.name(),
             operation="update",
             payload={
                 "record": HorizontalLineRecord(
                     symbol=line.symbol,
-                    price=line.price,
+                    price=new_price,
                     timeframe=line.timeframe,
                     color=str(edited_params["color"]),
                     line_width=float(edited_params["line_width"]),

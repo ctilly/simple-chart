@@ -1026,7 +1026,11 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted:
-            self._extension_runtime.apply_config(series_key, dialog.result_params())
+            self._extension_runtime.apply_config(
+                series_key,
+                dialog.result_params(),
+                y_range=self._price_y_range(),
+            )
             self._reload_extensions(draw_bars=False)
 
     def _on_extension_remove(self, series_key: str) -> None:
@@ -1161,6 +1165,12 @@ class MainWindow(QMainWindow):
             self._drawing_session = None
             self._clear_preview_render()
         self._active_drawing_tool = extension_name
+
+    def _price_y_range(self) -> tuple[float, float] | None:
+        viewbox = self._chart.plot_manager.price_viewbox()
+        view_range = viewbox.viewRange()
+        y_min, y_max = view_range[1]
+        return (float(y_min), float(y_max))
 
     def closeEvent(self, event: object) -> None:
         """Clean up on close."""

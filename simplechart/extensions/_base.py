@@ -553,6 +553,7 @@ class ChartExtension(ABC):
         series_key: str,
         params: dict[str, Any],
         edited_params: dict[str, Any],
+        y_range: tuple[float, float] | None = None,
     ) -> ChartExtensionMutation | None:
         return None
 

@@ -334,7 +334,12 @@ class ChartExtensionRuntime:
             params=ext_state.params,
         )
 
-    def apply_config(self, series_key: str, params: dict[str, Any]) -> None:
+    def apply_config(
+        self,
+        series_key: str,
+        params: dict[str, Any],
+        y_range: tuple[float, float] | None = None,
+    ) -> None:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
             return
@@ -343,6 +348,7 @@ class ChartExtensionRuntime:
             series_key,
             self._params_for_state(ext_state),
             params,
+            y_range=y_range,
         )
         if mutation is not None:
             self.apply_mutation(mutation)
