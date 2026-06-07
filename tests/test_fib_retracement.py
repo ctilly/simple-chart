@@ -184,6 +184,8 @@ def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
         assert hit.handle_key == "fib_retracement_ref_-1_ref_236"
         assert runtime.begin_drag(series, runtime.chart_event(series, 3.0, 107.46))
         render_pass = runtime.drag_to(series, runtime.chart_event(series, 4.0, 90.0))
+        runtime.finish_drag(series, runtime.chart_event(series, 4.0, 90.0))
+        dragged = runtime.render_all(series)[0].render
 
     assert render_pass is not None
     assert {segment.key for segment in render_pass.render.segments} == {
@@ -193,6 +195,13 @@ def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
         "fib_retracement_ref_-1_ref_618",
         "fib_retracement_ref_-1_ref_1000",
     }
+    assert [round(segment.y_value, 2) for segment in dragged.segments] == [
+        93.78,
+        96.11,
+        98.0,
+        99.89,
+        106.0,
+    ]
 
 
 def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:

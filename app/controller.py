@@ -107,6 +107,7 @@ _DEFAULT_LOOKBACK_DAYS = 600
 _INTRADAY_SHORT_LOOKBACK = 6     # for 1m only
 _INTRADAY_MEDIUM_LOOKBACK = 55   # for 5m/15m/30m/39m/65m
 _SNAPSHOT_REFRESH_MS = 60_000
+_DRAWING_PREVIEW_FRAME_MS = 16
 
 
 def _lookback_days(tf: Timeframe) -> int:
@@ -286,6 +287,11 @@ class MainWindow(QMainWindow):
         self._active_drawing_tool: str | None = None
         self._drawing_session: DrawingSession | None = None
         self._preview_keys: set[str] = set()
+        self._pending_drawing_preview_event: ChartEvent | None = None
+        self._drawing_preview_timer = QTimer(self)
+        self._drawing_preview_timer.setSingleShot(True)
+        self._drawing_preview_timer.setInterval(_DRAWING_PREVIEW_FRAME_MS)
+        self._drawing_preview_timer.timeout.connect(self._flush_drawing_preview)
         for name, params in INITIAL_EXTENSIONS:
             self._state.extensions.append(
                 ChartExtensionState(name=name, params=dict(params))
@@ -746,10 +752,21 @@ class MainWindow(QMainWindow):
     def _on_mouse_move(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None or self._drawing_session is None:
             return
-        event = self._extension_runtime.chart_event(
+        self._pending_drawing_preview_event = self._extension_runtime.chart_event(
             self._current_series, x_pos, y_pos,
             pixel_size_x=px_x, pixel_size_y=px_y,
         )
+        if not self._drawing_preview_timer.isActive():
+            self._drawing_preview_timer.start()
+
+    def _flush_drawing_preview(self) -> None:
+        if self._current_series is None or self._drawing_session is None:
+            self._pending_drawing_preview_event = None
+            return
+        event = self._pending_drawing_preview_event
+        self._pending_drawing_preview_event = None
+        if event is None:
+            return
         render_pass = self._extension_runtime.preview_drawing(
             self._current_series,
             self._drawing_session,
@@ -771,6 +788,7 @@ class MainWindow(QMainWindow):
             )
             self._draw_preview_render(render_pass)
         if result.cancel or result.done:
+            self._clear_pending_drawing_preview()
             self._drawing_session = None
             self._clear_preview_render()
             if result.deactivate_tool:
@@ -784,6 +802,7 @@ class MainWindow(QMainWindow):
         if self._drawing_session is None:
             return
         mutation = self._extension_runtime.cancel_drawing(self._drawing_session)
+        self._clear_pending_drawing_preview()
         self._drawing_session = None
         self._clear_preview_render()
         if mutation is not None:
@@ -1162,9 +1181,15 @@ class MainWindow(QMainWindow):
     def _on_drawing_tool_selected(self, extension_name: str) -> None:
         if self._drawing_session is not None:
             self._extension_runtime.cancel_drawing(self._drawing_session)
+            self._clear_pending_drawing_preview()
             self._drawing_session = None
             self._clear_preview_render()
         self._active_drawing_tool = extension_name
+
+    def _clear_pending_drawing_preview(self) -> None:
+        self._pending_drawing_preview_event = None
+        if self._drawing_preview_timer.isActive():
+            self._drawing_preview_timer.stop()
 
     def _price_y_range(self) -> tuple[float, float] | None:
         viewbox = self._chart.plot_manager.price_viewbox()

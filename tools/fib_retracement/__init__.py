@@ -181,10 +181,13 @@ class FibonacciRetracementIndicator(ChartExtension):
             layout = _drawing_layout(series, drawing, timestamps)
             if layout is None:
                 continue
-            if _end_handle_hit(series, layout, event):
+            level_hit_key = _level_hit_key(drawing, key, layout, event, visible_keys)
+            if _end_handle_hit(series, layout, event) and (
+                level_hit_key is None or level_hit_key == key
+            ):
                 return HitTestResult(self.name(), hit_key, cursor="drag", priority=20)
-            if _level_hit(layout, event):
-                return HitTestResult(self.name(), hit_key, cursor=None, priority=10)
+            if level_hit_key is not None:
+                return HitTestResult(self.name(), level_hit_key, cursor=None, priority=10)
         return None
 
     def begin_drag(
@@ -194,9 +197,10 @@ class FibonacciRetracementIndicator(ChartExtension):
         hit: HitTestResult,
     ) -> DragSession:
         drawings = _drawings_for_series(params, series)
+        handle_key = _drawing_base_key(hit.handle_key)
         return DragSession(
             extension_name=self.name(),
-            handle_key=hit.handle_key,
+            handle_key=handle_key,
             original_params={"drawings": list(drawings)},
             working_params={"drawings": list(drawings)},
         )
@@ -429,7 +433,7 @@ def _append_drawing_render(
     for level in FIB_LEVELS:
         if level not in drawing.visible_levels:
             continue
-        level_key = key if level == 0.0 else f"{key}_ref_{_level_key(level)}"
+        level_key = _level_render_key(key, level)
         price = _level_price(layout, level)
         render.segments.append(
             HorizontalSegmentRender(
@@ -614,6 +618,12 @@ def _level_key(level: float) -> str:
     return f"{level * 1000.0:.0f}"
 
 
+def _level_render_key(drawing_key: str, level: float) -> str:
+    if level == 0.0:
+        return drawing_key
+    return f"{drawing_key}_ref_{_level_key(level)}"
+
+
 def _label_index(
     drawing: FibRetracementRecord,
     layout: _DrawingLayout,
@@ -624,16 +634,29 @@ def _label_index(
     return max(0, bar_count - 1)
 
 
-def _level_hit(layout: _DrawingLayout, event: ChartEvent) -> bool:
+def _level_hit_key(
+    drawing: FibRetracementRecord,
+    drawing_key: str,
+    layout: _DrawingLayout,
+    event: ChartEvent,
+    visible_keys: set[str],
+) -> str | None:
     if event.x < min(layout.start_index, layout.end_index) - _HIT_X_BUFFER:
-        return False
+        return None
     low = min(layout.start_price, layout.end_price)
     high = max(layout.start_price, layout.end_price)
     buffer = max(abs(high - low) * 0.015, max(abs(high), 1.0) * 0.0005)
-    return any(
-        abs(event.y - _level_price(layout, level)) <= buffer
-        for level in FIB_LEVELS
-    )
+    candidates: list[tuple[float, float, str]] = []
+    for level in drawing.visible_levels:
+        level_key = _level_render_key(drawing_key, level)
+        if level_key not in visible_keys:
+            continue
+        distance = abs(event.y - _level_price(layout, level))
+        if distance <= buffer:
+            candidates.append((distance, level, level_key))
+    if not candidates:
+        return None
+    return min(candidates)[2]
 
 
 def _end_handle_hit(
