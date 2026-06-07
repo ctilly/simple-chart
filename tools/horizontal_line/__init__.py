@@ -229,10 +229,6 @@ class HorizontalLineIndicator(ChartExtension):
         if line is None:
             return None
         new_price = _float_value(edited_params["price"])
-        if y_range is not None:
-            y_min, y_max = y_range
-            if new_price < y_min or new_price > y_max:
-                return None
         return ChartExtensionMutation(
             extension_name=self.name(),
             operation="update",

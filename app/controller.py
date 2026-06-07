@@ -1048,7 +1048,6 @@ class MainWindow(QMainWindow):
             self._extension_runtime.apply_config(
                 series_key,
                 dialog.result_params(),
-                y_range=self._price_y_range(),
             )
             self._reload_extensions(draw_bars=False)
 
@@ -1190,12 +1189,6 @@ class MainWindow(QMainWindow):
         self._pending_drawing_preview_event = None
         if self._drawing_preview_timer.isActive():
             self._drawing_preview_timer.stop()
-
-    def _price_y_range(self) -> tuple[float, float] | None:
-        viewbox = self._chart.plot_manager.price_viewbox()
-        view_range = viewbox.viewRange()
-        y_min, y_max = view_range[1]
-        return (float(y_min), float(y_max))
 
     def closeEvent(self, event: object) -> None:
         """Clean up on close."""

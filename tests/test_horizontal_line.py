@@ -156,7 +156,7 @@ def test_horizontal_line_config_accepts_in_range_price(tmp_path: Path) -> None:
     assert moved.y_value == 120.0
 
 
-def test_horizontal_line_config_rejects_out_of_range_price(tmp_path: Path) -> None:
+def test_horizontal_line_config_accepts_price_outside_view_range(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
@@ -177,9 +177,9 @@ def test_horizontal_line_config_rejects_out_of_range_price(tmp_path: Path) -> No
         edited = dict(request.params)
         edited["price"] = 500.0
         runtime.apply_config("horizontal_line_1", edited, y_range=(50.0, 200.0))
-        unchanged = runtime.render_all(series)[0].render.horizontal_lines[0]
+        moved = runtime.render_all(series)[0].render.horizontal_lines[0]
 
-    assert unchanged.y_value == 100.0
+    assert moved.y_value == 500.0
 
 
 def test_horizontal_line_config_no_y_range_accepts_any_price(tmp_path: Path) -> None:
