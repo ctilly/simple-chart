@@ -14,6 +14,7 @@ from simplechart.api import (
     DragSession,
     DrawingSession,
     DrawingToolResult,
+    FloatParam,
     HitTestResult,
     HorizontalSegmentRender,
     ChartExtension,
@@ -33,6 +34,7 @@ from simplechart.api import (
 _ANCHOR_MODE_OPTIONS: list[str] = ["swing_wick", "close"]
 _LABEL_POSITION_OPTIONS: list[str] = ["right", "left"]
 _DEFAULT_COLOR = "#4f7cff"
+_DEFAULT_AGE_OFF_DAYS = 2.0
 _HIT_X_BUFFER = 0.65
 _HANDLE_HIT_Y_FRACTION = 0.004
 
@@ -52,6 +54,7 @@ class FibonacciRetracementIndicator(ChartExtension):
             "color": _DEFAULT_COLOR,
             "line_width": 1.0,
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
+            "age_off_days": FloatParam(_DEFAULT_AGE_OFF_DAYS, minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
             "show_price_labels": False,
             "label_position": ChoiceParam("right", _LABEL_POSITION_OPTIONS),
             "show_anchor_handles": True,
@@ -270,6 +273,7 @@ class FibonacciRetracementIndicator(ChartExtension):
                 "color": drawing.color,
                 "line_width": drawing.line_width,
                 "line_style": ChoiceParam(drawing.line_style, LINE_STYLE_OPTIONS),
+                "age_off_days": FloatParam(drawing.age_off_days, minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
                 "show_price_labels": drawing.show_price_labels,
                 "label_position": ChoiceParam(drawing.label_position, _LABEL_POSITION_OPTIONS),
                 "show_anchor_handles": drawing.show_anchor_handles,
@@ -383,6 +387,7 @@ def _drawing_defaults(params: dict[str, Any]) -> dict[str, Any]:
         "color": str(params.get("color", _DEFAULT_COLOR)),
         "line_width": float(params.get("line_width", 1.0)),
         "line_style": _choice_value(params.get("line_style", "solid")),
+        "age_off_days": _float_value(params.get("age_off_days", _DEFAULT_AGE_OFF_DAYS)),
         "show_price_labels": bool(params.get("show_price_labels", False)),
         "label_position": _choice_value(params.get("label_position", "right")),
         "show_anchor_handles": bool(params.get("show_anchor_handles", True)),
@@ -411,6 +416,7 @@ def _session_drawing(
         color=str(defaults["color"]),
         line_width=float(defaults["line_width"]),
         line_style=str(defaults["line_style"]),
+        age_off_days=float(defaults["age_off_days"]),
         show_price_labels=bool(defaults["show_price_labels"]),
         label_position=str(defaults["label_position"]),
         show_anchor_handles=bool(defaults["show_anchor_handles"]),
@@ -557,6 +563,8 @@ def _updated_drag_drawing(
         label_position=drawing.label_position,
         show_anchor_handles=drawing.show_anchor_handles,
         visible_levels=drawing.visible_levels,
+        updated_at_ms=drawing.updated_at_ms,
+        age_off_days=drawing.age_off_days,
         drawing_id=drawing.drawing_id,
     )
 
@@ -575,10 +583,12 @@ def _configured_drawing(
         color=str(params["color"]),
         line_width=float(params["line_width"]),
         line_style=_choice_value(params["line_style"]),
+        age_off_days=_float_value(params["age_off_days"]),
         show_price_labels=bool(params["show_price_labels"]),
         label_position=_choice_value(params["label_position"]),
         show_anchor_handles=bool(params["show_anchor_handles"]),
         visible_levels=_visible_levels_from_params(params),
+        updated_at_ms=drawing.updated_at_ms,
         drawing_id=drawing.drawing_id,
     )
 
@@ -703,6 +713,12 @@ def _choice_value(value: Any) -> str:
     if isinstance(value, ChoiceParam):
         return value.value
     return str(value)
+
+
+def _float_value(value: Any) -> float:
+    if isinstance(value, FloatParam):
+        return value.value
+    return float(value)
 
 
 register_extension(FibonacciRetracementIndicator)

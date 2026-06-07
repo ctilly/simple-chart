@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +11,9 @@ import tools.vertical_line  # noqa: F401
 import tools.fib_retracement  # noqa: F401
 from tools.vertical_line.session_store import VerticalLineStore
 from tools.fib_retracement.session_store import FibRetracementStore
+
+_DAY_MS = 86_400_000
+_VERTICAL_STORE_KEY = "vertical_line.lines"
 
 
 def test_durable_vertical_line_survives_a_restart(tmp_path: Path) -> None:
@@ -108,11 +112,93 @@ def test_fib_drawing_is_volatile_and_gone_after_restart(tmp_path: Path) -> None:
     assert passes == []
 
 
+def test_expired_durable_tool_record_is_deleted(tmp_path: Path) -> None:
+    now_ms = 10 * _DAY_MS
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(str(tmp_path / "t.db")) as cache:
+        cache.put_extension_record(
+            _VERTICAL_STORE_KEY,
+            "SPY",
+            _series_timestamp(2),
+            _vertical_payload(updated_at_ms=now_ms - (2 * _DAY_MS), age_off_days=1.0),
+        )
+        runtime, store = _vertical_line_runtime(state, cache, now_ms=lambda: now_ms)
+        store.load_for_symbol("SPY")
+        passes = runtime.render_all(_series())
+        records = cache.get_extension_records(_VERTICAL_STORE_KEY, "SPY")
+
+    assert passes == []
+    assert records == []
+    assert state.get_extension("vertical_line") is None
+
+
+def test_age_off_zero_never_expires(tmp_path: Path) -> None:
+    now_ms = 10 * _DAY_MS
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(str(tmp_path / "t.db")) as cache:
+        cache.put_extension_record(
+            _VERTICAL_STORE_KEY,
+            "SPY",
+            _series_timestamp(2),
+            _vertical_payload(updated_at_ms=1, age_off_days=0.0),
+        )
+        runtime, store = _vertical_line_runtime(state, cache, now_ms=lambda: now_ms)
+        store.load_for_symbol("SPY")
+        passes = runtime.render_all(_series())
+
+    assert len(passes) == 1
+    assert len(passes[0].render.vertical_lines) == 1
+
+
+def test_tool_update_resets_age_off_clock(tmp_path: Path) -> None:
+    clock = {"now": 1_000}
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(str(tmp_path / "t.db")) as cache:
+        runtime, store = _vertical_line_runtime(state, cache, now_ms=lambda: clock["now"])
+        store.load_for_symbol("SPY")
+        runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
+        runtime.render_all(_series())
+
+        clock["now"] += 59 * _DAY_MS
+        request = runtime.config_request("vertical_line_1")
+        assert request is not None
+        edited = dict(request.params)
+        edited["color"] = "#ff0000"
+        runtime.apply_config("vertical_line_1", edited)
+
+        clock["now"] += 59 * _DAY_MS
+        passes = runtime.render_all(_series())
+
+    assert len(passes) == 1
+    assert len(passes[0].render.vertical_lines) == 1
+
+
+def test_legacy_tool_record_gets_age_off_metadata_without_expiring(tmp_path: Path) -> None:
+    now_ms = 10 * _DAY_MS
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(str(tmp_path / "t.db")) as cache:
+        cache.put_extension_record(
+            _VERTICAL_STORE_KEY,
+            "SPY",
+            _series_timestamp(2),
+            _vertical_payload(),
+        )
+        runtime, store = _vertical_line_runtime(state, cache, now_ms=lambda: now_ms)
+        store.load_for_symbol("SPY")
+        passes = runtime.render_all(_series())
+        records = cache.get_extension_records(_VERTICAL_STORE_KEY, "SPY")
+
+    assert len(passes) == 1
+    assert records[0].payload["updated_at_ms"] == now_ms
+    assert records[0].payload["age_off_days"] == 60.0
+
+
 def _vertical_line_runtime(
     state: State,
     cache: Cache,
+    now_ms: Callable[[], int] | None = None,
 ) -> tuple[ChartExtensionRuntime, VerticalLineStore]:
-    store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
+    store = VerticalLineStore(AppChartExtensionStoreContext(state, cache), now_ms=now_ms)
     runtime = ChartExtensionRuntime(state, cache, ChartExtensionStore(state, cache, [store]), lookback_days=600)
     return runtime, store
 
@@ -136,3 +222,26 @@ def _series() -> OHLCVSeries:
             for i in range(5)
         ],
     )
+
+
+def _series_timestamp(index: int) -> int:
+    return int(_series().bars[index].timestamp.timestamp() * 1000)
+
+
+def _vertical_payload(
+    updated_at_ms: int | None = None,
+    age_off_days: float | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "timeframe": Timeframe.DAILY.value,
+        "color": "#7a7f8c",
+        "line_width": 1.0,
+        "line_style": "solid",
+        "persist_across_timeframes": True,
+        "persist_across_sessions": True,
+    }
+    if updated_at_ms is not None:
+        payload["updated_at_ms"] = updated_at_ms
+    if age_off_days is not None:
+        payload["age_off_days"] = age_off_days
+    return payload

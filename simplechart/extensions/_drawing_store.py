@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Generic, TypeVar
+import time
+from typing import Any, Callable, Generic, TypeVar
 
 from simplechart.extensions._base import (
     ChartExtensionMutation,
@@ -60,8 +61,13 @@ class DrawingStore(ABC, Generic[R]):
     timeframe_axis: AxisPolicy
     session_axis: AxisPolicy
 
-    def __init__(self, context: ChartExtensionStoreContext) -> None:
+    def __init__(
+        self,
+        context: ChartExtensionStoreContext,
+        now_ms: Callable[[], int] | None = None,
+    ) -> None:
         self._context = context
+        self._now_ms = now_ms if now_ms is not None else _now_ms
         self._active_symbol: str | None = None
         # Durable records for the active symbol, reloaded on each load_for_symbol.
         self._durable: list[R] = []
@@ -100,6 +106,15 @@ class DrawingStore(ABC, Generic[R]):
     @abstractmethod
     def created_timeframe(self, record: R) -> str: ...
 
+    def updated_at_ms(self, record: R) -> int:
+        return 0
+
+    def age_off_days(self, record: R) -> float:
+        return 0.0
+
+    def touch_record(self, record: R, updated_at_ms: int) -> R:
+        return record
+
     def wants_timeframe_persistence(self, record: R) -> bool:
         """Per-drawing choice for the timeframe axis; consulted only when USER."""
         return True
@@ -114,10 +129,30 @@ class DrawingStore(ABC, Generic[R]):
 
     def load_for_symbol(self, symbol: str) -> None:
         self._active_symbol = symbol
-        self._durable = [
-            self.from_payload(record.record_id, record.symbol, record.sort_key, record.payload)
-            for record in self._context.get_extension_records(self.store_key, symbol)
-        ]
+        now_ms = self._now_ms()
+        self._durable = []
+        for stored in self._context.get_extension_records(self.store_key, symbol):
+            record = self.from_payload(stored.record_id, stored.symbol, stored.sort_key, stored.payload)
+            normalized = self._normalize_lifecycle(record, now_ms)
+            if self._is_expired(normalized, now_ms):
+                self._context.delete_extension_record(stored.record_id)
+                self._context.remove_series_visibility(self.extension_name, self.series_key(normalized))
+                continue
+            should_backfill = (
+                ("updated_at_ms" not in stored.payload or "age_off_days" not in stored.payload)
+                and (
+                    self.updated_at_ms(normalized) > 0
+                    or self.age_off_days(normalized) > 0.0
+                )
+            )
+            if normalized is not record or should_backfill:
+                self._context.update_extension_record(
+                    stored.record_id,
+                    self.sort_key(normalized),
+                    self.to_payload(normalized),
+                )
+            self._durable.append(normalized)
+        self._reconcile_state()
 
     def params_for(
         self,
@@ -142,6 +177,7 @@ class DrawingStore(ABC, Generic[R]):
             self._delete(mutation.payload["record"])
 
     def prepare_active_extensions(self) -> None:
+        self._expire_stale_records()
         self._reconcile_state()
 
     # ------------------------------------------------------------------
@@ -184,6 +220,7 @@ class DrawingStore(ABC, Generic[R]):
         symbol = self._context.current_symbol()
         if symbol is None:
             return
+        record = self.touch_record(record, self._now_ms())
         if self._is_durable(record):
             persisted = self._context.put_extension_record(
                 self.store_key,
@@ -203,6 +240,7 @@ class DrawingStore(ABC, Generic[R]):
         record_id = self.record_id(record)
         if record_id is None:
             return
+        record = self.touch_record(record, self._now_ms())
         was_durable = record_id >= 0
         now_durable = self._is_durable(record)
         if was_durable != now_durable:
@@ -240,3 +278,39 @@ class DrawingStore(ABC, Generic[R]):
             self._context.ensure_extension_state(self.extension_name, {self.params_key: []})
         else:
             self._context.remove_extension_state(self.extension_name)
+
+    def _normalize_lifecycle(self, record: R, now_ms: int) -> R:
+        if self.updated_at_ms(record) <= 0:
+            return self.touch_record(record, now_ms)
+        return record
+
+    def _is_expired(self, record: R, now_ms: int) -> bool:
+        age_off_days = self.age_off_days(record)
+        if age_off_days <= 0.0:
+            return False
+        expires_at = self.updated_at_ms(record) + int(age_off_days * 86_400_000)
+        return expires_at <= now_ms
+
+    def _expire_stale_records(self) -> None:
+        if self._active_symbol is None:
+            return
+        now_ms = self._now_ms()
+        for record in list(self._durable):
+            if self._is_expired(record, now_ms):
+                record_id = self.record_id(record)
+                if record_id is not None:
+                    self._context.delete_extension_record(record_id)
+                self._durable = [c for c in self._durable if c is not record]
+                self._context.remove_series_visibility(self.extension_name, self.series_key(record))
+        lines = self._volatile.get(self._active_symbol, [])
+        active_lines: list[R] = []
+        for record in lines:
+            if self._is_expired(record, now_ms):
+                self._context.remove_series_visibility(self.extension_name, self.series_key(record))
+            else:
+                active_lines.append(record)
+        self._volatile[self._active_symbol] = active_lines
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)

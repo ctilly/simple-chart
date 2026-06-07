@@ -13,6 +13,7 @@ from simplechart.api import (
     ChoiceParam,
     DragSession,
     DrawingToolResult,
+    FloatParam,
     HitTestResult,
     ChartExtension,
     ChartExtensionAddMode,
@@ -29,6 +30,7 @@ from simplechart.api import (
 )
 
 _DEFAULT_COLOR = "#7a7f8c"
+_DEFAULT_AGE_OFF_DAYS = 60.0
 _HIT_BUFFER = 0.55
 
 
@@ -46,6 +48,7 @@ class VerticalLineIndicator(ChartExtension):
             "color": _DEFAULT_COLOR,
             "line_width": 1.0,
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
+            "age_off_days": FloatParam(_DEFAULT_AGE_OFF_DAYS, minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
         }
 
     def add_mode(self) -> ChartExtensionAddMode:
@@ -106,6 +109,7 @@ class VerticalLineIndicator(ChartExtension):
             color=str(params.get("color", _DEFAULT_COLOR)),
             line_width=float(params.get("line_width", 1.0)),
             line_style=_choice_value(params.get("line_style", "solid")),
+            age_off_days=_float_value(params.get("age_off_days", _DEFAULT_AGE_OFF_DAYS)),
         )
         return DrawingToolResult(
             mutation=ChartExtensionMutation(
@@ -211,6 +215,7 @@ class VerticalLineIndicator(ChartExtension):
                 "color": line.color,
                 "line_width": line.line_width,
                 "line_style": ChoiceParam(line.line_style, LINE_STYLE_OPTIONS),
+                "age_off_days": FloatParam(line.age_off_days, minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
                 "persist_across_timeframes": line.persist_across_timeframes,
                 "persist_across_sessions": line.persist_across_sessions,
             },
@@ -239,6 +244,8 @@ class VerticalLineIndicator(ChartExtension):
                     line_style=_choice_value(edited_params["line_style"]),
                     persist_across_timeframes=bool(edited_params["persist_across_timeframes"]),
                     persist_across_sessions=bool(edited_params["persist_across_sessions"]),
+                    updated_at_ms=line.updated_at_ms,
+                    age_off_days=_float_value(edited_params["age_off_days"]),
                     line_id=line.line_id,
                 )
             },
@@ -324,6 +331,8 @@ def _updated_drag_line(
         line_style=line.line_style,
         persist_across_timeframes=line.persist_across_timeframes,
         persist_across_sessions=line.persist_across_sessions,
+        updated_at_ms=line.updated_at_ms,
+        age_off_days=line.age_off_days,
         line_id=line.line_id,
     )
 
@@ -332,6 +341,12 @@ def _choice_value(value: Any) -> str:
     if isinstance(value, ChoiceParam):
         return value.value
     return str(value)
+
+
+def _float_value(value: Any) -> float:
+    if isinstance(value, FloatParam):
+        return value.value
+    return float(value)
 
 
 register_extension(VerticalLineIndicator)

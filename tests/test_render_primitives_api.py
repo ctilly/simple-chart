@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import numpy as np
 
 from data.models import Bar, OHLCVSeries, Timeframe
-from indicators.rsi import RSIIndicator
+import indicators.rsi  # noqa: F401
 from simplechart.extensions._base import (
     AxisPriceLabelRender,
     ChartEvent,

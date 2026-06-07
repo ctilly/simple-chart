@@ -9,7 +9,7 @@ from data.models import Bar, OHLCVSeries, Timeframe
 import tools.horizontal_line  # noqa: F401
 from tools.horizontal_line import HorizontalLineIndicator
 from tools.horizontal_line.session_store import HorizontalLineStore
-from simplechart.api import ChoiceParam, ChartExtensionAddMode
+from simplechart.api import ChoiceParam, ChartExtensionAddMode, FloatParam
 
 
 def test_horizontal_line_declares_toolbar_add_mode() -> None:
@@ -108,6 +108,8 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
 
         request = runtime.config_request("horizontal_line_1")
         assert request is not None
+        assert isinstance(request.params["age_off_days"], FloatParam)
+        assert request.params["age_off_days"].value == 365.0
         edited = dict(request.params)
         edited["color"] = "#ff0000"
         edited["line_width"] = 2.5

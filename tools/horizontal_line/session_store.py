@@ -5,6 +5,7 @@ from tools.horizontal_line.models import HorizontalLineRecord
 from simplechart.api import AxisPolicy, DrawingStore
 
 _STORE_KEY = "horizontal_line.lines"
+_DEFAULT_AGE_OFF_DAYS = 365.0
 
 
 class HorizontalLineStore(DrawingStore[HorizontalLineRecord]):
@@ -23,6 +24,8 @@ class HorizontalLineStore(DrawingStore[HorizontalLineRecord]):
             "line_style": record.line_style,
             "persist_across_timeframes": record.persist_across_timeframes,
             "persist_across_sessions": record.persist_across_sessions,
+            "updated_at_ms": record.updated_at_ms,
+            "age_off_days": record.age_off_days,
         }
 
     def from_payload(
@@ -41,6 +44,8 @@ class HorizontalLineStore(DrawingStore[HorizontalLineRecord]):
             line_style=str(payload["line_style"]),
             persist_across_timeframes=bool(payload["persist_across_timeframes"]),
             persist_across_sessions=bool(payload["persist_across_sessions"]),
+            updated_at_ms=int(payload.get("updated_at_ms", 0)),
+            age_off_days=float(payload.get("age_off_days", _DEFAULT_AGE_OFF_DAYS)),
             line_id=record_id,
         )
 
@@ -64,6 +69,19 @@ class HorizontalLineStore(DrawingStore[HorizontalLineRecord]):
 
     def wants_session_persistence(self, record: HorizontalLineRecord) -> bool:
         return record.persist_across_sessions
+
+    def updated_at_ms(self, record: HorizontalLineRecord) -> int:
+        return record.updated_at_ms
+
+    def age_off_days(self, record: HorizontalLineRecord) -> float:
+        return record.age_off_days
+
+    def touch_record(
+        self,
+        record: HorizontalLineRecord,
+        updated_at_ms: int,
+    ) -> HorizontalLineRecord:
+        return replace(record, updated_at_ms=updated_at_ms)
 
 
 def horizontal_line_key(line: HorizontalLineRecord) -> str:

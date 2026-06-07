@@ -10,7 +10,7 @@ from data.models import Bar, OHLCVSeries, Timeframe
 import tools.fib_retracement  # noqa: F401
 from tools.fib_retracement import FibonacciRetracementIndicator
 from tools.fib_retracement.session_store import FibRetracementStore
-from simplechart.api import ChoiceParam, ChartExtensionAddMode
+from simplechart.api import ChoiceParam, ChartExtensionAddMode, FloatParam
 
 
 def test_fib_declares_toolbar_add_mode() -> None:
@@ -174,6 +174,8 @@ def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
 
         request = runtime.config_request("fib_retracement_ref_-1")
         assert request is not None
+        assert isinstance(request.params["age_off_days"], FloatParam)
+        assert request.params["age_off_days"].value == 2.0
         edited = dict(request.params)
         edited["show_0_0"] = False
         runtime.apply_config("fib_retracement_ref_-1", edited)

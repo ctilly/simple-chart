@@ -87,7 +87,7 @@ copy/adapt code without explicit approval.
 Tool name / label:
 Add mode:                 TOOLBAR | CONTEXT
 Drawing interaction:      one-click commit | click-drag-out two anchors | ...
-Record model:             frozen dataclass fields (incl. timeframe + any USER flags)
+Record model:             frozen dataclass fields (incl. timeframe, updated_at_ms, age_off_days, and any USER flags)
 Render keys:              stable per-drawing key scheme
 Render primitives:        segments / vertical lines / markers used
 Hit test / drag:          handles and what each drag adjusts
@@ -141,8 +141,10 @@ explicit user approval before continuing.
 
 1. **Record model** — `tools/<tool>/models.py`, a frozen dataclass. Include
    `symbol`, the anchor timestamp(s), `timeframe: str` (the creation timeframe),
+   `updated_at_ms: int = 0`, `age_off_days: float = <tool default>`,
    an id field (`<thing>_id: int | None = None`), and one bool field per `USER`
-   axis (e.g. `persist_across_timeframes: bool = True`).
+   axis (e.g. `persist_across_timeframes: bool = True`). `updated_at_ms` is
+   stamped by `DrawingStore`; `age_off_days=0` means never expire.
 
 2. **Tool behavior** — `tools/<tool>/__init__.py`, a `ChartExtension`:
    - `name` / `label` / `default_params` / `add_mode` (TOOLBAR or CONTEXT) /
@@ -171,9 +173,11 @@ explicit user approval before continuing.
      touched mid-drag, and the controller re-renders from store state on cancel.
 
 5. **Config / removal**:
-   - `config_for_series` returns a `ChartExtensionConfig`. For each `USER` axis,
-     add a bool param (e.g. `"persist_across_timeframes"`) — the config dialog
-     renders it as a checkbox with a Title-Case label.
+   - `config_for_series` returns a `ChartExtensionConfig`. Include
+     `"age_off_days": FloatParam(record.age_off_days, minimum=0.0, ...)`.
+     For each `USER` axis, add a bool param (e.g.
+     `"persist_across_timeframes"`) — the config dialog renders it as a checkbox
+     with a Title-Case label.
    - `apply_config_to_series` returns an `update` mutation carrying the edited
      record; read the persistence flags from `edited_params`.
    - `remove_series` returns a `delete` mutation.
@@ -182,7 +186,11 @@ explicit user approval before continuing.
    - Set `extension_name`, `store_key`, `params_key`, `timeframe_axis`,
      `session_axis`.
    - Implement `to_payload`, `from_payload`, `sort_key`, `record_id`, `with_id`,
-     `series_key`, `created_timeframe`.
+     `series_key`, `created_timeframe`, `updated_at_ms`, `age_off_days`, and
+     `touch_record`.
+   - Store `updated_at_ms` and `age_off_days` in the payload. For legacy payloads
+     that lack them, read `updated_at_ms` as `0` and `age_off_days` as the tool
+     default; `DrawingStore` will stamp and backfill on load.
    - For a `USER` axis, override `wants_timeframe_persistence` /
      `wants_session_persistence` to read the record's flag.
    - Keep the series-key function in this module (the tool imports it).

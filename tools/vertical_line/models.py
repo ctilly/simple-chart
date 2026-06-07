@@ -11,4 +11,6 @@ class VerticalLineRecord:
     line_style: str = "solid"
     persist_across_timeframes: bool = True
     persist_across_sessions: bool = True
+    updated_at_ms: int = 0
+    age_off_days: float = 60.0
     line_id: int | None = None

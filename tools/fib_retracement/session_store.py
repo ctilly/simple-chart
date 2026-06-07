@@ -5,6 +5,7 @@ from tools.fib_retracement.models import FibRetracementRecord
 from simplechart.api import AxisPolicy, DrawingStore
 
 _STORE_KEY = "fib_retracement.drawings"
+_DEFAULT_AGE_OFF_DAYS = 2.0
 
 
 class FibRetracementStore(DrawingStore[FibRetracementRecord]):
@@ -28,6 +29,8 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
             "label_position": record.label_position,
             "show_anchor_handles": record.show_anchor_handles,
             "visible_levels": list(record.visible_levels),
+            "updated_at_ms": record.updated_at_ms,
+            "age_off_days": record.age_off_days,
         }
 
     def from_payload(
@@ -51,6 +54,8 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
             label_position=str(payload["label_position"]),
             show_anchor_handles=bool(payload["show_anchor_handles"]),
             visible_levels=tuple(payload["visible_levels"]),
+            updated_at_ms=int(payload.get("updated_at_ms", 0)),
+            age_off_days=float(payload.get("age_off_days", _DEFAULT_AGE_OFF_DAYS)),
             drawing_id=record_id,
         )
 
@@ -68,6 +73,19 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
 
     def created_timeframe(self, record: FibRetracementRecord) -> str:
         return record.timeframe
+
+    def updated_at_ms(self, record: FibRetracementRecord) -> int:
+        return record.updated_at_ms
+
+    def age_off_days(self, record: FibRetracementRecord) -> float:
+        return record.age_off_days
+
+    def touch_record(
+        self,
+        record: FibRetracementRecord,
+        updated_at_ms: int,
+    ) -> FibRetracementRecord:
+        return replace(record, updated_at_ms=updated_at_ms)
 
 
 def fib_drawing_key(drawing: FibRetracementRecord) -> str:
