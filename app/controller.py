@@ -791,7 +791,7 @@ class MainWindow(QMainWindow):
             self._drawing_session = None
             self._clear_preview_render()
             if result.deactivate_tool:
-                self._active_drawing_tool = None
+                self._set_active_drawing_tool(None)
             if result.mutation is not None:
                 self._reload_extensions(draw_bars=False, preserve_view=True)
             return
@@ -799,11 +799,13 @@ class MainWindow(QMainWindow):
 
     def _on_cancel_shortcut(self) -> None:
         if self._drawing_session is None:
+            self._set_active_drawing_tool(None)
             return
         mutation = self._extension_runtime.cancel_drawing(self._drawing_session)
         self._clear_pending_drawing_preview()
         self._drawing_session = None
         self._clear_preview_render()
+        self._set_active_drawing_tool(None)
         if mutation is not None:
             self._reload_extensions(draw_bars=False, preserve_view=True)
 
@@ -1182,7 +1184,11 @@ class MainWindow(QMainWindow):
             self._clear_pending_drawing_preview()
             self._drawing_session = None
             self._clear_preview_render()
+        self._set_active_drawing_tool(extension_name)
+
+    def _set_active_drawing_tool(self, extension_name: str | None) -> None:
         self._active_drawing_tool = extension_name
+        self._chart.set_active_drawing_tool(extension_name)
 
     def _clear_pending_drawing_preview(self) -> None:
         self._pending_drawing_preview_event = None

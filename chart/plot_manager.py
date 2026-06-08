@@ -71,7 +71,7 @@ class _AxisPriceLabelHandle:
     text_item: object
     viewbox: object
     scene: object
-    reposition: Callable[[object, object], None]
+    reposition: Callable[..., None]
     y_value: float
 
 
@@ -333,6 +333,7 @@ class PlotManager:
             text_item.setPos(scene_x, scene_y)
 
         viewbox.sigRangeChanged.connect(reposition)
+        viewbox.sigResized.connect(reposition)
         reposition()
         self._axis_price_labels[label.key] = _AxisPriceLabelHandle(
             text_item=text_item,
@@ -511,6 +512,10 @@ class PlotManager:
             return
         try:
             handle.viewbox.sigRangeChanged.disconnect(handle.reposition)  # type: ignore[attr-defined]
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            handle.viewbox.sigResized.disconnect(handle.reposition)  # type: ignore[attr-defined]
         except (TypeError, RuntimeError):
             pass
         handle.scene.removeItem(handle.text_item)  # type: ignore[attr-defined]

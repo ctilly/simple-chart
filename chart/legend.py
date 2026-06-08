@@ -122,6 +122,7 @@ class DrawingToolPalette(QWidget):
         self.setWindowTitle("Tools")
         self.setObjectName("drawingToolPalette")
         self._drag_offset: QPoint | None = None
+        self._tool_buttons: dict[str, QToolButton] = {}
         self.hide()
 
         frame = QFrame(self)
@@ -190,20 +191,28 @@ class DrawingToolPalette(QWidget):
             button.setIconSize(QSize(20, 20))
             button.setToolTip(tool_label)
             button.setFixedSize(28, 28)
+            button.setCheckable(True)
             button.setStyleSheet(
                 "QToolButton { color: #555555; background: #f7f7f7; "
                 "border: 1px solid #cccccc; border-radius: 3px; }"
                 "QToolButton:hover { background: #ffffff; }"
+                "QToolButton:checked { color: #222222; background: #d6e4ff; "
+                "border: 1px solid #4f7cff; }"
             )
             button.clicked.connect(
                 lambda _checked=False, name=tool_name: on_drawing_tool(name)
             )
+            self._tool_buttons[tool_name] = button
             tool_layout.addWidget(button)
         frame_layout.addWidget(tool_row)
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.addWidget(frame)
+
+    def set_active_tool(self, tool_name: str | None) -> None:
+        for name, button in self._tool_buttons.items():
+            button.setChecked(name == tool_name)
 
     def eventFilter(self, watched: QObject | None, event: QEvent | None) -> bool:
         if isinstance(event, QMouseEvent):
@@ -358,6 +367,9 @@ class ChartLegend(QWidget):
         """Update the visual state of a label without removing it."""
         if series_key in self._labels:
             self._labels[series_key].set_extension_visible(visible)
+
+    def set_active_drawing_tool(self, tool_name: str | None) -> None:
+        self._tool_palette.set_active_tool(tool_name)
 
     def clear_all(self) -> None:
         """Remove all extension labels. Called when switching symbols."""

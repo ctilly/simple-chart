@@ -216,6 +216,9 @@ class ChartWidget(QWidget):
     def interactions(self) -> ChartInteractions:
         return self._interactions
 
+    def set_active_drawing_tool(self, tool_name: str | None) -> None:
+        self._legend.set_active_drawing_tool(tool_name)
+
     def reset_viewport(self) -> None:
         reset_viewports(self._price_panel.ax, self._volume_panel.ax)
         fplt.refresh()

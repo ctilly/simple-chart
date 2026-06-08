@@ -69,6 +69,36 @@ def test_chart_legend_toggles_drawing_tool_palette(qtbot) -> None:  # type: igno
     assert not palette_button.isVisible()
 
 
+def test_chart_legend_marks_active_drawing_tool_button(qtbot) -> None:  # type: ignore[no-untyped-def]
+    legend = ChartLegend(
+        on_toggle=lambda _: None,
+        on_configure=lambda _: None,
+        on_remove=lambda _: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _: None,
+        drawing_tools=[
+            ("horizontal_line", "Horizontal Line", None),
+            ("fib_retracement", "Fibonacci Retracement", None),
+        ],
+    )
+    qtbot.addWidget(legend)
+
+    horizontal = _tool_button(legend, "horizontal_line")
+    fib = _tool_button(legend, "fib_retracement")
+
+    legend.set_active_drawing_tool("fib_retracement")
+    assert not horizontal.isChecked()
+    assert fib.isChecked()
+
+    legend.set_active_drawing_tool("horizontal_line")
+    assert horizontal.isChecked()
+    assert not fib.isChecked()
+
+    legend.set_active_drawing_tool(None)
+    assert not horizontal.isChecked()
+    assert not fib.isChecked()
+
+
 def _expected_palette_position(
     legend: ChartLegend,
     tool_button: QToolButton,
@@ -79,3 +109,9 @@ def _expected_palette_position(
     parent = palette.parentWidget()
     assert parent is not None
     return parent.mapFromGlobal(QPoint(global_x, global_y))
+
+
+def _tool_button(legend: ChartLegend, tool_name: str) -> QToolButton:
+    button = legend.findChild(QToolButton, f"drawingToolButton_{tool_name}")
+    assert button is not None
+    return button
