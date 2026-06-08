@@ -72,6 +72,7 @@ from simplechart.api import (
     HorizontalLineRender,
     HorizontalSegmentRender,
     LINE_STYLE_OPTIONS,
+    PolylineRender,
     RENDER_CHART,
     SeriesRender,
     ToolIconSpec,
@@ -364,6 +365,7 @@ class MainWindow(QMainWindow):
         self._chart.interactions.on_drag_finish(self._on_drag_finish)
         self._chart.interactions.on_drag_cancel(self._on_drag_cancel)
         self._chart.on_cancel(self._on_cancel_shortcut)
+        self._chart.on_commit(self._on_commit_shortcut)
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
@@ -578,6 +580,9 @@ class MainWindow(QMainWindow):
         for hline in render.horizontal_lines:
             rendered_keys.add(hline.key)
             self._draw_horizontal_line(hline, ind_state)
+        for polyline in render.polylines:
+            rendered_keys.add(polyline.key)
+            self._draw_polyline(polyline, ind_state, update_legend)
         for label in render.axis_price_labels:
             rendered_keys.add(label.key)
             self._draw_axis_price_label(label, ind_state)
@@ -647,6 +652,22 @@ class MainWindow(QMainWindow):
         line.visible = visible and line.visible
         self._chart.plot_manager.update_horizontal_line(line)
 
+    def _draw_polyline(
+        self,
+        polyline: PolylineRender,
+        ind_state: ChartExtensionState,
+        update_legend: bool = True,
+    ) -> None:
+        pm = self._chart.plot_manager
+        visible = ind_state.series_visibility.get(polyline.key, ind_state.visible)
+        polyline.visible = visible and polyline.visible
+        pm.update_polyline(polyline)
+        if polyline.reference or not update_legend:
+            return
+        self._chart.legend.add_extension(polyline.key, polyline.label, polyline.color)
+        self._chart.legend.update_color(polyline.key, polyline.color)
+        self._chart.legend.set_extension_visible(polyline.key, polyline.visible)
+
     def _draw_axis_price_label(
         self,
         label: AxisPriceLabelRender,
@@ -696,6 +717,8 @@ class MainWindow(QMainWindow):
                 pm.update_vertical_line(vline)
             for hline in render_pass.render.horizontal_lines:
                 pm.update_horizontal_line(hline)
+            for polyline in render_pass.render.polylines:
+                pm.update_polyline(polyline)
             for label in render_pass.render.axis_price_labels:
                 pm.update_axis_price_label(label)
             for marker in render_pass.render.markers:
@@ -718,6 +741,7 @@ class MainWindow(QMainWindow):
         keys.update(segment.key for segment in render.segments)
         keys.update(line.key for line in render.vertical_lines)
         keys.update(line.key for line in render.horizontal_lines)
+        keys.update(polyline.key for polyline in render.polylines)
         keys.update(label.key for label in render.axis_price_labels)
         keys.update(marker.key for marker in render.markers)
         return keys
@@ -796,6 +820,15 @@ class MainWindow(QMainWindow):
                 self._reload_extensions(draw_bars=False, preserve_view=True)
             return
         self._drawing_session = result.session
+
+    def _on_commit_shortcut(self) -> None:
+        if self._drawing_session is None or self._current_series is None:
+            return
+        result = self._extension_runtime.commit_drawing(
+            self._current_series,
+            self._drawing_session,
+        )
+        self._handle_drawing_result(result)
 
     def _on_cancel_shortcut(self) -> None:
         if self._drawing_session is None:
@@ -999,6 +1032,11 @@ class MainWindow(QMainWindow):
             line.key
             for render_pass in render_passes
             for line in render_pass.render.horizontal_lines
+        )
+        active_series_keys.update(
+            polyline.key
+            for render_pass in render_passes
+            for polyline in render_pass.render.polylines
         )
         active_series_keys.update(
             label.key

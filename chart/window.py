@@ -166,6 +166,7 @@ class ChartWidget(QWidget):
             for i in range(3)
         ]
         self._cancel_cb: Callable[[], None] | None = None
+        self._commit_cb: Callable[[], None] | None = None
 
         # Hide all extension slots — they become visible only when assigned.
         for slot in self._extension_slots:
@@ -199,6 +200,13 @@ class ChartWidget(QWidget):
         cancel_drag_shortcut = QShortcut(QKeySequence("Esc"), self)
         cancel_drag_shortcut.activated.connect(self._cancel_drag)
         self._cancel_drag_shortcut = cancel_drag_shortcut
+
+        # Enter/Return finishes a multi-point drawing in progress (e.g. poly-line).
+        self._commit_shortcuts = [
+            QShortcut(QKeySequence(key), self) for key in ("Return", "Enter")
+        ]
+        for shortcut in self._commit_shortcuts:
+            shortcut.activated.connect(self._commit_drawing)
 
     # ------------------------------------------------------------------
     # Public interface for the controller
@@ -301,5 +309,12 @@ class ChartWidget(QWidget):
             if slot.name is not None:
                 self.release_extension_panel(slot.name)
 
+    def _commit_drawing(self) -> None:
+        if self._commit_cb is not None:
+            self._commit_cb()
+
     def on_cancel(self, callback: Callable[[], None]) -> None:
         self._cancel_cb = callback
+
+    def on_commit(self, callback: Callable[[], None]) -> None:
+        self._commit_cb = callback

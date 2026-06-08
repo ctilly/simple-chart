@@ -88,6 +88,8 @@ class ChartExtensionRuntime:
         ] + [
             line.key for line in render.horizontal_lines
         ] + [
+            polyline.key for polyline in render.polylines
+        ] + [
             label.key for label in render.axis_price_labels
         ]
         ext_state.series_visibility = {
@@ -293,6 +295,17 @@ class ChartExtensionRuntime:
             self.apply_mutation(result.mutation)
         return result
 
+    def commit_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+    ) -> DrawingToolResult:
+        extension = get_extension(session.extension_name)
+        result = extension.commit_drawing(series, session)
+        if result.mutation is not None:
+            self.apply_mutation(result.mutation)
+        return result
+
     def cancel_drawing(
         self,
         session: DrawingSession,
@@ -405,6 +418,8 @@ class ChartExtensionRuntime:
             line.key for line in render.vertical_lines
         ] + [
             line.key for line in render.horizontal_lines
+        ] + [
+            polyline.key for polyline in render.polylines
         ] + [
             label.key for label in render.axis_price_labels
         ]

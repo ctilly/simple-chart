@@ -55,6 +55,7 @@ from simplechart.api import (
     HorizontalLineRender,
     HorizontalSegmentRender,
     MarkerRender,
+    PolylineRender,
     VerticalLineRender,
 )
 
@@ -98,6 +99,7 @@ class PlotManager:
         self._segments: dict[str, tuple[object, object]] = {}
         self._vertical_lines: dict[str, tuple[object, object]] = {}
         self._horizontal_lines: dict[str, tuple[object, object]] = {}
+        self._polylines: dict[str, tuple[object, object]] = {}
         self._axis_price_labels: dict[str, _AxisPriceLabelHandle] = {}
         self._markers: dict[str, object] = {}
 
@@ -273,6 +275,31 @@ class PlotManager:
         target_ax.addItem(item)  # type: ignore[attr-defined]
         self._segments[segment.key] = (item, target_ax)
 
+    def update_polyline(self, polyline: PolylineRender) -> None:
+        target_ax = self._resolve_ax(polyline.render_target)
+        xs = [self._x_value_for_index(x) for x, _ in polyline.points]
+        ys = [y for _, y in polyline.points]
+        pen_style = _LINE_STYLES.get(polyline.line_style, Qt.PenStyle.SolidLine)
+        pen = pg.mkPen(
+            color=polyline.color,
+            width=polyline.line_width,
+            style=pen_style,
+        )
+        if polyline.key in self._polylines:
+            item, current_ax = self._polylines[polyline.key]
+            if current_ax is target_ax:
+                handle = cast(Any, item)
+                handle.setPen(pen)
+                handle.setData(xs, ys)
+                handle.setVisible(polyline.visible)
+                return
+            self.remove_polyline(polyline.key)
+
+        item = pg.PlotDataItem(xs, ys, pen=pen)
+        item.setVisible(polyline.visible)
+        target_ax.addItem(item)  # type: ignore[attr-defined]
+        self._polylines[polyline.key] = (item, target_ax)
+
     def update_vertical_line(self, line: VerticalLineRender) -> None:
         self.remove_vertical_line(line.key)
         target_ax = self._resolve_ax(line.render_target)
@@ -385,6 +412,7 @@ class PlotManager:
         self.remove_horizontal_segment(series_key)
         self.remove_vertical_line(series_key)
         self.remove_horizontal_line(series_key)
+        self.remove_polyline(series_key)
         self.remove_axis_price_label(series_key)
         self.remove_marker(series_key)
 
@@ -403,6 +431,8 @@ class PlotManager:
             self._vertical_lines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._horizontal_lines:
             self._horizontal_lines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
+        if series_key in self._polylines:
+            self._polylines[series_key][0].setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._axis_price_labels:
             self._axis_price_labels[series_key].text_item.setVisible(visible)  # type: ignore[attr-defined]
         if series_key in self._markers:
@@ -427,6 +457,7 @@ class PlotManager:
         self._segments.clear()
         self._vertical_lines.clear()
         self._horizontal_lines.clear()
+        self._polylines.clear()
         self._markers.clear()
         self._candle_plot = None
         self._volume_plot = None
@@ -439,6 +470,7 @@ class PlotManager:
             + list(self._segments.keys())
             + list(self._vertical_lines.keys())
             + list(self._horizontal_lines.keys())
+            + list(self._polylines.keys())
             + list(self._axis_price_labels.keys())
         )
 
@@ -479,7 +511,7 @@ class PlotManager:
         item = pg.TextItem(
             text=marker.text,
             color=marker.color,
-            anchor=(0.5, 0.72),
+            anchor=marker.anchor,
         )
         font = QFont()
         font.setPointSize(marker.font_size)
@@ -504,6 +536,11 @@ class PlotManager:
     def remove_horizontal_line(self, line_key: str) -> None:
         if line_key in self._horizontal_lines:
             item, target_ax = self._horizontal_lines.pop(line_key)
+            target_ax.removeItem(item)  # type: ignore[attr-defined]
+
+    def remove_polyline(self, polyline_key: str) -> None:
+        if polyline_key in self._polylines:
+            item, target_ax = self._polylines.pop(polyline_key)
             target_ax.removeItem(item)  # type: ignore[attr-defined]
 
     def remove_axis_price_label(self, label_key: str) -> None:

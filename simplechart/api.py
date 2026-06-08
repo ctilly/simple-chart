@@ -89,6 +89,7 @@ EXPORTS
   HorizontalSegmentRender      Render description for a horizontal line segment
   VerticalLineRender           Render description for a full-height vertical line
   HorizontalLineRender         Render description for a full-width horizontal line
+  PolylineRender               Render description for a connected multi-point path
   AxisPriceLabelRender         Render description for a price label on the price axis
   ToolIconLine                 One line segment in a toolbar icon
   ToolIconSpec                 Declarative spec for a tool's toolbar icon
@@ -139,6 +140,7 @@ from simplechart.extensions._base import (  # noqa: F401
     HorizontalSegmentRender,    # horizontal line segment render primitive
     LINE_STYLE_OPTIONS,         # ["solid", "dash", "dot", "dash_dot"]
     MarkerRender,               # price-chart marker render primitive
+    PolylineRender,             # connected multi-point path render primitive
     SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
     SeriesRender,               # line series render primitive
     ToolIconLine,               # one line segment of a toolbar icon
@@ -192,6 +194,7 @@ __all__: list[str] = [
     "LINE_STYLE_OPTIONS",
     "MarkerRender",
     "OHLCVSeries",
+    "PolylineRender",
     "RENDER_CHART",
     "SeriesFill",
     "SeriesRender",

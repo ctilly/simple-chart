@@ -198,6 +198,28 @@ class HorizontalLineRender:
 
 
 @dataclass
+class PolylineRender:
+    """
+    A connected path through an ordered list of (x_index, y_value) points.
+
+    The chart draws the points as a single open polyline. A two-point path is a
+    straight (diagonal) segment; more points form a multi-vertex line. x is a
+    bar index (fractional allowed); y is a price-axis value. This is a generic
+    primitive — the chart layer knows nothing about which tool produced it.
+    """
+
+    key: str
+    points: tuple[tuple[float, float], ...]
+    label: str
+    color: str
+    line_width: float
+    line_style: str = "solid"
+    render_target: str = RENDER_CHART
+    visible: bool = True
+    reference: bool = False
+
+
+@dataclass
 class AxisPriceLabelRender:
     key: str
     y_value: float
@@ -240,6 +262,10 @@ class MarkerRender:
     font_size: int = 14
     z: int = 20
     visible: bool = True
+    # Fraction of the text's bounding box that maps to (x_index, y_value):
+    # (0.5, 0.5) centers the glyph on the point; the default sits it just above,
+    # which suits labels that annotate a bar from overhead.
+    anchor: tuple[float, float] = (0.5, 0.72)
 
 
 @dataclass
@@ -248,6 +274,7 @@ class ChartExtensionRender:
     segments: list[HorizontalSegmentRender] = field(default_factory=list)
     vertical_lines: list[VerticalLineRender] = field(default_factory=list)
     horizontal_lines: list[HorizontalLineRender] = field(default_factory=list)
+    polylines: list[PolylineRender] = field(default_factory=list)
     axis_price_labels: list[AxisPriceLabelRender] = field(default_factory=list)
     markers: list[MarkerRender] = field(default_factory=list)
 
@@ -533,6 +560,20 @@ class ChartExtension(ABC):
         session: DrawingSession,
     ) -> ChartExtensionMutation | None:
         return None
+
+    def commit_drawing(
+        self,
+        series: OHLCVSeries,
+        session: DrawingSession,
+    ) -> DrawingToolResult:
+        """
+        Finish a multi-point drawing in progress (e.g. the user pressed Enter).
+
+        Single-commit tools never reach this — they finish inside
+        advance_drawing. Multi-point tools override this to commit whatever
+        vertices have been placed so far. The default cancels the session.
+        """
+        return DrawingToolResult(cancel=True, deactivate_tool=True)
 
     def add_mode(self) -> ChartExtensionAddMode:
         return ChartExtensionAddMode.DIALOG
