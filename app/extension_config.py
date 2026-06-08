@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -41,6 +42,9 @@ from PyQt6.QtWidgets import (
 )
 
 from simplechart.api import ChoiceParam, FloatParam
+
+_SESSION_PERSISTENCE_KEY = "persist_across_sessions"
+_AGE_OFF_KEY = "age_off_days"
 
 
 class ColorButton(QPushButton):
@@ -108,21 +112,24 @@ class ExtensionConfigDialog(QDialog):
         self.setWindowTitle(f"Configure: {extension_label}")
         self.setMinimumWidth(300)
 
-        self._params  = dict(params)   # working copy
+        self._params = dict(params)  # working copy
         self._widgets: dict[str, QWidget] = {}
 
         layout = QVBoxLayout(self)
-        form   = QFormLayout()
+        form = QFormLayout()
 
         # Skip non-editable internal params. "anchors" is AVWAP's anchor list;
         # keys starting with "_" are controller-injected runtime data (e.g.
         # "_daily_bars") that are not user-configurable.
+        has_session_lifecycle = _has_session_lifecycle(params)
         for key, value in params.items():
             if key == "anchors" or key.startswith("_"):
                 continue
-            widget = self._build_field(key, value)
-            self._widgets[key] = widget
-            form.addRow(self._format_label(key), widget)
+            if has_session_lifecycle and key in {_SESSION_PERSISTENCE_KEY, _AGE_OFF_KEY}:
+                continue
+            self._add_param_row(form, key, value)
+        if has_session_lifecycle:
+            self._add_session_lifecycle_group(form, params)
 
         if not self._widgets:
             form.addRow(QLabel("No configurable parameters."))
@@ -152,6 +159,33 @@ class ExtensionConfigDialog(QDialog):
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
+
+    def _add_param_row(self, form: QFormLayout, key: str, value: Any) -> QWidget:
+        widget = self._build_field(key, value)
+        self._widgets[key] = widget
+        form.addRow(self._format_label(key), widget)
+        return widget
+
+    def _add_session_lifecycle_group(
+        self,
+        form: QFormLayout,
+        params: dict[str, Any],
+    ) -> None:
+        group = QGroupBox("Session Lifecycle")
+        group_form = QFormLayout(group)
+        for key in (_SESSION_PERSISTENCE_KEY, _AGE_OFF_KEY):
+            self._add_param_row(group_form, key, params[key])
+        form.addRow(group)
+        persist_widget = self._widgets[_SESSION_PERSISTENCE_KEY]
+        if isinstance(persist_widget, QCheckBox):
+            persist_widget.toggled.connect(self._sync_age_off_enabled)
+        self._sync_age_off_enabled()
+
+    def _sync_age_off_enabled(self, checked: bool | None = None) -> None:
+        persist_widget = self._widgets.get(_SESSION_PERSISTENCE_KEY)
+        age_off_widget = self._widgets.get(_AGE_OFF_KEY)
+        if isinstance(persist_widget, QCheckBox) and age_off_widget is not None:
+            age_off_widget.setEnabled(persist_widget.isChecked())
 
     def _build_field(self, key: str, value: Any) -> QWidget:
         """Build the appropriate input widget for a param value."""
@@ -243,3 +277,7 @@ def _is_light(hex_color: str) -> bool:
     # Standard relative luminance formula.
     luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
     return luminance > 0.5
+
+
+def _has_session_lifecycle(params: dict[str, Any]) -> bool:
+    return _SESSION_PERSISTENCE_KEY in params and _AGE_OFF_KEY in params

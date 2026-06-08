@@ -174,8 +174,10 @@ def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
 
         request = runtime.config_request("fib_retracement_ref_-1")
         assert request is not None
+        assert request.params["persist_across_sessions"] is False
         assert isinstance(request.params["age_off_days"], FloatParam)
         assert request.params["age_off_days"].value == 2.0
+        assert list(request.params).index("label_position") < list(request.params).index("show_price_labels")
         edited = dict(request.params)
         edited["show_0_0"] = False
         runtime.apply_config("fib_retracement_ref_-1", edited)

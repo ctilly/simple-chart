@@ -112,6 +112,35 @@ def test_fib_drawing_is_volatile_and_gone_after_restart(tmp_path: Path) -> None:
     assert passes == []
 
 
+def test_fib_drawing_can_persist_after_restart_when_enabled(tmp_path: Path) -> None:
+    db = str(tmp_path / "t.db")
+
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(db) as cache:
+        runtime, store = _fib_runtime(state, cache)
+        store.load_for_symbol("SPY")
+        start = runtime.start_drawing("fib_retracement", _series(), runtime.chart_event(_series(), 1.0, 100.0))
+        assert start.session is not None
+        runtime.advance_drawing(_series(), start.session, runtime.chart_event(_series(), 3.0, 111.0))
+        runtime.render_all(_series())
+
+        request = runtime.config_request("fib_retracement_ref_-1")
+        assert request is not None
+        edited = dict(request.params)
+        edited["persist_across_sessions"] = True
+        runtime.apply_config("fib_retracement_ref_-1", edited)
+        assert runtime.render_all(_series())[0].render.segments
+
+    state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    with Cache(db) as cache:
+        runtime2, store2 = _fib_runtime(state2, cache)
+        store2.load_for_symbol("SPY")
+        passes = runtime2.render_all(_series())
+
+    assert len(passes) == 1
+    assert len(passes[0].render.segments) == 6
+
+
 def test_expired_durable_tool_record_is_deleted(tmp_path: Path) -> None:
     now_ms = 10 * _DAY_MS
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)

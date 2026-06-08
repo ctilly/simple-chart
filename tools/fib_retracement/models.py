@@ -19,6 +19,7 @@ class FibRetracementRecord:
     label_position: str = "right"
     show_anchor_handles: bool = True
     visible_levels: tuple[float, ...] = FIB_LEVELS
+    persist_across_sessions: bool = False
     updated_at_ms: int = 0
     age_off_days: float = 2.0
     drawing_id: int | None = None

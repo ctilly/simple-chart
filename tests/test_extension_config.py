@@ -1,0 +1,59 @@
+from typing import Any
+
+from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox
+
+from app.extension_config import ExtensionConfigDialog
+from simplechart.api import FloatParam
+
+
+def test_session_lifecycle_group_disables_age_off_until_persistence_enabled(qtbot: Any) -> None:
+    dialog = ExtensionConfigDialog(
+        "Fibonacci Retracement",
+        {
+            "color": "#4f7cff",
+            "persist_across_sessions": False,
+            "age_off_days": FloatParam(2.0, minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
+            "show_price_labels": False,
+        },
+    )
+    qtbot.addWidget(dialog)
+
+    group = _session_lifecycle_group(dialog)
+    persist = group.findChild(QCheckBox)
+    age_off = group.findChild(QDoubleSpinBox)
+
+    assert persist is not None
+    assert age_off is not None
+    assert not persist.isChecked()
+    assert not age_off.isEnabled()
+
+    persist.setChecked(True)
+
+    assert age_off.isEnabled()
+    assert dialog.result_params()["persist_across_sessions"] is True
+    assert dialog.result_params()["age_off_days"] == 2.0
+    assert _last_form_widget(dialog) is group
+
+
+def _session_lifecycle_group(dialog: ExtensionConfigDialog) -> QGroupBox:
+    groups = [
+        group for group in dialog.findChildren(QGroupBox)
+        if group.title() == "Session Lifecycle"
+    ]
+    assert len(groups) == 1
+    return groups[0]
+
+
+def _last_form_widget(dialog: ExtensionConfigDialog) -> QGroupBox | None:
+    layout = dialog.layout()
+    assert layout is not None
+    layout_item = layout.itemAt(0)
+    assert layout_item is not None
+    form = layout_item.layout()
+    assert form is not None
+    assert isinstance(form, QFormLayout)
+    item = form.itemAt(form.rowCount() - 1, QFormLayout.ItemRole.SpanningRole)
+    assert item is not None
+    widget = item.widget()
+    assert widget is None or isinstance(widget, QGroupBox)
+    return widget

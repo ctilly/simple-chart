@@ -14,7 +14,7 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
     store_key = _STORE_KEY
     params_key = "drawings"
     timeframe_axis = AxisPolicy.FIXED_OFF
-    session_axis = AxisPolicy.FIXED_OFF
+    session_axis = AxisPolicy.USER
 
     def to_payload(self, record: FibRetracementRecord) -> dict[str, Any]:
         return {
@@ -29,6 +29,7 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
             "label_position": record.label_position,
             "show_anchor_handles": record.show_anchor_handles,
             "visible_levels": list(record.visible_levels),
+            "persist_across_sessions": record.persist_across_sessions,
             "updated_at_ms": record.updated_at_ms,
             "age_off_days": record.age_off_days,
         }
@@ -54,6 +55,7 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
             label_position=str(payload["label_position"]),
             show_anchor_handles=bool(payload["show_anchor_handles"]),
             visible_levels=tuple(payload["visible_levels"]),
+            persist_across_sessions=bool(payload.get("persist_across_sessions", False)),
             updated_at_ms=int(payload.get("updated_at_ms", 0)),
             age_off_days=float(payload.get("age_off_days", _DEFAULT_AGE_OFF_DAYS)),
             drawing_id=record_id,
@@ -73,6 +75,9 @@ class FibRetracementStore(DrawingStore[FibRetracementRecord]):
 
     def created_timeframe(self, record: FibRetracementRecord) -> str:
         return record.timeframe
+
+    def wants_session_persistence(self, record: FibRetracementRecord) -> bool:
+        return record.persist_across_sessions
 
     def updated_at_ms(self, record: FibRetracementRecord) -> int:
         return record.updated_at_ms
