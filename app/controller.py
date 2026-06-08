@@ -701,7 +701,6 @@ class MainWindow(QMainWindow):
             for marker in render_pass.render.markers:
                 pm.update_marker(marker)
         self._preview_keys = new_keys
-        pm.refresh(preserve_view=True)
 
     def _clear_preview_render(self) -> None:
         if not self._preview_keys:
