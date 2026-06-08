@@ -816,7 +816,7 @@ class MainWindow(QMainWindow):
             self._clear_preview_render()
             if result.deactivate_tool:
                 self._set_active_drawing_tool(None)
-            if result.mutation is not None:
+            if result.mutation is not None or result.clear_transient:
                 self._reload_extensions(draw_bars=False, preserve_view=True)
             return
         self._drawing_session = result.session
@@ -1210,11 +1210,23 @@ class MainWindow(QMainWindow):
 
     def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:
         registry = all_extensions()
-        return [
-            (name, cls().label(), cls().toolbar_icon())
-            for name, cls in sorted(registry.items())
+        toolbar = {
+            name: cls
+            for name, cls in registry.items()
             if cls().add_mode() == ChartExtensionAddMode.TOOLBAR
+        }
+        # Fixed toolbox order; any tool not listed falls in afterwards, sorted.
+        order = [
+            "horizontal_line",
+            "vertical_line",
+            "trend_line",
+            "poly_line",
+            "fib_retracement",
+            "erase",
         ]
+        ordered = [name for name in order if name in toolbar]
+        ordered += sorted(name for name in toolbar if name not in order)
+        return [(name, toolbar[name]().label(), toolbar[name]().toolbar_icon()) for name in ordered]
 
     def _on_drawing_tool_selected(self, extension_name: str) -> None:
         if self._drawing_session is not None:

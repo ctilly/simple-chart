@@ -14,7 +14,7 @@ class PolylineRecord:
     symbol: str
     timeframe: str
     vertices: tuple[tuple[int, float], ...]
-    color: str = "#4f7cff"
+    color: str = "#8b5a2b"
     line_width: float = 1.0
     line_style: str = "solid"
     persist_across_timeframes: bool = True

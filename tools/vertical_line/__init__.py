@@ -29,7 +29,7 @@ from simplechart.api import (
     register_store_handler,
 )
 
-_DEFAULT_COLOR = "#7a7f8c"
+_DEFAULT_COLOR = "#8b5a2b"
 _DEFAULT_AGE_OFF_DAYS = 60.0
 _HIT_BUFFER = 0.55
 

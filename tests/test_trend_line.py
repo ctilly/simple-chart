@@ -105,6 +105,53 @@ def test_body_drag_translates_whole_line(tmp_path: Path) -> None:
     assert render.polylines[0].points == ((1.0, 105.0), (3.0, 115.0))
 
 
+def test_line_projects_past_last_bar(tmp_path: Path) -> None:
+    # The chart has 5 bars (indices 0-4). Ending the line at x=6.0 places the
+    # second vertex two bars into the empty future space; it must stay there and
+    # not snap back onto the last bar.
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _series()
+    with Cache(str(tmp_path / "t.db")) as cache:
+        store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        start = runtime.start_drawing("trend_line", series, runtime.chart_event(series, 1.0, 100.0))
+        assert start.session is not None
+        result = runtime.advance_drawing(series, start.session, runtime.chart_event(series, 6.0, 120.0))
+        render = runtime.render_all(series)[0].render
+
+    assert result.done
+    assert render.polylines[0].points == ((1.0, 100.0), (6.0, 120.0))
+    # The end-vertex handle marker tracks the projected point too.
+    assert any(m.x_index == 6.0 for m in render.markers)
+
+
+def test_body_drag_into_future(tmp_path: Path) -> None:
+    state = State(symbol="SPY", timeframe=Timeframe.DAILY)
+    series = _series()
+    with Cache(str(tmp_path / "t.db")) as cache:
+        store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
+        runtime = _runtime(state, cache, store)
+        store.load_for_symbol("SPY")
+        start = runtime.start_drawing("trend_line", series, runtime.chart_event(series, 0.0, 100.0))
+        assert start.session is not None
+        runtime.advance_drawing(series, start.session, runtime.chart_event(series, 2.0, 110.0))
+        runtime.render_all(series)
+
+        grab = runtime.chart_event(series, 1.0, 105.0, pixel_size_x=0.05, pixel_size_y=0.2)
+        hit = runtime.drawing_hit_test(series, grab)
+        assert hit is not None and hit.handle_key == "trend_line_1__body"
+        assert runtime.begin_drag(series, grab)
+        # Grab point first, then translate +4 bars so both vertices land past
+        # the last bar (index 4).
+        runtime.drag_to(series, runtime.chart_event(series, 1.0, 105.0))
+        runtime.drag_to(series, runtime.chart_event(series, 5.0, 105.0))
+        runtime.finish_drag(series, runtime.chart_event(series, 5.0, 105.0))
+        render = runtime.render_all(series)[0].render
+
+    assert render.polylines[0].points == ((4.0, 100.0), (6.0, 110.0))
+
+
 def test_configure_and_remove(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()

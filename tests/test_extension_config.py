@@ -45,13 +45,9 @@ def _session_lifecycle_group(dialog: ExtensionConfigDialog) -> QGroupBox:
 
 
 def _last_form_widget(dialog: ExtensionConfigDialog) -> QGroupBox | None:
-    layout = dialog.layout()
-    assert layout is not None
-    layout_item = layout.itemAt(0)
-    assert layout_item is not None
-    form = layout_item.layout()
-    assert form is not None
-    assert isinstance(form, QFormLayout)
+    forms = dialog.findChildren(QFormLayout)
+    assert len(forms) >= 1
+    form = forms[0]
     item = form.itemAt(form.rowCount() - 1, QFormLayout.ItemRole.SpanningRole)
     assert item is not None
     widget = item.widget()

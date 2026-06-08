@@ -38,6 +38,7 @@ Thumbs.db
 notes/
 __.git-backup
 docs/prompts/prompt_language.txt
+To_Do.md
 
 # Claude Code project settings (local only)
 .claude/settings.local.json

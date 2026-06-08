@@ -242,6 +242,8 @@ class ChartExtensionRuntime:
         result = extension.start_drawing(series, params, event)
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
+        if result.clear_transient:
+            self._extension_store.clear_transient_drawings()
         return result
 
     def drawing_hit_test(

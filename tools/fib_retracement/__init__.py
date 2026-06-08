@@ -33,7 +33,7 @@ from simplechart.api import (
 
 _ANCHOR_MODE_OPTIONS: list[str] = ["swing_wick", "close"]
 _LABEL_POSITION_OPTIONS: list[str] = ["right", "left"]
-_DEFAULT_COLOR = "#4f7cff"
+_DEFAULT_COLOR = "#8b5a2b"
 _DEFAULT_AGE_OFF_DAYS = 2.0
 _HIT_X_BUFFER = 0.65
 _HANDLE_HIT_Y_FRACTION = 0.004

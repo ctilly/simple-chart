@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from bisect import bisect_left
+from bisect import bisect_right
 from dataclasses import replace
 from typing import Any
 
@@ -27,7 +27,7 @@ from simplechart.api import (
     PolylineRender,
 )
 
-_DEFAULT_COLOR = "#4f7cff"
+_DEFAULT_COLOR = "#8b5a2b"
 _HANDLE_PIXELS = 9.0
 _LINE_PIXELS = 6.0
 _VERTEX_SUFFIX = "__vtx"
@@ -111,7 +111,8 @@ class PolylineTool(ChartExtension):
         params: dict[str, Any],
         event: ChartEvent,
     ) -> DrawingToolResult:
-        if event.bar_index is None or event.timestamp_ms is None:
+        timestamp = self._event_timestamp(event, _series_timestamps(series))
+        if timestamp is None:
             return DrawingToolResult()
         return DrawingToolResult(
             session=DrawingSession(
@@ -119,7 +120,7 @@ class PolylineTool(ChartExtension):
                 tool_key=self.key_prefix(),
                 original_params=dict(params),
                 working_params={
-                    "vertices": [(event.timestamp_ms, event.y)],
+                    "vertices": [(timestamp, event.y)],
                     "defaults": self._drawing_defaults(params),
                 },
             )
@@ -153,14 +154,15 @@ class PolylineTool(ChartExtension):
         session: DrawingSession,
         event: ChartEvent,
     ) -> DrawingToolResult:
-        if event.bar_index is None or event.timestamp_ms is None:
+        timestamps = _series_timestamps(series)
+        timestamp = self._event_timestamp(event, timestamps)
+        if timestamp is None:
             return DrawingToolResult(session=session)
         vertices: list[tuple[int, float]] = session.working_params["vertices"]
-        vertices.append((event.timestamp_ms, event.y))
+        vertices.append((timestamp, event.y))
         if len(vertices) >= self.max_vertices():
             return self._commit(series, session)
         render = ChartExtensionRender()
-        timestamps = _series_timestamps(series)
         placed = self._placed_layout(session, timestamps)
         defaults: dict[str, Any] = session.working_params["defaults"]
         self._append_path(render, f"{self.key_prefix()}_preview", _DrawingStyle(defaults), placed, placed)
@@ -251,12 +253,12 @@ class PolylineTool(ChartExtension):
         event: ChartEvent,
     ) -> ChartExtensionRender | None:
         record: PolylineRecord | None = session.working_params["record"]
-        if record is None or event.bar_index is None or event.timestamp_ms is None:
+        if record is None:
             return None
         timestamps = _series_timestamps(series)
         updated: PolylineRecord | None
         if session.working_params["mode"] == "vertex":
-            updated = self._move_vertex(record, int(session.working_params["index"]), event)
+            updated = self._move_vertex(record, int(session.working_params["index"]), event, timestamps)
         else:
             updated = self._move_body(session, event, timestamps)
         if updated is None:
@@ -293,9 +295,13 @@ class PolylineTool(ChartExtension):
         record: PolylineRecord,
         index: int,
         event: ChartEvent,
-    ) -> PolylineRecord:
+        timestamps: list[int],
+    ) -> PolylineRecord | None:
+        timestamp = self._event_timestamp(event, timestamps)
+        if timestamp is None:
+            return None
         vertices = list(record.vertices)
-        vertices[index] = (int(event.timestamp_ms), event.y)
+        vertices[index] = (timestamp, event.y)
         return replace(record, vertices=tuple(vertices))
 
     def _move_body(
@@ -305,23 +311,22 @@ class PolylineTool(ChartExtension):
         timestamps: list[int],
     ) -> PolylineRecord | None:
         record: PolylineRecord = session.original_params["record"]
+        if not timestamps:
+            return None
         if session.working_params["origin"] is None:
             session.working_params["origin"] = {
-                "grab_index": event.bar_index,
+                "grab_x": event.x,
                 "grab_price": event.y,
-                "indices": [_timestamp_to_nearest_index(ts, timestamps) for ts, _ in record.vertices],
+                "indices": [_timestamp_to_index(ts, timestamps) for ts, _ in record.vertices],
                 "prices": [price for _, price in record.vertices],
             }
         origin: dict[str, Any] = session.working_params["origin"]
-        delta_bars = int(event.bar_index) - int(origin["grab_index"])
+        delta_index = event.x - float(origin["grab_x"])
         delta_price = event.y - float(origin["grab_price"])
-        last = len(timestamps) - 1
         vertices: list[tuple[int, float]] = []
         for base_index, base_price in zip(origin["indices"], origin["prices"]):
-            if base_index is None:
-                return None
-            shifted = max(0, min(last, base_index + delta_bars))
-            vertices.append((timestamps[shifted], base_price + delta_price))
+            shifted = float(base_index) + delta_index
+            vertices.append((_index_to_timestamp(shifted, timestamps), base_price + delta_price))
         return replace(record, vertices=tuple(vertices))
 
     # ------------------------------------------------------------------
@@ -410,26 +415,32 @@ class PolylineTool(ChartExtension):
         drawing: PolylineRecord,
         timestamps: list[int],
     ) -> list[tuple[float, float]]:
-        layout: list[tuple[float, float]] = []
-        for ts, price in drawing.vertices:
-            index = _timestamp_to_nearest_index(ts, timestamps)
-            if index is None:
-                continue
-            layout.append((float(index), price))
-        return layout
+        return [(_timestamp_to_index(ts, timestamps), price) for ts, price in drawing.vertices]
 
     def _placed_layout(
         self,
         session: DrawingSession,
         timestamps: list[int],
     ) -> list[tuple[float, float]]:
-        layout: list[tuple[float, float]] = []
-        for ts, price in session.working_params["vertices"]:
-            index = _timestamp_to_nearest_index(ts, timestamps)
-            if index is None:
-                continue
-            layout.append((float(index), price))
-        return layout
+        return [
+            (_timestamp_to_index(ts, timestamps), price)
+            for ts, price in session.working_params["vertices"]
+        ]
+
+    def _event_timestamp(
+        self,
+        event: ChartEvent,
+        timestamps: list[int],
+    ) -> int | None:
+        # In-range clicks carry a bar-snapped timestamp; clicks in the empty
+        # space past the last bar carry none, so we extrapolate one from the
+        # fractional bar index. Either way the position is stored as a timestamp,
+        # which re-anchors to a real bar once that time becomes history.
+        if event.timestamp_ms is not None:
+            return event.timestamp_ms
+        if not timestamps:
+            return None
+        return _index_to_timestamp(event.x, timestamps)
 
     def _append_path(
         self,
@@ -457,7 +468,7 @@ class PolylineTool(ChartExtension):
             render.markers.append(
                 MarkerRender(
                     key=f"{key}{_VERTEX_SUFFIX}{index}",
-                    x_index=int(round(x)),
+                    x_index=x,
                     y_value=y,
                     text="●",
                     color=style.color,
@@ -519,16 +530,43 @@ def _series_timestamps(series: OHLCVSeries) -> list[int]:
     return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
 
 
-def _timestamp_to_nearest_index(timestamp_ms: int, timestamps: list[int]) -> int | None:
-    if not timestamps:
-        return None
-    idx = bisect_left(timestamps, timestamp_ms)
-    candidates: list[int] = []
-    if idx < len(timestamps):
-        candidates.append(idx)
-    if idx > 0:
-        candidates.append(idx - 1)
-    return min(candidates, key=lambda candidate: abs(timestamps[candidate] - timestamp_ms))
+def _timestamp_to_index(timestamp_ms: int, timestamps: list[int]) -> float:
+    # Continuous inverse of _index_to_timestamp: a fractional bar index that
+    # interpolates between bars in range and extrapolates linearly beyond the
+    # first/last bar, so future positions keep going instead of snapping back.
+    n = len(timestamps)
+    if n <= 1:
+        return 0.0
+    if timestamp_ms <= timestamps[0]:
+        step = timestamps[1] - timestamps[0]
+        return (timestamp_ms - timestamps[0]) / step if step else 0.0
+    if timestamp_ms >= timestamps[-1]:
+        step = timestamps[-1] - timestamps[-2]
+        return (n - 1) + (timestamp_ms - timestamps[-1]) / step if step else float(n - 1)
+    idx = bisect_right(timestamps, timestamp_ms) - 1
+    span = timestamps[idx + 1] - timestamps[idx]
+    return idx + (timestamp_ms - timestamps[idx]) / span if span else float(idx)
+
+
+def _index_to_timestamp(x: float, timestamps: list[int]) -> int:
+    # Map a fractional bar index back to a timestamp, extrapolating with the
+    # edge bar spacing past either end so positions in the empty future space
+    # get a synthetic timestamp instead of being clamped to the last bar.
+    n = len(timestamps)
+    if n == 0:
+        return 0
+    if n == 1:
+        return timestamps[0]
+    if x <= 0.0:
+        step = timestamps[1] - timestamps[0]
+        return int(round(timestamps[0] + step * x))
+    if x >= n - 1:
+        step = timestamps[-1] - timestamps[-2]
+        return int(round(timestamps[-1] + step * (x - (n - 1))))
+    lower = int(x)
+    base = timestamps[lower]
+    step = timestamps[lower + 1] - base
+    return int(round(base + step * (x - lower)))
 
 
 def _choice_value(value: Any) -> str:

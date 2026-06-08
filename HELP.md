@@ -2,19 +2,17 @@
 
 Simple Chart is designed to be simple and easy to use; no cruft or complicated UI.  It runs natively on Linux, and supported on Mac and Windows, fully extensible, customizable, and FREE.  
 Extensible because it comes equipped with a robust Indicator and Tool API so you can build your own custom indicators and tools. The API is built specifically to faciliate agentic coding with your AI platform of choice. 
-Customizable because the application is open source and you are free to change it to whatever suits your personal preference.
-The app is free, source code and all.  It is licensed though make sure you comply with the license.  
-
+Customizable because the application is source-available and you are free to change it to whatever suits your personal preference.  This charing app allows you to customize literally everything; just tell your agent what you want and set it loose.
 
 
 ## Chart Navigation
 
-### Reset The View
+### Short-cuts
 
-Use `Ctrl+r` to reset the chart view.
+`Ctrl+r` to reset the chart view.
+`Esc` to exit a tool or indicator window
 
-This restores the default chart viewport when the chart has been panned,
-zoomed, or vertically adjusted.
+
 
 ### Mouse Navigation
 
@@ -78,15 +76,16 @@ Simple Chart supports `5m`, `15m`, `30m`, `39m`, `65m`, daily, and weekly
 views.
 
 The `39m` and `65m` timeframes are built for swing trading workflows. They are
-aggregated intraday views that divide the trading session into useful chunks
-without forcing every review into standard calendar intervals.
+aggregated intraday views that divide the trading session into equal chunks
+of time so each segment is weighted exactly the same.
 
 ## Indicators
 
 Simple Chart indicators are designed to preserve higher-timeframe context while
 you inspect lower-timeframe detail. Several indicators are intentionally
 day-based or timestamp-based instead of simple "number of bars on the current
-screen" calculations.
+screen" calculations.  For example, the 5-day moving average should always be 5-days
+even when viewing intraday timeframes.
 
 ### Simple Moving Average
 
@@ -96,26 +95,17 @@ For example, a `50` SMA means a 50 trading-day average. On a daily chart that is
 50 daily bars. On an intraday chart, Simple Chart converts 50 trading days into
 the appropriate number of intraday bars.
 
-This keeps the SMA anchored to the same market idea across timeframes. A
+This keeps the SMA anchored to the same market price across timeframes. A
 50-day SMA remains a 50-day SMA whether you are viewing daily candles or a 5m
 chart.
 
-### Exponential Moving Average
-
-The Exponential Moving Average follows the same day-based convention as the
-SMA.
-
-An EMA gives more weight to recent price action, but its configured value still
-means trading days. A `20` EMA is a 20 trading-day EMA across all timeframes.
 
 ### Pivot Points
 
-Pivot Points are calculated from prior daily price action and then displayed on
+Pivot Points are calculated from prior **daily** price action and then displayed on
 the active chart.
 
-This means the levels remain useful when switching into intraday timeframes:
-you can inspect how price behaves around daily-derived support, resistance, and
-pivot levels inside the session.
+This means the levels remain fixed to their respective levels when switching into intraday timeframes.
 
 Available methods include standard, Fibonacci, and Camarilla pivots.
 
@@ -131,13 +121,6 @@ This makes AVWAP useful for marking events such as earnings, news reactions,
 breakouts, major lows, or major highs, then reviewing that same anchor across
 daily and intraday views.
 
-### RSI
-
-RSI is displayed in its own panel below the price chart. It measures momentum on
-a 0 to 100 scale, with reference levels for overbought and oversold conditions.
-
-Like the moving averages, its configured length is day-based so the same
-momentum idea carries across timeframes.
 
 ## Drawing Tools
 

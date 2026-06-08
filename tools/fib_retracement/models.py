@@ -12,7 +12,7 @@ class FibRetracementRecord:
     end_timestamp_ms: int
     direction: str = "up"
     anchor_price_mode: str = "swing_wick"
-    color: str = "#4f7cff"
+    color: str = "#8b5a2b"
     line_width: float = 1.0
     line_style: str = "solid"
     show_price_labels: bool = False

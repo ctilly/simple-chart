@@ -180,6 +180,16 @@ class DrawingStore(ABC, Generic[R]):
         self._expire_stale_records()
         self._reconcile_state()
 
+    def clear_transient(self) -> None:
+        # Delete every active-symbol record visible on the current timeframe that
+        # is not session-durable. "Persist across sessions" is the only thing that
+        # protects a drawing from erasure; the timeframe axis does not matter.
+        # _active_records already returns a fresh list, so deleting as we iterate
+        # is safe.
+        for record in self._active_records():
+            if not self._is_durable(record):
+                self._delete(record)
+
     # ------------------------------------------------------------------
     # Policy resolution
     # ------------------------------------------------------------------

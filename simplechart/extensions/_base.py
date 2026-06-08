@@ -255,7 +255,7 @@ class MarkerRender:
     """
 
     key: str
-    x_index: int
+    x_index: float
     y_value: float
     text: str
     color: str
@@ -343,6 +343,11 @@ class DrawingToolResult:
     done: bool = False
     cancel: bool = False
     deactivate_tool: bool = False
+    # Request the generic "clear transient drawings" capability: delete every
+    # drawing for the current symbol/timeframe that persists on neither axis.
+    # A tool can ask for this without knowing any other tool's records; the
+    # runtime fans it out across the stores.
+    clear_transient: bool = False
 
 
 class ChartExtensionStoreContext(Protocol):

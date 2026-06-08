@@ -9,6 +9,7 @@ from simplechart.api import (
     ChartExtensionMutation,
     ChartExtensionStoreHandler,
     ChartExtensionStoreRecord,
+    DrawingStore,
 )
 
 
@@ -40,6 +41,13 @@ class ChartExtensionStore:
     def prepare_active_extensions(self) -> None:
         for handler in self._handlers:
             handler.prepare_active_extensions()
+
+    def clear_transient_drawings(self) -> None:
+        # Only drawing stores own erasable drawings; indicator handlers (e.g.
+        # AVWAP anchors) are not drawings and are never touched here.
+        for handler in self._handlers:
+            if isinstance(handler, DrawingStore):
+                handler.clear_transient()
 
     def params_for(
         self,

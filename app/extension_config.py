@@ -21,9 +21,11 @@ _build_field(). The extension's default_params() dict is the contract —
 whatever types appear there, this dialog must handle.
 """
 
+from collections.abc import Callable
 from typing import Any
 
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtGui import QColor, QMouseEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -32,11 +34,14 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -88,6 +93,80 @@ class ColorButton(QPushButton):
         )
 
 
+class _DialogTitleBar(QFrame):
+    """
+    Shaded, draggable title bar for the frameless config dialog.
+
+    The dialog drops the native window frame (so there are no pointless
+    minimize/maximize buttons and no white system bar that vanishes against the
+    chart). This bar replaces it: a colored strip with the title and a single
+    close button, and it moves the window when dragged — mirroring the drawing
+    tool palette.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        on_close: "Callable[[], None]",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("configDialogTitleBar")
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setStyleSheet(
+            "QFrame#configDialogTitleBar {"
+            " background: #dddddd;"
+            " border-bottom: 1px solid #c4c4c4;"
+            "}"
+        )
+        self._drag_offset: QPoint | None = None
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(8, 4, 5, 4)
+        row.setSpacing(4)
+
+        label = QLabel(title, self)
+        label.setStyleSheet("color: #555555; font-weight: bold;")
+        row.addWidget(label)
+        row.addStretch(1)
+
+        close_button = QToolButton(self)
+        close_button.setText("x")
+        close_button.setToolTip("Close")
+        close_button.setFixedSize(18, 18)
+        close_button.setStyleSheet(
+            "QToolButton { color: #555555; background: #dddddd; "
+            "border: 1px solid #c4c4c4; border-radius: 3px; }"
+            "QToolButton:hover { background: #d0d0d0; }"
+        )
+        close_button.clicked.connect(on_close)
+        row.addWidget(close_button)
+
+    def mousePressEvent(self, event: QMouseEvent | None) -> None:
+        window = self.window()
+        if event is not None and window is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (
+                event.globalPosition().toPoint() - window.frameGeometry().topLeft()
+            )
+            event.accept()
+
+    def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
+        window = self.window()
+        if (
+            event is not None
+            and window is not None
+            and self._drag_offset is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            window.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
+        self._drag_offset = None
+        if event is not None:
+            event.accept()
+
+
 class ExtensionConfigDialog(QDialog):
     """
     Modal dialog for editing extension parameters.
@@ -111,11 +190,33 @@ class ExtensionConfigDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Configure: {extension_label}")
         self.setMinimumWidth(300)
+        # Drop the native window frame: the config dialog has no use for
+        # minimize/maximize, and the white system title bar disappears against
+        # the white chart. A frameless window lets us paint our own shaded bar.
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        # The chart behind this dialog is white, so an unstyled (white) dialog is
+        # nearly invisible. Give it the app's light-gray panel fill and a defined
+        # border so it reads clearly as a separate surface. Scoped by object name
+        # so only the dialog frame is painted, not every child widget.
+        self.setObjectName("extensionConfigDialog")
+        self.setStyleSheet(
+            "QDialog#extensionConfigDialog {"
+            " background: #eeeeee;"
+            " border: 2px solid #8a8e96;"
+            "}"
+        )
 
         self._params = dict(params)  # working copy
         self._widgets: dict[str, QWidget] = {}
 
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(_DialogTitleBar(f"Configure: {extension_label}", self.reject, self))
+
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 10, 12, 10)
         form = QFormLayout()
 
         # Skip non-editable internal params. "anchors" is AVWAP's anchor list;
@@ -143,7 +244,7 @@ class ExtensionConfigDialog(QDialog):
 
         layout.addLayout(form)
         layout.addWidget(buttons)
-        self.setLayout(layout)
+        outer.addWidget(content)
 
     def result_params(self) -> dict[str, Any]:
         """
