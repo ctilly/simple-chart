@@ -451,6 +451,7 @@ class MainWindow(QMainWindow):
         """Called on the main thread when the background fetch completes."""
         # Save extension state for the symbol we're leaving.
         if self._loaded_symbol is not None and self._loaded_symbol != series.symbol:
+            registry = all_extensions()
             self._per_symbol_state[self._loaded_symbol] = [
                 ChartExtensionState(
                     name=s.name,
@@ -459,7 +460,7 @@ class MainWindow(QMainWindow):
                     series_visibility=copy.deepcopy(s.series_visibility),
                 )
                 for s in self._state.extensions
-                if all_extensions()[s.name]().preserve_ui_state_per_symbol()
+                if registry[s.name]().preserve_ui_state_per_symbol()
             ]
 
         # Restore or initialize extension state for the arriving symbol.
@@ -1176,27 +1177,26 @@ class MainWindow(QMainWindow):
         for the selected type, then add the new extension to state and
         redraw.
         """
-        registry = all_extensions()
+        extensions = {name: cls() for name, cls in sorted(all_extensions().items())}
         entries = {
-            name: cls
-            for name, cls in sorted(registry.items())
-            if cls().add_mode() == ChartExtensionAddMode.DIALOG
+            name: extension
+            for name, extension in extensions.items()
+            if extension.add_mode() == ChartExtensionAddMode.DIALOG
         }
         if not entries:
             return
 
         menu = QMenu(self)
-        # Map action -> (name, class) so we can look up the selection.
+        # Map action -> (name, instance) so we can look up the selection.
         actions = {
-            menu.addAction(cls().label()): (name, cls)
-            for name, cls in entries.items()
+            menu.addAction(extension.label()): (name, extension)
+            for name, extension in entries.items()
         }
         action = menu.exec(QCursor.pos())
         if action not in actions:
             return
 
-        name, cls = actions[action]
-        extension = cls()
+        name, extension = actions[action]
         dialog = ExtensionConfigDialog(
             extension_label=extension.label(),
             params=extension.default_params(),
@@ -1209,11 +1209,11 @@ class MainWindow(QMainWindow):
             self._reload_extensions()
 
     def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:
-        registry = all_extensions()
+        tools = {name: cls() for name, cls in all_extensions().items()}
         toolbar = {
-            name: cls
-            for name, cls in registry.items()
-            if cls().add_mode() == ChartExtensionAddMode.TOOLBAR
+            name: tool
+            for name, tool in tools.items()
+            if tool.add_mode() == ChartExtensionAddMode.TOOLBAR
         }
         # Fixed toolbox order; any tool not listed falls in afterwards, sorted.
         order = [
@@ -1226,7 +1226,7 @@ class MainWindow(QMainWindow):
         ]
         ordered = [name for name in order if name in toolbar]
         ordered += sorted(name for name in toolbar if name not in order)
-        return [(name, toolbar[name]().label(), toolbar[name]().toolbar_icon()) for name in ordered]
+        return [(name, toolbar[name].label(), toolbar[name].toolbar_icon()) for name in ordered]
 
     def _on_drawing_tool_selected(self, extension_name: str) -> None:
         if self._drawing_session is not None:

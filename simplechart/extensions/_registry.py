@@ -49,6 +49,12 @@ def get_extension(name: str) -> ChartExtension:
         raise KeyError(
             f"Unknown extension {name!r}. Registered: {available}"
         )
+    # A memoized singleton per name was considered (extensions are stateless
+    # today, so one shared instance would serve every render/drag/hit-test and
+    # avoid repeated construction). We deliberately return a fresh instance per
+    # call instead: it guarantees isolation, so any accidental instance state
+    # in an extension or plugin can never bleed across drawings, symbols, or
+    # timeframes. State safety is worth the negligible allocation cost.
     return _registry[name]()
 
 
