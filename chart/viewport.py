@@ -193,6 +193,13 @@ def restore_viewports(snapshot: ViewportSnapshot) -> None:
         ):
             datasrc.init_x0 = state.init_x0
             datasrc.init_x1 = state.init_x1
+        # Re-widen the x-limits before restoring the range. finplot tightens
+        # xLimits back to the data extent whenever a panel's datasrc is
+        # refreshed (e.g. a price-panel indicator's update_data during a
+        # drag-finish reload). Without re-widening, set_range would clamp a
+        # panned view that includes right-side whitespace back to the data,
+        # desyncing the price panel from the volume panel.
+        _force_x_limits(viewbox)
         viewbox.set_range(state.left, state.top, state.right, state.bottom)
         viewbox.v_autozoom = state.v_autozoom
 
