@@ -53,6 +53,27 @@ Data → Indicator engine → Charting (finplot) → Glue/orchestration
 - All new and modified functions must be fully typed (parameters, return
   values). Full typing is required for mypyc compatibility.
 
+## Debugging discipline
+
+For non-obvious bugs, use analysis-first mode: read the relevant path and reason
+from first principles before editing. Present the causal model and wait for
+approval. Include the symptom, reproduction path, violated invariant, smallest
+plausible mechanism, touched files/functions, proposed minimal fix, and a
+falsification check.
+
+Label claims as **Observed**, **Inferred**, **Hypothesis**, or **Verified**.
+Confidence may increase only after a falsifiable check passes, not because a
+theory sounds coherent.
+
+Fix only the bug. Avoid broad speculative changes, unrelated cleanup, defensive
+branches for impossible cases, and performance-costly "just in case" fixes. If a
+change does not fix the bug, undo it before trying another approach.
+
+After two failed hypotheses, stop proposing fixes and retrace from first
+principles. If the bug is still not understood after 25-30 minutes, report
+hypotheses, evidence, ruled-out paths, and the next diagnostic experiment. If
+there is no verified fix after 60 minutes, stop regardless of confidence.
+
 ## Collaboration style
 
 - After completing each logical unit of work (typically one module or one

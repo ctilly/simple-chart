@@ -577,7 +577,7 @@ class MainWindow(QMainWindow):
             self._draw_segment(segment, ind_state, update_legend)
         for vline in render.vertical_lines:
             rendered_keys.add(vline.key)
-            self._draw_vertical_line(vline, ind_state)
+            self._draw_vertical_line(vline, ind_state, update_legend)
         for hline in render.horizontal_lines:
             rendered_keys.add(hline.key)
             self._draw_horizontal_line(hline, ind_state)
@@ -639,10 +639,16 @@ class MainWindow(QMainWindow):
         self,
         line: VerticalLineRender,
         ind_state: ChartExtensionState,
+        update_legend: bool = True,
     ) -> None:
         visible = ind_state.series_visibility.get(line.key, ind_state.visible)
         line.visible = visible and line.visible
         self._chart.plot_manager.update_vertical_line(line)
+        if not update_legend:
+            return
+        self._chart.legend.add_extension(line.key, line.label, line.color)
+        self._chart.legend.update_color(line.key, line.color)
+        self._chart.legend.set_extension_visible(line.key, line.visible)
 
     def _draw_horizontal_line(
         self,
