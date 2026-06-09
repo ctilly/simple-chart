@@ -559,14 +559,14 @@ def _index_to_timestamp(x: float, timestamps: list[int]) -> int:
         return timestamps[0]
     if x <= 0.0:
         step = timestamps[1] - timestamps[0]
-        return int(round(timestamps[0] + step * x))
+        return round(timestamps[0] + step * x)
     if x >= n - 1:
         step = timestamps[-1] - timestamps[-2]
-        return int(round(timestamps[-1] + step * (x - (n - 1))))
+        return round(timestamps[-1] + step * (x - (n - 1)))
     lower = int(x)
     base = timestamps[lower]
     step = timestamps[lower + 1] - base
-    return int(round(base + step * (x - lower)))
+    return round(base + step * (x - lower))
 
 
 def _choice_value(value: Any) -> str:

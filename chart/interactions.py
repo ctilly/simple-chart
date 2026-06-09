@@ -226,8 +226,6 @@ class ChartInteractions:
         the appropriate registered callback based on button. The bar index
         is a float — the controller rounds it and looks up the timestamp.
         """
-        from PyQt6.QtCore import Qt
-
         # finplot uses integer bar indexes on the x-axis (x_indexed=True).
         # pos.x() is a bar index float (e.g. 147.3), not a Unix timestamp.
         pos = self._price_ax.vb.mapSceneToView(event.scenePos())  # type: ignore[attr-defined]

@@ -862,7 +862,7 @@ def _bias_price_axis_precision(
     if target_step <= 0:
         return min_decimals
 
-    desired_decimals = max(0, min(2, int(math.ceil(-math.log10(target_step))) + 2))
+    desired_decimals = max(0, min(2, math.ceil(-math.log10(target_step)) + 2))
     if span <= 25.0:
         desired_decimals = max(desired_decimals, 2)
     if zooming_in:

@@ -84,7 +84,6 @@ EXPORTS
   FloatParam                   Float parameter with range/step/decimals (spinner config)
   LINE_STYLE_OPTIONS           Standard line style strings for ChoiceParam
   RENDER_CHART                 render_target() constant for chart extensions
-  SeriesFill                   Declares a shaded fill between two series
   SeriesRender                 Render description for a line series
   HorizontalSegmentRender      Render description for a horizontal line segment
   VerticalLineRender           Render description for a full-height vertical line
@@ -118,7 +117,7 @@ EXPORTS
   timestamp_ms_to_bar_index    Convert a UTC ms timestamp to a bar index
 """
 
-from simplechart.extensions._base import (  # noqa: F401
+from simplechart.extensions._base import (
     RENDER_CHART,               # "chart" — default render_target() return value
     AxisPriceLabelRender,       # axis-anchored price label render primitive
     ChartEvent,                 # generic chart interaction event
@@ -141,28 +140,27 @@ from simplechart.extensions._base import (  # noqa: F401
     LINE_STYLE_OPTIONS,         # ["solid", "dash", "dot", "dash_dot"]
     MarkerRender,               # price-chart marker render primitive
     PolylineRender,             # connected multi-point path render primitive
-    SeriesFill,                 # fill between two series: SeriesFill(a, b, alpha)
     SeriesRender,               # line series render primitive
     ToolIconLine,               # one line segment of a toolbar icon
     ToolIconSpec,                # declarative toolbar icon for a tool
     VerticalLineRender,         # full-height vertical line render primitive
 )
-from simplechart.extensions._registry import (  # noqa: F401
+from simplechart.extensions._registry import (
     all_extensions,
     get_extension,
     register_extension,
 )
-from simplechart.extensions._store_registry import register_store_handler  # noqa: F401
-from simplechart.extensions._drawing_store import (  # noqa: F401
+from simplechart.extensions._store_registry import register_store_handler
+from simplechart.extensions._drawing_store import (
     AxisPolicy,                 # FIXED_ON | FIXED_OFF | USER per persistence axis
     DrawingStore,               # generic per-tool persistence store base
 )
-from data.models import (         # noqa: F401
+from data.models import (
     Bar,                          # single OHLCV bar
     ChartExtensionStoreRecord,    # opaque plugin-owned persistence record
     OHLCVSeries,                  # full bar series passed to compute()
 )
-from data.calendar import (    # noqa: F401
+from data.calendar import (
     bars_for_n_days,           # bars_for_n_days(days, timeframe) -> int
     timestamp_ms_to_bar_index, # timestamp_ms_to_bar_index(ts_ms, series) -> int
 )
@@ -196,7 +194,6 @@ __all__: list[str] = [
     "OHLCVSeries",
     "PolylineRender",
     "RENDER_CHART",
-    "SeriesFill",
     "SeriesRender",
     "ToolIconLine",
     "ToolIconSpec",

@@ -484,7 +484,7 @@ def _append_drawing_render(
         render.markers.append(
             MarkerRender(
                 key=f"{key}_end_handle",
-                x_index=int(round(layout.end_index)),
+                x_index=round(layout.end_index),
                 y_value=layout.end_price,
                 text="E",
                 color=drawing.color,
@@ -684,7 +684,7 @@ def _end_handle_hit(
         return False
     buffer = max(
         abs(layout.end_price) * _HANDLE_HIT_Y_FRACTION,
-        _local_price_range(series, int(round(layout.end_index))) * 0.4,
+        _local_price_range(series, round(layout.end_index)) * 0.4,
     )
     return abs(event.y - layout.end_price) <= buffer
 

@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, cast
 
+import finplot as fplt
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
@@ -126,8 +127,6 @@ class PlotManager:
         the order: open, close, high, low, indexed by bar timestamps.
         The column order is OCHL (not OHLC) — finplot's convention.
         """
-        import finplot as fplt
-
         df = _series_to_candle_df(series)
         self._bar_index = df.index  # save for extension alignment
 
@@ -159,8 +158,6 @@ class PlotManager:
         finplot's volume_ocv() expects a DataFrame with columns:
         open, close, volume, indexed by bar timestamps.
         """
-        import finplot as fplt
-
         df = _series_to_volume_df(series)
 
         if self._volume_plot is not None:
@@ -208,8 +205,6 @@ class PlotManager:
         values is a numpy array aligned to the current bar series. NaN
         values are not drawn — finplot skips them automatically.
         """
-        import finplot as fplt
-
         pen_style = _LINE_STYLES.get(style, Qt.PenStyle.SolidLine)
 
         # Wrap the numpy array in a pandas Series with the same DatetimeIndex
@@ -379,8 +374,6 @@ class PlotManager:
             restore_viewports(snapshot)
 
     def refresh(self, *, preserve_view: bool = False) -> None:
-        import finplot as fplt
-
         if not preserve_view:
             fplt.refresh()
             return

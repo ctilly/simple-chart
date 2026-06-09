@@ -98,25 +98,6 @@ class ChartExtensionAddMode(str, Enum):
 
 
 @dataclass
-class SeriesFill:
-    """
-    Declares a shaded fill between two named series produced by compute().
-
-    series_a and series_b must be keys returned by the extension's compute()
-    method. The fill is drawn between those two lines using the extension's
-    color param at the given alpha (0.0 = fully transparent, 1.0 = opaque).
-    Values between 0.1 and 0.3 are typical for chart fills.
-
-    Example (Bollinger Bands):
-        SeriesFill("bb_upper", "bb_lower", alpha=0.15)
-    """
-
-    series_a: str
-    series_b: str
-    alpha: float = 0.15
-
-
-@dataclass
 class ChoiceParam:
     """
     A parameter that must be one of a fixed set of string options.
@@ -632,20 +613,6 @@ class ChartExtension(ABC):
         returning the same string share one panel.
         """
         return RENDER_CHART
-
-    def series_fills(self) -> list[SeriesFill]:
-        """
-        Declare shaded fills between pairs of series produced by compute().
-
-        Override this to have the chart draw a translucent fill between two
-        named series (e.g. Bollinger Bands upper and lower). Returns an empty
-        list by default — chart extensions need not override it.
-
-        Note: fill rendering support in PlotManager is planned but not yet
-        implemented. Declaring fills here is forward-compatible; they will
-        be drawn automatically once support is added.
-        """
-        return []
 
 
 def render_from_legacy(

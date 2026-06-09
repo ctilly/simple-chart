@@ -85,7 +85,7 @@ material when useful, but do not treat them as automatic dependencies.
 `simplechart.api` is the stable public import path for extension authors
 (indicators and tools). It re-exports everything a plugin needs:
 `ChartExtension`, `ChoiceParam`, `LINE_STYLE_OPTIONS`, `RENDER_CHART`,
-`SeriesFill`, `SeriesRender`, `HorizontalSegmentRender`, `VerticalLineRender`,
+`SeriesRender`, `HorizontalSegmentRender`, `VerticalLineRender`,
 `MarkerRender`, `ChartExtensionRender`, `ChartEvent`, `ChartExtensionAction`,
 `ChartExtensionMutation`, `ChartExtensionConfig`, `ChartExtensionAddMode`,
 `HitTestResult`, `DragSession`, `DrawingSession`, `DrawingToolResult`,
