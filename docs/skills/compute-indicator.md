@@ -11,6 +11,11 @@ configuration/removal, or custom render primitives. Use
 
 Read this entire file before writing any code.
 
+**Core rule — extensions are stateless.** Never store mutable state on `self`;
+all state flows through `params` and method arguments. The framework constructs,
+discards, and may share instances freely, so `self`-held state would bleed across
+symbols and timeframes.
+
 ---
 
 ## Step 1 — Orient yourself

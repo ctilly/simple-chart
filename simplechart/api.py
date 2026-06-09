@@ -17,6 +17,16 @@ chart: compute-style indicators (SMA, EMA, RSI) and interactive tools
 (vertical line, Fibonacci retracement) alike.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXTENSIONS ARE STATELESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+An extension instance is pure behavior — never store mutable state on `self`.
+All state flows through method arguments (`params`, the event/session objects)
+and your `DrawingStore`. The framework constructs, discards, and may share
+instances freely, so any `self`-held state would bleed across drawings,
+symbols, and timeframes.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXTENSION CATEGORIES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

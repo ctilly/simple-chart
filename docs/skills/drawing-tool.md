@@ -18,6 +18,12 @@ Use a different skill when the work is not a drawing tool:
 
 Read this entire file before writing any code.
 
+**Core rule — extensions are stateless.** Never store mutable state on `self`;
+all state flows through `params`, the event/session objects, and your
+`DrawingStore`. The framework constructs, discards, and may share instances
+freely, so `self`-held state would bleed across drawings, symbols, and
+timeframes.
+
 ---
 
 ## Read First

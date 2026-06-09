@@ -13,6 +13,12 @@ timeframe/session persistence, use `docs/skills/drawing-tool.md` instead. This
 skill is for interactive *indicators* (e.g. Anchored VWAP), which compute from
 data, are added via context menu, and always persist.
 
+**Core rule — extensions are stateless.** Never store mutable state on `self`;
+all state flows through `params`, the event/session objects, and your
+`DrawingStore`. The framework constructs, discards, and may share instances
+freely, so `self`-held state would bleed across drawings, symbols, and
+timeframes.
+
 ## Read First
 
 Read these files before classifying the work:

@@ -391,6 +391,17 @@ class ChartExtensionStoreHandler(Protocol):
 
 
 class ChartExtension(ABC):
+    """
+    Base class for every indicator and tool.
+
+    Extensions are stateless. All per-use state — configured parameters, drawn
+    records, in-progress drags — flows through method arguments (`params`, the
+    `ChartEvent`/`DragSession`/`DrawingSession` objects) and the extension's
+    `DrawingStore`, never through instance attributes. Do not store mutable
+    state on `self`. The framework constructs, discards, and may share
+    instances freely, so any `self`-held state would bleed across drawings,
+    symbols, and timeframes. An extension instance is pure behavior.
+    """
 
     @abstractmethod
     def name(self) -> str:
