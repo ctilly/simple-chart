@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 
 from tools._polyline.base_store import polyline_record_for_key, polyline_series_key
-from tools._polyline.geometry import body_distance, nearest_vertex, point_distance
+from tools._polyline.geometry import body_distance, nearest_vertex
 from tools._polyline.record import PolylineRecord
 from simplechart.api import (
     ChartEvent,
@@ -69,8 +69,8 @@ class PolylineTool(ChartExtension):
             "color": _DEFAULT_COLOR,
             "line_width": 1.0,
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
-            "persist_across_timeframes": True,
-            "persist_across_sessions": True,
+            "persist_across_timeframes": False,
+            "persist_across_sessions": False,
             "age_off_days": FloatParam(self.default_age_off_days(), minimum=0.0, maximum=3650.0, step=1.0, decimals=1),
         }
 
@@ -484,8 +484,8 @@ class PolylineTool(ChartExtension):
             "color": str(params.get("color", _DEFAULT_COLOR)),
             "line_width": float(params.get("line_width", 1.0)),
             "line_style": _choice_value(params.get("line_style", "solid")),
-            "persist_across_timeframes": bool(params.get("persist_across_timeframes", True)),
-            "persist_across_sessions": bool(params.get("persist_across_sessions", True)),
+            "persist_across_timeframes": bool(params.get("persist_across_timeframes", False)),
+            "persist_across_sessions": bool(params.get("persist_across_sessions", False)),
             "age_off_days": _float_value(params.get("age_off_days", self.default_age_off_days())),
         }
 

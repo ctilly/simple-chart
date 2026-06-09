@@ -14,7 +14,7 @@ from indicators.avwap.anchor_store import AvwapAnchorStore
 from tools.erase import EraseTool
 from tools.fib_retracement.session_store import FibRetracementStore
 from tools.vertical_line.session_store import VerticalLineStore
-from simplechart.api import ChartExtensionAddMode, ChartExtensionMutation
+from simplechart.api import ChartEvent, ChartExtensionAddMode, ChartExtensionMutation
 
 
 def test_erase_declares_toolbar_and_icon() -> None:
@@ -40,7 +40,7 @@ def test_erase_click_requests_clear_and_deactivates() -> None:
 
 def test_erase_clears_transient_but_keeps_persistent(tmp_path: Path) -> None:
     # Build the full persistence matrix, then erase. The survivors are exactly
-    # the drawings that persist across timeframes OR sessions.
+    # the drawings that persist across sessions.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
     with Cache(str(tmp_path / "t.db")) as cache:
@@ -58,13 +58,13 @@ def test_erase_clears_transient_but_keeps_persistent(tmp_path: Path) -> None:
 
         # Session persistence is the only protection from erasure; the timeframe
         # axis is irrelevant.
-        # vertical_line_1: session on  (timeframe on, default)   -> KEPT
-        # vertical_line_2: session on  (timeframe off)           -> KEPT
-        _configure("vertical_line_2", runtime, persist_tf=False, persist_session=True)
-        # vertical_line_3: session off (timeframe off)           -> ERASED
-        _configure("vertical_line_3", runtime, persist_tf=False, persist_session=False)
-        # vertical_line_4: session off (timeframe on)            -> ERASED
-        _configure("vertical_line_4", runtime, persist_tf=True, persist_session=False)
+        # vertical_line_-1: session on  (timeframe on)           -> KEPT
+        _configure("vertical_line_-1", runtime, persist_tf=True, persist_session=True)
+        # vertical_line_-2: session on  (timeframe off, default) -> KEPT
+        _configure("vertical_line_-2", runtime, persist_tf=False, persist_session=True)
+        # vertical_line_-3: session off (timeframe off, default) -> ERASED
+        # vertical_line_-4: session off (timeframe on)           -> ERASED
+        _configure("vertical_line_-4", runtime, persist_tf=True, persist_session=False)
 
         assert _vertical_count(runtime, series) == 4
         assert _has_fib(runtime, series)
@@ -84,6 +84,8 @@ def test_erase_is_a_noop_when_nothing_is_transient(tmp_path: Path) -> None:
         runtime, store = _runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", series, runtime.chart_event(series, 2.0, 100.0))
+        runtime.render_all(series)
+        _configure("vertical_line_-1", runtime, persist_tf=False, persist_session=True)
 
         runtime.start_drawing("erase", series, runtime.chart_event(series, 2.0, 100.0))
 
@@ -108,8 +110,6 @@ def test_erase_runs_cleanly_and_spares_avwap_anchors(tmp_path: Path) -> None:
                      "label": "AVWAP", "color": "#8b5a2b"},
         ))
         runtime.render_all(series)
-        # Default vertical line is durable; make it transient (volatile).
-        _configure("vertical_line_1", runtime, persist_tf=False, persist_session=False)
 
         runtime.start_drawing("erase", series, runtime.chart_event(series, 2.5, 100.0))
 
@@ -155,11 +155,13 @@ def _series() -> OHLCVSeries:
     )
 
 
-def _event() -> object:
-    return type("Event", (), {
-        "x": 2.0, "y": 100.0, "bar_index": 2, "timestamp_ms": 0,
-        "button": "left", "pixel_size_x": 0.0, "pixel_size_y": 0.0,
-    })()
+def _event() -> ChartEvent:
+    return ChartEvent(
+        x=2.0,
+        y=100.0,
+        bar_index=2,
+        timestamp_ms=0,
+    )
 
 
 def _runtime(state: State, cache: Cache) -> tuple[ChartExtensionRuntime, ChartExtensionStore]:

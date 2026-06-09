@@ -40,11 +40,12 @@ def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
 
     assert result.done
     assert result.deactivate_tool
-    assert state.get_extension("vertical_line") is not None
     assert len(render_passes) == 1
-    assert render_passes[0].render.vertical_lines[0].key == "vertical_line_1"
+    assert render_passes[0].render.vertical_lines[0].key == "vertical_line_-1"
     assert render_passes[0].render.vertical_lines[0].x_index == 2.0
-    assert state.get_extension("vertical_line").series_keys == ["vertical_line_1"]  # type: ignore[union-attr]
+    extension_state = state.get_extension("vertical_line")
+    assert extension_state is not None
+    assert extension_state.series_keys == ["vertical_line_-1"]
 
 
 def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path) -> None:
@@ -61,6 +62,12 @@ def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path)
             daily,
             runtime.chart_event(daily, 2.0, 103.0),
         )
+        runtime.render_all(daily)
+        request = runtime.config_request("vertical_line_-1")
+        assert request is not None
+        edited = dict(request.params)
+        edited["persist_across_timeframes"] = True
+        runtime.apply_config("vertical_line_-1", edited)
         render_pass = runtime.render_all(intraday)[0]
 
     assert render_pass.render.vertical_lines[0].x_index == 0.0
@@ -83,31 +90,33 @@ def test_vertical_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None:
 
         hit = runtime.drawing_hit_test(series, runtime.chart_event(series, 1.05, 120.0))
         assert hit is not None
-        assert hit.handle_key == "vertical_line_1"
+        assert hit.handle_key == "vertical_line_-1"
 
         assert runtime.begin_drag(series, runtime.chart_event(series, 1.0, 120.0))
         runtime.finish_drag(series, runtime.chart_event(series, 3.0, 120.0))
         dragged = runtime.render_all(series)[0].render.vertical_lines[0]
         assert dragged.x_index == 3.0
 
-        request = runtime.config_request("vertical_line_1")
+        request = runtime.config_request("vertical_line_-1")
         assert request is not None
+        assert request.params["persist_across_timeframes"] is False
+        assert request.params["persist_across_sessions"] is False
         assert isinstance(request.params["age_off_days"], FloatParam)
         assert request.params["age_off_days"].value == 60.0
         edited = dict(request.params)
         edited["color"] = "#ff0000"
         edited["line_width"] = 2.5
         edited["line_style"] = ChoiceParam("dash", ["solid", "dash", "dot", "dash_dot"])
-        runtime.apply_config("vertical_line_1", edited)
+        runtime.apply_config("vertical_line_-1", edited)
         configured = runtime.render_all(series)[0].render.vertical_lines[0]
         assert configured.color == "#ff0000"
         assert configured.line_width == 2.5
         assert configured.line_style == "dash"
 
-        removal = runtime.remove("vertical_line_1")
+        removal = runtime.remove("vertical_line_-1")
 
     assert removal is not None
-    assert removal.series_keys == ["vertical_line_1"]
+    assert removal.series_keys == ["vertical_line_-1"]
     assert state.get_extension("vertical_line") is None
 
 

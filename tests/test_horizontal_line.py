@@ -45,9 +45,9 @@ def test_horizontal_line_one_click_commit_renders_line_and_label(tmp_path: Path)
 
     rendered_line = render_passes[0].render.horizontal_lines[0]
     rendered_label = render_passes[0].render.axis_price_labels[0]
-    assert rendered_line.key == "horizontal_line_1"
+    assert rendered_line.key == "horizontal_line_-1"
     assert rendered_line.y_value == 103.0
-    assert rendered_label.key == "horizontal_line_1"
+    assert rendered_label.key == "horizontal_line_-1"
     assert rendered_label.y_value == 103.0
     assert rendered_label.text == "103.00"
     assert rendered_label.fill_color == rendered_line.color
@@ -67,6 +67,12 @@ def test_horizontal_line_renders_same_price_across_timeframes(tmp_path: Path) ->
             daily,
             runtime.chart_event(daily, 2.0, 103.0),
         )
+        runtime.render_all(daily)
+        request = runtime.config_request("horizontal_line_-1")
+        assert request is not None
+        edited = dict(request.params)
+        edited["persist_across_timeframes"] = True
+        runtime.apply_config("horizontal_line_-1", edited)
         render_pass = runtime.render_all(intraday)[0]
 
     assert render_pass.render.horizontal_lines[0].y_value == 103.0
@@ -92,7 +98,7 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
         # pixel_size_y=0, so the tool falls back to a 0.5 price-unit buffer.
         hit = runtime.drawing_hit_test(series, runtime.chart_event(series, 1.0, 100.3))
         assert hit is not None
-        assert hit.handle_key == "horizontal_line_1"
+        assert hit.handle_key == "horizontal_line_-1"
 
         # Hit-test miss: well outside the buffer.
         miss = runtime.drawing_hit_test(series, runtime.chart_event(series, 1.0, 200.0))
@@ -106,15 +112,17 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
         assert dragged_label.y_value == 115.0
         assert dragged_label.text == "115.00"
 
-        request = runtime.config_request("horizontal_line_1")
+        request = runtime.config_request("horizontal_line_-1")
         assert request is not None
+        assert request.params["persist_across_timeframes"] is False
+        assert request.params["persist_across_sessions"] is False
         assert isinstance(request.params["age_off_days"], FloatParam)
         assert request.params["age_off_days"].value == 365.0
         edited = dict(request.params)
         edited["color"] = "#ff0000"
         edited["line_width"] = 2.5
         edited["line_style"] = ChoiceParam("dash", ["solid", "dash", "dot", "dash_dot"])
-        runtime.apply_config("horizontal_line_1", edited)
+        runtime.apply_config("horizontal_line_-1", edited)
         configured_line = runtime.render_all(series)[0].render.horizontal_lines[0]
         configured_label = runtime.render_all(series)[0].render.axis_price_labels[0]
         assert configured_line.color == "#ff0000"
@@ -123,10 +131,10 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
         # Label fill tracks the line color via the tool's render logic.
         assert configured_label.fill_color == "#ff0000"
 
-        removal = runtime.remove("horizontal_line_1")
+        removal = runtime.remove("horizontal_line_-1")
 
     assert removal is not None
-    assert "horizontal_line_1" in removal.series_keys
+    assert "horizontal_line_-1" in removal.series_keys
     assert state.get_extension("horizontal_line") is None
 
 
@@ -145,14 +153,14 @@ def test_horizontal_line_config_accepts_in_range_price(tmp_path: Path) -> None:
         )
         runtime.render_all(series)
 
-        request = runtime.config_request("horizontal_line_1")
+        request = runtime.config_request("horizontal_line_-1")
         assert request is not None
         assert request.params["price"].value == 100.0
         assert request.params["price"].step == 0.01
 
         edited = dict(request.params)
         edited["price"] = 120.0
-        runtime.apply_config("horizontal_line_1", edited, y_range=(50.0, 200.0))
+        runtime.apply_config("horizontal_line_-1", edited, y_range=(50.0, 200.0))
         moved = runtime.render_all(series)[0].render.horizontal_lines[0]
 
     assert moved.y_value == 120.0
@@ -173,12 +181,12 @@ def test_horizontal_line_config_accepts_price_outside_view_range(tmp_path: Path)
         )
         runtime.render_all(series)
 
-        request = runtime.config_request("horizontal_line_1")
+        request = runtime.config_request("horizontal_line_-1")
         assert request is not None
 
         edited = dict(request.params)
         edited["price"] = 500.0
-        runtime.apply_config("horizontal_line_1", edited, y_range=(50.0, 200.0))
+        runtime.apply_config("horizontal_line_-1", edited, y_range=(50.0, 200.0))
         moved = runtime.render_all(series)[0].render.horizontal_lines[0]
 
     assert moved.y_value == 500.0
@@ -199,12 +207,12 @@ def test_horizontal_line_config_no_y_range_accepts_any_price(tmp_path: Path) -> 
         )
         runtime.render_all(series)
 
-        request = runtime.config_request("horizontal_line_1")
+        request = runtime.config_request("horizontal_line_-1")
         assert request is not None
 
         edited = dict(request.params)
         edited["price"] = 99999.0
-        runtime.apply_config("horizontal_line_1", edited)
+        runtime.apply_config("horizontal_line_-1", edited)
         moved = runtime.render_all(series)[0].render.horizontal_lines[0]
 
     assert moved.y_value == 99999.0

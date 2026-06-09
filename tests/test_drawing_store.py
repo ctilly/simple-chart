@@ -16,15 +16,22 @@ _DAY_MS = 86_400_000
 _VERTICAL_STORE_KEY = "vertical_line.lines"
 
 
-def test_durable_vertical_line_survives_a_restart(tmp_path: Path) -> None:
+def test_vertical_line_survives_a_restart_when_session_persistence_is_enabled(tmp_path: Path) -> None:
     db = str(tmp_path / "t.db")
 
-    # Session 1: draw a vertical line (defaults persist across sessions).
+    # Session 1: draw a vertical line and opt it into session persistence.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     with Cache(db) as cache:
         runtime, store = _vertical_line_runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
+        runtime.render_all(_series())
+        request = runtime.config_request("vertical_line_-1")
+        assert request is not None
+        assert request.params["persist_across_sessions"] is False
+        edited = dict(request.params)
+        edited["persist_across_sessions"] = True
+        runtime.apply_config("vertical_line_-1", edited)
 
     # Session 2: a fresh state/store/runtime on the same database.
     state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
@@ -37,7 +44,7 @@ def test_durable_vertical_line_survives_a_restart(tmp_path: Path) -> None:
     assert len(passes[0].render.vertical_lines) == 1
 
 
-def test_session_toggle_off_makes_a_vertical_line_volatile(tmp_path: Path) -> None:
+def test_default_vertical_line_is_volatile(tmp_path: Path) -> None:
     db = str(tmp_path / "t.db")
 
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
@@ -47,12 +54,9 @@ def test_session_toggle_off_makes_a_vertical_line_volatile(tmp_path: Path) -> No
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
         runtime.render_all(_series())
 
-        # Turn off session persistence for the line (durable -> volatile).
-        request = runtime.config_request("vertical_line_1")
+        request = runtime.config_request("vertical_line_-1")
         assert request is not None
-        edited = dict(request.params)
-        edited["persist_across_sessions"] = False
-        runtime.apply_config("vertical_line_1", edited)
+        assert request.params["persist_across_sessions"] is False
         # Still present this session (volatile records survive within the run).
         assert runtime.render_all(_series())[0].render.vertical_lines
 
@@ -66,7 +70,7 @@ def test_session_toggle_off_makes_a_vertical_line_volatile(tmp_path: Path) -> No
     assert passes == []
 
 
-def test_timeframe_toggle_off_scopes_line_to_its_timeframe(tmp_path: Path) -> None:
+def test_default_timeframe_persistence_off_scopes_line_to_its_timeframe(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     with Cache(str(tmp_path / "t.db")) as cache:
         runtime, store = _vertical_line_runtime(state, cache)
@@ -74,12 +78,9 @@ def test_timeframe_toggle_off_scopes_line_to_its_timeframe(tmp_path: Path) -> No
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
         runtime.render_all(_series())
 
-        # Pin the line to the timeframe it was drawn on (daily).
-        request = runtime.config_request("vertical_line_1")
+        request = runtime.config_request("vertical_line_-1")
         assert request is not None
-        edited = dict(request.params)
-        edited["persist_across_timeframes"] = False
-        runtime.apply_config("vertical_line_1", edited)
+        assert request.params["persist_across_timeframes"] is False
         assert runtime.render_all(_series())[0].render.vertical_lines  # visible on daily
 
         # Switch to another timeframe: hidden.
@@ -189,11 +190,11 @@ def test_tool_update_resets_age_off_clock(tmp_path: Path) -> None:
         runtime.render_all(_series())
 
         clock["now"] += 59 * _DAY_MS
-        request = runtime.config_request("vertical_line_1")
+        request = runtime.config_request("vertical_line_-1")
         assert request is not None
         edited = dict(request.params)
         edited["color"] = "#ff0000"
-        runtime.apply_config("vertical_line_1", edited)
+        runtime.apply_config("vertical_line_-1", edited)
 
         clock["now"] += 59 * _DAY_MS
         passes = runtime.render_all(_series())

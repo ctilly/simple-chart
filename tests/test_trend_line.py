@@ -68,7 +68,7 @@ def test_vertex_drag_moves_only_that_endpoint(tmp_path: Path) -> None:
         # Grab the end vertex (bar 3, price 111) and drag it to bar 4, price 90.
         hit = runtime.drawing_hit_test(series, runtime.chart_event(series, 3.0, 111.0))
         assert hit is not None
-        assert hit.handle_key == "trend_line_1__vtx1"
+        assert hit.handle_key == "trend_line_-1__vtx1"
         assert runtime.begin_drag(series, runtime.chart_event(series, 3.0, 111.0))
         runtime.drag_to(series, runtime.chart_event(series, 4.0, 90.0))
         runtime.finish_drag(series, runtime.chart_event(series, 4.0, 90.0))
@@ -94,7 +94,7 @@ def test_body_drag_translates_whole_line(tmp_path: Path) -> None:
         grab = runtime.chart_event(series, 1.0, 105.0, pixel_size_x=0.05, pixel_size_y=0.2)
         hit = runtime.drawing_hit_test(series, grab)
         assert hit is not None
-        assert hit.handle_key == "trend_line_1__body"
+        assert hit.handle_key == "trend_line_-1__body"
         assert runtime.begin_drag(series, grab)
         # The app feeds the grab point as the first drag_to, then the destination.
         runtime.drag_to(series, runtime.chart_event(series, 1.0, 105.0))
@@ -140,7 +140,7 @@ def test_body_drag_into_future(tmp_path: Path) -> None:
 
         grab = runtime.chart_event(series, 1.0, 105.0, pixel_size_x=0.05, pixel_size_y=0.2)
         hit = runtime.drawing_hit_test(series, grab)
-        assert hit is not None and hit.handle_key == "trend_line_1__body"
+        assert hit is not None and hit.handle_key == "trend_line_-1__body"
         assert runtime.begin_drag(series, grab)
         # Grab point first, then translate +4 bars so both vertices land past
         # the last bar (index 4).
@@ -164,22 +164,22 @@ def test_configure_and_remove(tmp_path: Path) -> None:
         runtime.advance_drawing(series, start.session, runtime.chart_event(series, 3.0, 111.0))
         runtime.render_all(series)
 
-        request = runtime.config_request("trend_line_1")
+        request = runtime.config_request("trend_line_-1")
         assert request is not None
-        assert request.params["persist_across_timeframes"] is True
+        assert request.params["persist_across_timeframes"] is False
+        assert request.params["persist_across_sessions"] is False
         assert isinstance(request.params["age_off_days"], FloatParam)
         edited = dict(request.params)
         edited["color"] = "#ff0000"
         edited["line_width"] = 2.0
         edited["line_style"] = ChoiceParam("dash", ["solid", "dash", "dot", "dash_dot"])
-        edited["persist_across_timeframes"] = False
-        runtime.apply_config("trend_line_1", edited)
+        runtime.apply_config("trend_line_-1", edited)
         configured = runtime.render_all(series)[0].render
         assert configured.polylines[0].color == "#ff0000"
         assert configured.polylines[0].line_width == 2.0
         assert configured.polylines[0].line_style == "dash"
 
-        # persist_across_timeframes now False -> hidden on other timeframes.
+        # Default persist_across_timeframes False -> hidden on other timeframes.
         state.timeframe = Timeframe.MIN5
         intraday = runtime.render_all(_intraday_series(series.bars[1].timestamp))
         assert intraday == [] or intraday[0].render.polylines == []
@@ -187,7 +187,7 @@ def test_configure_and_remove(tmp_path: Path) -> None:
         # Back on the creation timeframe it returns, and can be removed.
         state.timeframe = Timeframe.DAILY
         runtime.render_all(series)
-        removal = runtime.remove("trend_line_1")
+        removal = runtime.remove("trend_line_-1")
 
     assert removal is not None
     assert state.get_extension("trend_line") is None

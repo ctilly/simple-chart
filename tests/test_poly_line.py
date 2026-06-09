@@ -1,6 +1,5 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 from app.extension_runtime import ChartExtensionRuntime
 from app.extension_store import AppChartExtensionStoreContext, ChartExtensionStore
