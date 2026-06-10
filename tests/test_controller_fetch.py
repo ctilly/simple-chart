@@ -4,7 +4,7 @@ from pathlib import Path
 from app.controller import _fetch_series_with_references
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import Bar, MarketSnapshot, Timeframe
+from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider
 
 
@@ -38,6 +38,9 @@ class FakeProvider(DataProvider):
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         return {}
+
+    def fetch_level1(self, symbol: str) -> Level1Quote | None:
+        return None
 
     def native_timeframes(self) -> list[Timeframe]:
         return [Timeframe.MIN15, Timeframe.DAILY]

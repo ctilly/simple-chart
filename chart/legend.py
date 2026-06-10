@@ -18,7 +18,7 @@ reflect the new state.
 from collections.abc import Callable
 from typing import cast
 
-from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt
+from PyQt6.QtCore import QEvent, QObject, QPoint, QPointF, QSize, Qt
 from PyQt6.QtGui import (
     QColor,
     QCursor,
@@ -28,13 +28,13 @@ from PyQt6.QtGui import (
     QPainter,
     QPen,
     QPixmap,
+    QPolygonF,
 )
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPushButton,
     QStyle,
     QToolButton,
     QVBoxLayout,
@@ -306,13 +306,14 @@ class ChartLegend(QWidget):
         self.setLayout(layout)
         self.setFixedHeight(24)
 
-        add_btn = QPushButton("+")
+        add_btn = QToolButton()
+        add_btn.setIcon(_indicator_icon())
+        add_btn.setIconSize(QSize(16, 16))
         add_btn.setFixedSize(20, 20)
         add_btn.setToolTip("Add indicator")
         add_btn.setStyleSheet(
-            "QPushButton { color: #555555; background: transparent; "
-            "border: 1px solid #cccccc; border-radius: 3px; font-weight: bold; }"
-            "QPushButton:hover { background: #eeeeee; }"
+            "QToolButton { background: #2d6cf6; border: none; border-radius: 4px; }"
+            "QToolButton:hover { background: #4a82ff; }"
         )
         add_btn.clicked.connect(on_add)
         layout.addWidget(add_btn)
@@ -409,6 +410,48 @@ class ChartLegend(QWidget):
         if parent is None:
             return global_position
         return parent.mapFromGlobal(global_position)
+
+
+def _indicator_icon(size: int = 20) -> QIcon:
+    """White zig-zag-with-arrowhead glyph for the Add-indicator button."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    white = QColor("#ffffff")
+    pen = QPen(white, 2.0)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    tip = QPointF(0.88 * size, 0.20 * size)
+    painter.drawPolyline(
+        QPolygonF(
+            [
+                QPointF(0.12 * size, 0.72 * size),
+                QPointF(0.36 * size, 0.46 * size),
+                QPointF(0.52 * size, 0.62 * size),
+                QPointF(0.72 * size, 0.39 * size),
+            ]
+        )
+    )
+    # Arrowhead: filled triangle whose wings trail back from the tip along
+    # the final segment's direction (unit vector ~(0.66, -0.76)). The
+    # polyline stops short of the tip so the head reads as a distinct shape.
+    wing_back = QPointF(0.23 * size, -0.265 * size)
+    wing_perp = QPointF(0.125 * size, 0.108 * size)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(white)
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                tip,
+                tip - wing_back + wing_perp,
+                tip - wing_back - wing_perp,
+            ]
+        )
+    )
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _tool_icon(spec: ToolIconSpec | None, widget: QWidget) -> QIcon:

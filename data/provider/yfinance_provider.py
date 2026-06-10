@@ -17,13 +17,14 @@ shadowing the yfinance package on import.
 """
 
 import math
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, cast
 
 import pandas as pd
 import yfinance as yf
 
-from data.models import Bar, MarketSnapshot, Timeframe
+from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, UnsupportedTimeframeError
 
 
@@ -95,6 +96,16 @@ class YFinanceProvider(DataProvider):
         snapshots.update(_fetch_fast_info_snapshots(missing))
         return snapshots
 
+    def fetch_level1(self, symbol: str) -> Level1Quote | None:
+        normalized = symbol.strip().upper()
+        if not normalized:
+            return None
+        try:
+            info = yf.Ticker(normalized).info
+        except Exception:
+            return None
+        return _level1_from_info(normalized, info)
+
     def native_timeframes(self) -> list[Timeframe]:
         return [
             Timeframe.MIN1,
@@ -164,27 +175,35 @@ def _snapshots_from_downloaded_history(
 
 
 def _fetch_fast_info_snapshots(symbols: list[str]) -> dict[str, MarketSnapshot]:
-    snapshots: dict[str, MarketSnapshot] = {}
-    for symbol in symbols:
-        ticker = yf.Ticker(symbol)
+    if not symbols:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(symbols))) as executor:
+        results = list(executor.map(_fetch_fast_info_snapshot, symbols))
+    return {
+        symbol: snapshot
+        for symbol, snapshot in zip(symbols, results)
+        if snapshot is not None
+    }
+
+
+def _fetch_fast_info_snapshot(symbol: str) -> MarketSnapshot | None:
+    ticker = yf.Ticker(symbol)
+    try:
+        fast_info = ticker.get_fast_info()
+        snapshot = _snapshot_from_fast_info(symbol, fast_info)
+    except Exception:
+        snapshot = None
+    if snapshot is None or snapshot.change_percent is None:
         try:
-            fast_info = ticker.get_fast_info()
-            snapshot = _snapshot_from_fast_info(symbol, fast_info)
+            history_snapshot = _snapshot_from_daily_history(
+                symbol,
+                ticker.history(period="5d", interval="1d", auto_adjust=True),
+            )
         except Exception:
-            snapshot = None
-        if snapshot is None or snapshot.change_percent is None:
-            try:
-                history_snapshot = _snapshot_from_daily_history(
-                    symbol,
-                    ticker.history(period="5d", interval="1d", auto_adjust=True),
-                )
-            except Exception:
-                history_snapshot = None
-            if history_snapshot is not None:
-                snapshot = history_snapshot
-        if snapshot is not None:
-            snapshots[symbol] = snapshot
-    return snapshots
+            history_snapshot = None
+        if history_snapshot is not None:
+            snapshot = history_snapshot
+    return snapshot
 
 
 def _snapshot_from_fast_info(symbol: str, fast_info: Any) -> MarketSnapshot | None:
@@ -223,6 +242,13 @@ def _snapshot_from_daily_history(symbol: str, df: pd.DataFrame) -> MarketSnapsho
     if df.empty or "Close" not in df.columns:
         return None
 
+    # Yahoo sometimes returns the newest session as a row of NaNs. Computing
+    # the change from the prior two sessions would silently report yesterday's
+    # move as today's, so omit the snapshot and let the quote-endpoint
+    # fallback supply it.
+    if _optional_finite_float(df.iloc[-1]["Close"]) is None:
+        return None
+
     close_rows: list[tuple[object, float]] = []
     for timestamp, row in df.iterrows():
         close = _optional_finite_float(row["Close"])
@@ -252,6 +278,49 @@ def _snapshot_from_pricing_data(data: dict[str, Any]) -> MarketSnapshot | None:
         change_percent=_optional_finite_float(data.get("change_percent")),
         previous_close=_optional_finite_float(data.get("previous_close")),
         timestamp=_optional_timestamp(data.get("time")),
+    )
+
+
+def _level1_from_info(symbol: str, info: dict[str, Any]) -> Level1Quote | None:
+    def number(*keys: str) -> float | None:
+        for key in keys:
+            value = _optional_finite_float(info.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def whole(*keys: str) -> int | None:
+        value = number(*keys)
+        return int(value) if value is not None else None
+
+    last_price = number("regularMarketPrice", "currentPrice")
+    previous_close = number("regularMarketPreviousClose", "previousClose")
+    if last_price is None and previous_close is None:
+        return None
+
+    change = number("regularMarketChange")
+    change_percent = number("regularMarketChangePercent")
+    if change is None and last_price is not None and previous_close is not None:
+        change = last_price - previous_close
+        if previous_close != 0:
+            change_percent = change / previous_close * 100
+
+    name = info.get("longName") or info.get("shortName")
+    return Level1Quote(
+        symbol=symbol,
+        company_name=name if isinstance(name, str) else None,
+        last_price=last_price,
+        change=change,
+        change_percent=change_percent,
+        bid=number("bid"),
+        bid_size=whole("bidSize"),
+        ask=number("ask"),
+        ask_size=whole("askSize"),
+        open=number("regularMarketOpen", "open"),
+        high=number("regularMarketDayHigh", "dayHigh"),
+        low=number("regularMarketDayLow", "dayLow"),
+        volume=whole("regularMarketVolume", "volume"),
+        previous_close=previous_close,
     )
 
 

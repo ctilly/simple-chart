@@ -15,7 +15,8 @@ The currently active timeframe button is highlighted. The symbol field
 shows the last successfully loaded symbol.
 """
 
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import QTimer, pyqtSignal
+from PyQt6.QtGui import QFocusEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
@@ -39,6 +40,19 @@ _TIMEFRAME_LABELS: list[tuple[Timeframe, str]] = [
 
 # MIN1 is intentionally excluded — it is an internal base timeframe
 # used by the aggregator, not a user-chartable timeframe.
+
+
+class _SymbolInput(QLineEdit):
+    """
+    Line edit that selects its contents on focus, so typing a new ticker
+    replaces the displayed symbol instead of appending to it.
+    """
+
+    def focusInEvent(self, a0: QFocusEvent | None) -> None:
+        super().focusInEvent(a0)
+        # Deferred: a focusing mouse click would otherwise clear the
+        # selection when it places the text cursor after this event.
+        QTimer.singleShot(0, self.selectAll)
 
 
 class SymbolBar(QWidget):
@@ -69,7 +83,7 @@ class SymbolBar(QWidget):
         layout.setSpacing(4)
 
         # Symbol input
-        self._symbol_input = QLineEdit()
+        self._symbol_input = _SymbolInput()
         self._symbol_input.setPlaceholderText("Symbol (e.g. QQQ)")
         self._symbol_input.setMaximumWidth(140)
         self._symbol_input.setStyleSheet(

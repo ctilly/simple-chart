@@ -21,7 +21,7 @@ and resampling. The provider only needs to handle what it can fetch directly.
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from data.models import Bar, MarketSnapshot, Timeframe
+from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 
 
 class UnsupportedTimeframeError(Exception):
@@ -70,7 +70,19 @@ class DataProvider(ABC):
         Fetch current market snapshots for symbols.
 
         Returns a mapping keyed by normalized symbol. Missing symbols may be
-        omitted when the provider has no current market data for them.
+        omitted when the provider has no current market data for them. A
+        provider that cannot determine the current session's data for a
+        symbol must omit it rather than return prior-session data as current.
+        """
+
+    @abstractmethod
+    def fetch_level1(self, symbol: str) -> Level1Quote | None:
+        """
+        Fetch Level 1 data (company name, last/change, bid/ask with sizes,
+        session OHLV, previous close) for one symbol.
+
+        Returns None when the provider has no quote data for the symbol.
+        Individual fields the provider cannot supply are None on the quote.
         """
 
     @abstractmethod

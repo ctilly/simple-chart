@@ -29,7 +29,7 @@ Grouping strategy:
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-from data.models import Bar, MarketSnapshot, Timeframe
+from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, UnsupportedTimeframeError
 
 
@@ -94,6 +94,9 @@ class Aggregator:
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         return self._provider.fetch_snapshots(symbols)
+
+    def fetch_level1(self, symbol: str) -> Level1Quote | None:
+        return self._provider.fetch_level1(symbol)
 
 
 # ------------------------------------------------------------------

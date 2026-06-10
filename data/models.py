@@ -119,6 +119,30 @@ class MarketSnapshot:
 
 
 @dataclass(frozen=True)
+class Level1Quote:
+    """
+    Level 1 market data for one symbol: top-of-book quote plus the
+    current session's stats. Any field a provider cannot supply is None.
+    Bid/ask sizes are in round lots, the conventional Level 1 unit.
+    """
+
+    symbol: str
+    company_name: str | None
+    last_price: float | None
+    change: float | None
+    change_percent: float | None
+    bid: float | None
+    bid_size: int | None
+    ask: float | None
+    ask_size: int | None
+    open: float | None
+    high: float | None
+    low: float | None
+    volume: int | None
+    previous_close: float | None
+
+
+@dataclass(frozen=True)
 class ChartExtensionStoreRecord:
     record_id: int
     store_key: str

@@ -59,7 +59,7 @@ from app.watchlist import WatchlistWidget
 from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import MarketSnapshot, OHLCVSeries, Timeframe
+from data.models import Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider import get_provider
 from simplechart.api import (
     ChartEvent,
@@ -184,6 +184,18 @@ class _SnapshotWorker(QObject):
             self.finished.emit(self._aggregator.fetch_snapshots(self._symbols))
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class _Level1Worker(QObject):
+    finished: pyqtSignal = pyqtSignal(object)   # emits Level1Quote | None
+
+    def __init__(self, aggregator: Aggregator, symbol: str) -> None:
+        super().__init__()
+        self._aggregator = aggregator
+        self._symbol = symbol
+
+    def run(self) -> None:
+        self.finished.emit(self._aggregator.fetch_level1(self._symbol))
 
 
 def _fetch_series_with_references(
@@ -377,9 +389,12 @@ class MainWindow(QMainWindow):
 
         self._snapshot_thread: QThread | None = None
         self._snapshot_worker: _SnapshotWorker | None = None
+        self._level1_thread: QThread | None = None
+        self._level1_worker: _Level1Worker | None = None
         self._snapshot_timer = QTimer(self)
         self._snapshot_timer.setInterval(_SNAPSHOT_REFRESH_MS)
         self._snapshot_timer.timeout.connect(self._refresh_watchlist_snapshots)
+        self._snapshot_timer.timeout.connect(self._refresh_level1)
 
         # Most recently loaded series — used to convert bar index to timestamp
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
@@ -427,6 +442,7 @@ class MainWindow(QMainWindow):
 
         self._chart.clear_all()
         self._chart.legend.clear_all()
+        self._app_header.set_symbol(self._state.symbol)
 
         worker = _FetchWorker(
             aggregator=self._aggregator,
@@ -487,6 +503,7 @@ class MainWindow(QMainWindow):
         self._render(series)
         self._symbol_bar.set_symbol(series.symbol)
         self._watchlist.set_active_symbol(series.symbol)
+        self._refresh_level1()
 
     def _on_fetch_error(self, message: str) -> None:
         QMessageBox.warning(self, "Load Error", message)
@@ -1172,6 +1189,30 @@ class MainWindow(QMainWindow):
             }
         )
 
+    def _refresh_level1(self) -> None:
+        if self._level1_thread is not None and self._level1_thread.isRunning():
+            return
+        if self._state.symbol is None:
+            return
+
+        worker = _Level1Worker(self._aggregator, self._state.symbol)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_level1)
+        worker.finished.connect(thread.quit)
+
+        self._level1_thread = thread
+        self._level1_worker = worker
+        thread.start()
+
+    def _on_level1(self, quote: Level1Quote | None) -> None:
+        # A quote can arrive after the user has already switched symbols;
+        # only the active symbol's quote may reach the header.
+        if quote is None or quote.symbol != self._state.symbol:
+            return
+        self._app_header.set_quote(quote)
+
     def _on_watchlist_snapshot_error(self, message: str) -> None:
         status_bar = self.statusBar()
         if status_bar is not None:
@@ -1258,6 +1299,9 @@ class MainWindow(QMainWindow):
         if self._snapshot_thread and self._snapshot_thread.isRunning():
             self._snapshot_thread.quit()
             self._snapshot_thread.wait()
+        if self._level1_thread and self._level1_thread.isRunning():
+            self._level1_thread.quit()
+            self._level1_thread.wait()
         if self._fetch_thread and self._fetch_thread.isRunning():
             self._fetch_thread.quit()
             self._fetch_thread.wait()

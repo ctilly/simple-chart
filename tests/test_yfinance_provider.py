@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from data.provider.yfinance_provider import (
+    _level1_from_info,
     _rows_to_bars,
     _snapshot_from_daily_history,
     _snapshots_from_downloaded_history,
@@ -155,6 +156,25 @@ def test_snapshot_from_daily_history_uses_latest_close_vs_previous_close() -> No
     assert snapshot.timestamp == datetime(2026, 5, 29, tzinfo=UTC)
 
 
+def test_snapshot_from_daily_history_omits_snapshot_when_latest_row_is_nan() -> None:
+    df = pd.DataFrame(
+        [
+            {"Close": 100.0},
+            {"Close": 110.0},
+            {"Close": float("nan")},
+        ],
+        index=pd.DatetimeIndex(
+            [
+                datetime(2026, 6, 5, tzinfo=UTC),
+                datetime(2026, 6, 8, tzinfo=UTC),
+                datetime(2026, 6, 9, tzinfo=UTC),
+            ]
+        ),
+    )
+
+    assert _snapshot_from_daily_history("SPY", df) is None
+
+
 def test_snapshots_from_downloaded_history_handles_multi_symbol_frame() -> None:
     columns = pd.MultiIndex.from_product(
         [["SPY", "QQQ"], ["Open", "High", "Low", "Close", "Volume"]]
@@ -177,3 +197,52 @@ def test_snapshots_from_downloaded_history_handles_multi_symbol_frame() -> None:
 
     assert snapshots["SPY"].change_percent == pytest.approx(10.0)
     assert snapshots["QQQ"].change_percent == pytest.approx(-5.0)
+
+
+def test_level1_from_info_maps_quote_fields() -> None:
+    quote = _level1_from_info(
+        "NVDA",
+        {
+            "longName": "NVIDIA Corporation",
+            "regularMarketPrice": 208.19,
+            "regularMarketPreviousClose": 208.64,
+            "regularMarketChange": -0.45,
+            "regularMarketChangePercent": -0.2157,
+            "bid": 207.21,
+            "bidSize": 20,
+            "ask": 208.75,
+            "askSize": 18,
+            "regularMarketOpen": 210.615,
+            "regularMarketDayHigh": 211.39,
+            "regularMarketDayLow": 199.34,
+            "regularMarketVolume": 179_602_708,
+        },
+    )
+
+    assert quote is not None
+    assert quote.company_name == "NVIDIA Corporation"
+    assert quote.last_price == pytest.approx(208.19)
+    assert quote.change == pytest.approx(-0.45)
+    assert quote.change_percent == pytest.approx(-0.2157)
+    assert quote.bid == pytest.approx(207.21)
+    assert quote.bid_size == 20
+    assert quote.ask_size == 18
+    assert quote.high == pytest.approx(211.39)
+    assert quote.volume == 179_602_708
+
+
+def test_level1_from_info_computes_change_when_absent() -> None:
+    quote = _level1_from_info(
+        "SPY",
+        {"regularMarketPrice": 110.0, "previousClose": 100.0},
+    )
+
+    assert quote is not None
+    assert quote.change == pytest.approx(10.0)
+    assert quote.change_percent == pytest.approx(10.0)
+    assert quote.bid is None
+    assert quote.company_name is None
+
+
+def test_level1_from_info_requires_some_price_data() -> None:
+    assert _level1_from_info("SPY", {"longName": "SPDR S&P 500"}) is None

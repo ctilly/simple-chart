@@ -31,6 +31,7 @@ from collections.abc import Callable
 
 import finplot as fplt
 import pyqtgraph as pg
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -202,10 +203,13 @@ class ChartWidget(QWidget):
         self._cancel_drag_shortcut = cancel_drag_shortcut
 
         # Enter/Return finishes a multi-point drawing in progress (e.g. poly-line).
+        # Scoped to the chart subtree: a window-wide context would intercept
+        # Enter before focused inputs elsewhere (e.g. the symbol box) see it.
         self._commit_shortcuts = [
             QShortcut(QKeySequence(key), self) for key in ("Return", "Enter")
         ]
         for shortcut in self._commit_shortcuts:
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(self._commit_drawing)
 
     # ------------------------------------------------------------------
