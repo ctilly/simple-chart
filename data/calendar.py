@@ -75,14 +75,27 @@ def timestamp_ms_to_bar_index(
     bar_timestamps_ms is the list of bar open timestamps for the currently
     loaded series, in UTC milliseconds, sorted oldest-first.
 
-    Uses bisect_left: returns the index of the first bar whose timestamp is
-    >= anchor_ts_ms. If the anchor lands exactly on a bar boundary, that bar
-    is index 0 of the AVWAP computation.
+    Uses bisect_right: returns the index of the last bar whose timestamp is
+    <= anchor_ts_ms. If the anchor lands inside a coarser bar (for example a
+    5m anchor viewed on the daily chart), that containing bar is the AVWAP
+    start index.
 
     Edge cases:
       - Anchor predates all loaded bars: returns 0. The controller is
         responsible for fetching far enough back, but 0 is a safe fallback.
-      - Anchor is newer than all loaded bars: returns len(bar_timestamps_ms).
+      - Anchor is far beyond the newest loaded bar, when the previous interval
+        gives enough information to identify that, returns len(bar_timestamps_ms).
         The chart layer treats this anchor as not yet drawable.
     """
-    return bisect.bisect_left(bar_timestamps_ms, timestamp_ms)
+    if not bar_timestamps_ms:
+        return 0
+    idx = bisect.bisect_right(bar_timestamps_ms, timestamp_ms) - 1
+    if idx < 0:
+        return 0
+    if idx == len(bar_timestamps_ms) - 1 and timestamp_ms > bar_timestamps_ms[-1]:
+        if len(bar_timestamps_ms) == 1:
+            return idx
+        last_step = bar_timestamps_ms[-1] - bar_timestamps_ms[-2]
+        if last_step > 0 and timestamp_ms >= bar_timestamps_ms[-1] + last_step:
+            return len(bar_timestamps_ms)
+    return idx

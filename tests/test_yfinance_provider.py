@@ -39,6 +39,34 @@ def test_rows_to_bars_drops_invalid_trailing_row() -> None:
     assert bars[-1].close == pytest.approx(101.5)
 
 
+def test_rows_to_bars_drops_flat_zero_volume_placeholders_when_requested() -> None:
+    df = _frame(
+        [
+            {"Open": 135.0, "High": 135.0, "Low": 135.0, "Close": 135.0, "Volume": 0},
+            {"Open": 150.0, "High": 176.52, "Low": 149.34, "Close": 160.95, "Volume": 519_234_800},
+        ]
+    )
+
+    bars = _rows_to_bars(df, drop_flat_zero_volume_placeholders=True)
+
+    assert len(bars) == 1
+    assert bars[0].open == pytest.approx(150.0)
+    assert bars[0].close == pytest.approx(160.95)
+
+
+def test_rows_to_bars_keeps_flat_zero_volume_rows_by_default() -> None:
+    df = _frame(
+        [
+            {"Open": 135.0, "High": 135.0, "Low": 135.0, "Close": 135.0, "Volume": 0},
+        ]
+    )
+
+    bars = _rows_to_bars(df)
+
+    assert len(bars) == 1
+    assert bars[0].volume == 0
+
+
 def test_rows_to_bars_raises_on_invalid_interior_row() -> None:
     df = _frame(
         [

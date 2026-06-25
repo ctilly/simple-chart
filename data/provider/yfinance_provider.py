@@ -84,7 +84,13 @@ class YFinanceProvider(DataProvider):
         if df.empty:
             return []
 
-        return _rows_to_bars(df)
+        return _rows_to_bars(
+            df,
+            drop_flat_zero_volume_placeholders=timeframe in (
+                Timeframe.DAILY,
+                Timeframe.WEEKLY,
+            ),
+        )
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         requested = _unique_symbols(symbols)
@@ -348,7 +354,11 @@ def _optional_timestamp(value: object) -> datetime | None:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
 
 
-def _rows_to_bars(df: pd.DataFrame) -> list[Bar]:
+def _rows_to_bars(
+    df: pd.DataFrame,
+    *,
+    drop_flat_zero_volume_placeholders: bool = False,
+) -> list[Bar]:
     """
     Convert a yfinance DataFrame into Bars with validation.
 
@@ -358,10 +368,18 @@ def _rows_to_bars(df: pd.DataFrame) -> list[Bar]:
     corrupted fetch and must fail loudly rather than silently distorting
     the series.
     """
-    rows_with_validity = [
-        (_normalize_timestamp(ts), row, _row_is_valid(row))
-        for ts, row in df.iterrows()
-    ]
+    rows_with_validity: list[tuple[datetime, Any, bool]] = []
+    for ts, row in df.iterrows():
+        if (
+            drop_flat_zero_volume_placeholders
+            and _is_flat_zero_volume_placeholder(row)
+        ):
+            continue
+        rows_with_validity.append((
+            _normalize_timestamp(ts),
+            row,
+            _row_is_valid(row),
+        ))
 
     last_valid_index = -1
     for index, (_, _, is_valid) in enumerate(rows_with_validity):
@@ -428,6 +446,18 @@ def _row_to_bar(ts: object, row: Any) -> Bar:
 def _row_is_valid(row: Any) -> bool:
     required = ("Open", "High", "Low", "Close", "Volume")
     return all(_is_finite_number(row[column]) for column in required)
+
+
+def _is_flat_zero_volume_placeholder(row: Any) -> bool:
+    if not _row_is_valid(row):
+        return False
+    if _coerce_volume(row["Volume"]) != 0:
+        return False
+    open_ = _coerce_float(row["Open"])
+    high = _coerce_float(row["High"])
+    low = _coerce_float(row["Low"])
+    close = _coerce_float(row["Close"])
+    return bool(open_ == high == low == close)
 
 
 def _is_finite_number(value: Any) -> bool:

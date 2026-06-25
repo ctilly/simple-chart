@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+import pytest
 
 from data.models import Bar, OHLCVSeries, Timeframe
 from indicators.avwap import (
@@ -76,6 +77,45 @@ def test_avwap_render_owns_anchor_style_label_and_marker() -> None:
     assert render.markers[0].x_index == 2
     assert render.markers[0].text == "⚓️"
     assert render.markers[0].color == "#00FF88"
+
+
+def test_avwap_intraday_anchor_resolves_to_containing_daily_bar() -> None:
+    bars = [
+        Bar(
+            timestamp=datetime(2026, 6, 12, 4, tzinfo=timezone.utc),
+            open=150.0,
+            high=176.52,
+            low=149.34,
+            close=160.95,
+            volume=519_234_800,
+        ),
+        Bar(
+            timestamp=datetime(2026, 6, 15, 4, tzinfo=timezone.utc),
+            open=171.74,
+            high=198.0,
+            low=168.35,
+            close=192.5,
+            volume=256_226_600,
+        ),
+    ]
+    series = OHLCVSeries(symbol="SPCX", timeframe=Timeframe.DAILY, bars=bars)
+    anchor_ts = int(datetime(2026, 6, 12, 15, 45, tzinfo=timezone.utc).timestamp() * 1000)
+    anchor = AnchorRecord(
+        symbol="SPCX",
+        anchor_ts=anchor_ts,
+        label="2026-06-12",
+        color="#800080",
+        show_anchor=True,
+        anchor_id=123,
+    )
+
+    render = AVWAPIndicator().render(series, {"anchors": [anchor]})
+
+    assert render.markers[0].x_index == 0
+    assert not np.isnan(render.series[0].values[0])
+    assert render.series[0].values[0] == pytest.approx(
+        (bars[0].high + bars[0].low + bars[0].close) / 3.0
+    )
 
 
 def test_pivot_points_render_standard_horizontal_segments() -> None:
