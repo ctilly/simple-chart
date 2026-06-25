@@ -2,8 +2,10 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
+from chart.window import ChartWidget
 from chart.plot_manager import _bar_datetime_index, _x_value_for_index
 from data.models import Bar, OHLCVSeries, Timeframe
+from simplechart.api import MarkerRender
 
 
 def test_x_value_for_index_keeps_index_coordinates_in_x_indexed_mode() -> None:
@@ -76,3 +78,108 @@ def test_bar_datetime_index_preserves_intraday_bar_time() -> None:
     index = _bar_datetime_index(series)
 
     assert index[0] == pd.Timestamp("2026-05-29T14:30:00Z")
+
+
+def test_clear_all_removes_marker_items_from_price_axis(qtbot: object) -> None:
+    widget = ChartWidget(
+        on_toggle=lambda _key: None,
+        on_configure=lambda _key: None,
+        on_remove=lambda _key: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _name: None,
+        drawing_tools=[],
+    )
+    qtbot.addWidget(widget)  # type: ignore[attr-defined]
+    plot_manager = widget.plot_manager
+
+    plot_manager.update_marker(
+        MarkerRender(
+            key="avwap_anchor_1",
+            x_index=1.0,
+            y_value=100.0,
+            text="A",
+            color="#000000",
+        )
+    )
+
+    plot_manager.clear_all()
+
+    marker_items = [
+        item
+        for item in plot_manager._price_panel.ax.items
+        if getattr(item, "_simplechart_marker_key", None) == "avwap_anchor_1"
+    ]
+    assert marker_items == []
+
+
+def test_clear_all_removes_untracked_marker_items_from_price_axis(qtbot: object) -> None:
+    widget = ChartWidget(
+        on_toggle=lambda _key: None,
+        on_configure=lambda _key: None,
+        on_remove=lambda _key: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _name: None,
+        drawing_tools=[],
+    )
+    qtbot.addWidget(widget)  # type: ignore[attr-defined]
+    plot_manager = widget.plot_manager
+
+    plot_manager.update_marker(
+        MarkerRender(
+            key="avwap_anchor_1",
+            x_index=1.0,
+            y_value=100.0,
+            text="A",
+            color="#000000",
+        )
+    )
+    plot_manager._markers.clear()
+
+    plot_manager.clear_all()
+
+    marker_items = [
+        item
+        for item in plot_manager._price_panel.ax.items
+        if getattr(item, "_simplechart_marker_key", None) == "avwap_anchor_1"
+    ]
+    assert marker_items == []
+
+
+def test_update_marker_removes_same_key_orphan_items(qtbot: object) -> None:
+    widget = ChartWidget(
+        on_toggle=lambda _key: None,
+        on_configure=lambda _key: None,
+        on_remove=lambda _key: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _name: None,
+        drawing_tools=[],
+    )
+    qtbot.addWidget(widget)  # type: ignore[attr-defined]
+    plot_manager = widget.plot_manager
+
+    plot_manager.update_marker(
+        MarkerRender(
+            key="avwap_anchor_1",
+            x_index=1.0,
+            y_value=100.0,
+            text="A",
+            color="#000000",
+        )
+    )
+    plot_manager._markers.clear()
+    plot_manager.update_marker(
+        MarkerRender(
+            key="avwap_anchor_1",
+            x_index=2.0,
+            y_value=101.0,
+            text="A",
+            color="#000000",
+        )
+    )
+
+    marker_items = [
+        item
+        for item in plot_manager._price_panel.ax.items
+        if getattr(item, "_simplechart_marker_key", None) == "avwap_anchor_1"
+    ]
+    assert len(marker_items) == 1

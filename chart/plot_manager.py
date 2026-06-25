@@ -445,13 +445,15 @@ class PlotManager:
         # and pull them off the scene explicitly.
         for label_key in list(self._axis_price_labels):
             self.remove_axis_price_label(label_key)
+        for marker_key in list(self._markers):
+            self.remove_marker(marker_key)
+        self.scrub_orphan_markers(set())
 
         self._plots.clear()
         self._segments.clear()
         self._vertical_lines.clear()
         self._horizontal_lines.clear()
         self._polylines.clear()
-        self._markers.clear()
         self._candle_plot = None
         self._volume_plot = None
         self._bar_index   = None
@@ -498,9 +500,11 @@ class PlotManager:
             item.setPos(x_value, marker.y_value)
             item.setZValue(marker.z)
             item.setVisible(marker.visible)
+            self._remove_marker_items(marker.key, keep=item)
             return
 
         self.remove_marker(marker.key)
+        self._remove_marker_items(marker.key)
         item = pg.TextItem(
             text=marker.text,
             color=marker.color,
@@ -557,6 +561,7 @@ class PlotManager:
         handle = self._markers.pop(marker_key, None)
         if handle is not None:
             self._price_panel.ax.removeItem(handle)
+        self._remove_marker_items(marker_key)
 
     def scrub_orphan_markers(self, active_marker_keys: set[str]) -> None:
         for marker_key in list(self._markers):
@@ -565,6 +570,13 @@ class PlotManager:
         for item in list(self._price_panel.ax.items):
             item_marker_key = getattr(item, "_simplechart_marker_key", None)
             if isinstance(item_marker_key, str) and item_marker_key not in active_marker_keys:
+                self._price_panel.ax.removeItem(item)
+
+    def _remove_marker_items(self, marker_key: str, keep: object | None = None) -> None:
+        for item in list(self._price_panel.ax.items):
+            if item is keep:
+                continue
+            if getattr(item, "_simplechart_marker_key", None) == marker_key:
                 self._price_panel.ax.removeItem(item)
 
     def _x_value_for_index(self, index: float) -> float:
