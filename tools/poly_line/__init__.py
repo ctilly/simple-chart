@@ -8,7 +8,7 @@ from simplechart.api import (
 )
 
 _DEFAULT_AGE_OFF_DAYS = 365.0
-_MAX_VERTICES = 10
+_MAX_VERTICES = 15
 
 
 class PolyLineTool(PolylineTool):

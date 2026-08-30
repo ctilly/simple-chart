@@ -98,6 +98,23 @@ class Aggregator:
     def fetch_level1(self, symbol: str) -> Level1Quote | None:
         return self._provider.fetch_level1(symbol)
 
+    def fetch_company_name(self, symbol: str) -> str | None:
+        return self._provider.fetch_company_name(symbol)
+
+    def earliest_history_start(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime | None:
+        return self._provider.earliest_history_start(timeframe, end)
+
+    def latest_history_end(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime:
+        return self._provider.latest_history_end(timeframe, end)
+
 
 # ------------------------------------------------------------------
 # Base timeframe selection

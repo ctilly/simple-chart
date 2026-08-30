@@ -53,6 +53,30 @@ Data → Indicator engine → Charting (finplot) → Glue/orchestration
 - All new and modified functions must be fully typed (parameters, return
   values). Full typing is required for mypyc compatibility.
 
+## Credential security (non-negotiable)
+
+- Production provider credentials may be stored only in the current user's
+  operating-system credential store through `CredentialStore`.
+- Never store or load credentials from environment variables, SQLite, config
+  files, command-line arguments, source files, logs, or an automatic in-memory
+  fallback.
+- If secure storage or a provider dependency is unavailable, disable that
+  credential-requiring provider and keep Yahoo available. Never weaken the
+  storage policy to make the provider work.
+- Credential values must not appear in object representations, errors, logs,
+  telemetry, or persisted test artifacts.
+- Read and follow `docs/credential-security.md` before changing credential
+  handling, provider registration, dependency checks, or connection settings.
+
+## Integration completeness
+
+- Infrastructure is not complete until a production call site uses it and an
+  integration test exercises that path.
+- Before reporting a unit complete, name the production call site under
+  `app/` (or the executable entry point) and the test that proves it is wired.
+- Passing library-level tests alone is not evidence that an application
+  feature is connected.
+
 ## Debugging discipline
 
 For non-obvious bugs, use analysis-first mode: read the relevant path and reason

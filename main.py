@@ -5,7 +5,7 @@ Simple Chart entry point.
 
 Run with:
     python main.py
-    python main.py --provider alpaca   # once Alpaca is configured
+    python main.py --provider alpaca-paper
     python main.py --db /path/to/db    # custom database location
 
 The SQLite database defaults to ~/.simplechart/simplechart.db, which
@@ -42,8 +42,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        default="yfinance",
-        help="Data provider name (default: yfinance)",
+        choices=("yfinance", "alpaca-paper", "alpaca-live"),
+        default=None,
+        help="Override the saved active provider connection",
     )
     return parser.parse_args()
 
@@ -116,7 +117,7 @@ def main() -> None:
 
     window = MainWindow(
         db_path=str(args.db),
-        provider_name=args.provider,
+        provider_connection_id=args.provider,
     )
     window.setWindowIcon(app_icon)
     window.show()

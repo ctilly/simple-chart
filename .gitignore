@@ -24,6 +24,12 @@ env/
 *.db-wal
 *.db-shm
 
+# Local application configuration and secrets
+.simplechart/
+.env
+.env.*
+!.env.example
+
 # IDE / editor
 .idea/
 .vscode/

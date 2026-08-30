@@ -4,15 +4,20 @@
 --
 -- Tables:
 --   bars              — cached OHLCV data from the data provider
+--   bar_fetch_coverage — successfully requested bar-data intervals
 --   extension_records — plugin-owned persisted records
 --   watchlist         — user-curated symbols
+--   provider_connections — non-secret data-provider configuration
+--   application_settings — application-wide setting values
+--   asset_reference      — provider-neutral company reference data
 --
 -- Run once on first launch via cache.py:init_db().
 
 
 -- bars
 -- ----------------------------------------------------------------------------
--- One row per bar. The composite primary key (symbol, timeframe, timestamp)
+-- One row per bar. The composite primary key
+-- (cache_namespace, symbol, timeframe, timestamp)
 -- enforces uniqueness and doubles as the covering index for the most common
 -- query: "give me all bars for QQQ at 5m between time A and time B."
 --
@@ -27,6 +32,7 @@
 -- vwap is nullable — not all providers supply it.
 
 CREATE TABLE IF NOT EXISTS bars (
+    cache_namespace TEXT NOT NULL,
     symbol      TEXT    NOT NULL,
     timeframe   TEXT    NOT NULL,
     timestamp   INTEGER NOT NULL,   -- UTC milliseconds
@@ -37,7 +43,24 @@ CREATE TABLE IF NOT EXISTS bars (
     volume      INTEGER NOT NULL,
     vwap        REAL,               -- nullable
 
-    PRIMARY KEY (symbol, timeframe, timestamp)
+    PRIMARY KEY (cache_namespace, symbol, timeframe, timestamp)
+);
+
+
+-- bar fetch coverage
+-- ----------------------------------------------------------------------------
+-- Records the continuous interval the application has successfully requested
+-- from a provider, including requests that returned no bars. This prevents
+-- repeated backfill requests before an IPO or a feed's retention boundary.
+
+CREATE TABLE IF NOT EXISTS bar_fetch_coverage (
+    cache_namespace TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    timeframe       TEXT    NOT NULL,
+    start_timestamp INTEGER NOT NULL,
+    end_timestamp   INTEGER NOT NULL,
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe)
 );
 
 
@@ -69,4 +92,36 @@ CREATE INDEX IF NOT EXISTS idx_extension_records_store_symbol
 CREATE TABLE IF NOT EXISTS watchlist (
     symbol     TEXT    PRIMARY KEY,
     sort_order INTEGER NOT NULL
+);
+
+
+-- provider connections and application settings
+-- ----------------------------------------------------------------------------
+-- Credentials are intentionally excluded. API keys and secrets are stored in
+-- the operating-system credential store under connection_id. Never add a
+-- credential column or payload here; see docs/credential-security.md.
+
+CREATE TABLE IF NOT EXISTS provider_connections (
+    connection_id TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    environment   TEXT,
+    feed          TEXT,
+    sort_order    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS application_settings (
+    setting_key   TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL
+);
+
+
+-- asset reference
+-- ----------------------------------------------------------------------------
+-- Provider-neutral reference data shared across every market-data connection.
+
+CREATE TABLE IF NOT EXISTS asset_reference (
+    symbol       TEXT    PRIMARY KEY,
+    company_name TEXT    NOT NULL,
+    refreshed_at INTEGER NOT NULL
 );

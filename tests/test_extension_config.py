@@ -1,6 +1,13 @@
 from typing import Any
 
-from PyQt6.QtWidgets import QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
+    QFormLayout,
+    QFrame,
+    QGroupBox,
+)
 
 from app.extension_config import ExtensionConfigDialog
 from simplechart.api import FloatParam
@@ -17,6 +24,13 @@ def test_session_lifecycle_group_disables_age_off_until_persistence_enabled(qtbo
         },
     )
     qtbot.addWidget(dialog)
+
+    title_bar = dialog.findChild(QFrame, "dialogTitleBar")
+    assert dialog.objectName() == "extensionConfigDialog"
+    assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
+    assert "border: 2px solid" in dialog.styleSheet()
+    assert title_bar is not None
+    assert "border-bottom: 1px solid" in title_bar.styleSheet()
 
     group = _session_lifecycle_group(dialog)
     persist = group.findChild(QCheckBox)

@@ -35,6 +35,10 @@ class UnsupportedTimeframeError(Exception):
     """
 
 
+class MarketDataEntitlementError(RuntimeError):
+    pass
+
+
 class DataProvider(ABC):
     """
     Interface for OHLCV data sources.
@@ -84,6 +88,26 @@ class DataProvider(ABC):
         Returns None when the provider has no quote data for the symbol.
         Individual fields the provider cannot supply are None on the quote.
         """
+
+    def fetch_company_name(self, symbol: str) -> str | None:
+        """Return a company name when this provider supplies asset reference data."""
+        return None
+
+    def earliest_history_start(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime | None:
+        """Return the provider's earliest safe request date, if constrained."""
+        return None
+
+    def latest_history_end(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime:
+        """Return the latest provider-safe endpoint for a history request."""
+        return end
 
     @abstractmethod
     def native_timeframes(self) -> list[Timeframe]:

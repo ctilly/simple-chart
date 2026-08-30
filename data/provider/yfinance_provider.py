@@ -18,7 +18,7 @@ shadowing the yfinance package on import.
 
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import pandas as pd
@@ -111,6 +111,21 @@ class YFinanceProvider(DataProvider):
         except Exception:
             return None
         return _level1_from_info(normalized, info)
+
+    def fetch_company_name(self, symbol: str) -> str | None:
+        quote = self.fetch_level1(symbol)
+        return None if quote is None else quote.company_name
+
+    def earliest_history_start(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime | None:
+        if timeframe == Timeframe.MIN1:
+            return end - timedelta(days=6)
+        if timeframe.is_intraday:
+            return end - timedelta(days=55)
+        return None
 
     def native_timeframes(self) -> list[Timeframe]:
         return [

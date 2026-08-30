@@ -12,6 +12,8 @@ dependencies = [
     "PyQt6>=6.6",
     "finplot>=1.9.7,<1.10",  # pyqtgraph-based finance charting; pulls in pandas. Capped: viewport.py monkeypatches finplot/pyqtgraph private internals, so a minor bump needs a tested upgrade.
     "yfinance>=0.2",     # dev/test data provider; replace with Alpaca in production
+    "alpaca-py>=0.44,<0.45",  # official Alpaca market-data SDK; minor-capped while pre-1.0
+    "keyring>=25.0",     # sole production store for provider credentials
     "numpy>=1.26",
 ]
 

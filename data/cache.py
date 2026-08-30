@@ -23,7 +23,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from data.models import Bar, ChartExtensionStoreRecord, Timeframe
+from data.models import AssetReference, Bar, ChartExtensionStoreRecord, Timeframe
+from data.provider.config import (
+    FIXED_CONNECTION_IDS,
+    ConnectionEnvironment,
+    MarketDataFeed,
+    ProviderConnection,
+    YFINANCE_CONNECTION_ID,
+    fixed_connections,
+)
 
 
 # Path to the DDL file, relative to this module.
@@ -37,8 +45,8 @@ class Cache:
 
     Usage:
         cache = Cache("/path/to/simplechart.db")
-        bars = cache.get_bars("QQQ", Timeframe.MIN5, start_ts_ms, end_ts_ms)
-        cache.put_bars("QQQ", Timeframe.MIN5, bars)
+        bars = cache.get_bars("yfinance", "QQQ", Timeframe.MIN5, start_ts_ms, end_ts_ms)
+        cache.put_bars("yfinance", "QQQ", Timeframe.MIN5, bars)
         cache.close()
 
     Or as a context manager:
@@ -60,7 +68,51 @@ class Cache:
         """Run schema.sql to create tables if they don't exist yet."""
         ddl = _SCHEMA_PATH.read_text()
         self._conn.executescript(ddl)
+        self._migrate_bars_cache_namespace()
         self._migrate_watchlist_sort_order()
+        self._ensure_fixed_provider_connections()
+
+    def _migrate_bars_cache_namespace(self) -> None:
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(bars)")
+        }
+        if "cache_namespace" in columns:
+            return
+
+        with self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE bars_with_namespace (
+                    cache_namespace TEXT NOT NULL,
+                    symbol          TEXT NOT NULL,
+                    timeframe       TEXT NOT NULL,
+                    timestamp       INTEGER NOT NULL,
+                    open            REAL NOT NULL,
+                    high            REAL NOT NULL,
+                    low             REAL NOT NULL,
+                    close           REAL NOT NULL,
+                    volume          INTEGER NOT NULL,
+                    vwap            REAL,
+                    PRIMARY KEY (
+                        cache_namespace, symbol, timeframe, timestamp
+                    )
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                INSERT INTO bars_with_namespace (
+                    cache_namespace, symbol, timeframe, timestamp,
+                    open, high, low, close, volume, vwap
+                )
+                SELECT 'yfinance', symbol, timeframe, timestamp,
+                       open, high, low, close, volume, vwap
+                FROM bars
+                """
+            )
+            self._conn.execute("DROP TABLE bars")
+            self._conn.execute("ALTER TABLE bars_with_namespace RENAME TO bars")
 
     def _migrate_watchlist_sort_order(self) -> None:
         columns = {
@@ -85,6 +137,56 @@ class Cache:
                 ],
             )
 
+    def _ensure_fixed_provider_connections(self) -> None:
+        with self._conn:
+            placeholders = ", ".join("?" for _ in FIXED_CONNECTION_IDS)
+            self._conn.execute(
+                f"DELETE FROM provider_connections "
+                f"WHERE connection_id NOT IN ({placeholders})",
+                FIXED_CONNECTION_IDS,
+            )
+            for sort_order, connection in enumerate(fixed_connections()):
+                self._conn.execute(
+                    """
+                    INSERT INTO provider_connections (
+                        connection_id, display_name, provider_name,
+                        environment, feed, sort_order
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(connection_id) DO UPDATE SET
+                        display_name = excluded.display_name,
+                        provider_name = excluded.provider_name,
+                        environment = excluded.environment,
+                        sort_order = excluded.sort_order
+                    """,
+                    (
+                        connection.connection_id,
+                        connection.display_name,
+                        connection.provider_name,
+                        connection.environment,
+                        connection.feed,
+                        sort_order,
+                    ),
+                )
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO application_settings (
+                    setting_key, setting_value
+                )
+                VALUES ('active_provider_connection', ?)
+                """,
+                (YFINANCE_CONNECTION_ID,),
+            )
+            self._conn.execute(
+                f"""
+                UPDATE application_settings
+                SET setting_value = ?
+                WHERE setting_key = 'active_provider_connection'
+                  AND setting_value NOT IN ({placeholders})
+                """,
+                (YFINANCE_CONNECTION_ID, *FIXED_CONNECTION_IDS),
+            )
+
     def close(self) -> None:
         self._conn.close()
 
@@ -100,6 +202,7 @@ class Cache:
 
     def get_bars(
         self,
+        cache_namespace: str,
         symbol: str,
         timeframe: Timeframe,
         start_ts_ms: int,
@@ -118,18 +221,20 @@ class Cache:
             """
             SELECT timestamp, open, high, low, close, volume, vwap
             FROM bars
-            WHERE symbol    = ?
+            WHERE cache_namespace = ?
+              AND symbol    = ?
               AND timeframe  = ?
               AND timestamp >= ?
               AND timestamp <= ?
             ORDER BY timestamp ASC
             """,
-            (symbol, timeframe.value, start_ts_ms, end_ts_ms),
+            (cache_namespace, symbol, timeframe.value, start_ts_ms, end_ts_ms),
         )
         return [_row_to_bar(row) for row in cursor]
 
     def put_bars(
         self,
+        cache_namespace: str,
         symbol: str,
         timeframe: Timeframe,
         bars: list[Bar],
@@ -149,12 +254,13 @@ class Cache:
             self._conn.executemany(
                 """
                 INSERT OR REPLACE INTO bars
-                    (symbol, timeframe, timestamp, open, high, low, close, volume, vwap)
-                VALUES
-                    (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (cache_namespace, symbol, timeframe, timestamp,
+                     open, high, low, close, volume, vwap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
+                        cache_namespace,
                         symbol,
                         timeframe.value,
                         _datetime_to_ms(bar.timestamp),
@@ -171,6 +277,7 @@ class Cache:
 
     def newest_cached_timestamp(
         self,
+        cache_namespace: str,
         symbol: str,
         timeframe: Timeframe,
     ) -> int | None:
@@ -185,11 +292,75 @@ class Cache:
         row = self._conn.execute(
             """
             SELECT MAX(timestamp) FROM bars
-            WHERE symbol = ? AND timeframe = ?
+            WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
             """,
-            (symbol, timeframe.value),
+            (cache_namespace, symbol, timeframe.value),
         ).fetchone()
         return row[0] if row and row[0] is not None else None
+
+    def oldest_cached_timestamp(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+    ) -> int | None:
+        row = self._conn.execute(
+            """
+            SELECT MIN(timestamp) FROM bars
+            WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+            """,
+            (cache_namespace, symbol, timeframe.value),
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+    def get_bar_fetch_coverage(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+    ) -> tuple[int, int] | None:
+        row = self._conn.execute(
+            """
+            SELECT start_timestamp, end_timestamp
+            FROM bar_fetch_coverage
+            WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+            """,
+            (cache_namespace, symbol, timeframe.value),
+        ).fetchone()
+        if row is None:
+            return None
+        return (row["start_timestamp"], row["end_timestamp"])
+
+    def extend_bar_fetch_coverage(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        start_ts_ms: int,
+        end_ts_ms: int,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO bar_fetch_coverage (
+                    cache_namespace, symbol, timeframe,
+                    start_timestamp, end_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_namespace, symbol, timeframe) DO UPDATE SET
+                    start_timestamp = MIN(
+                        start_timestamp, excluded.start_timestamp
+                    ),
+                    end_timestamp = MAX(end_timestamp, excluded.end_timestamp)
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    start_ts_ms,
+                    end_ts_ms,
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Watchlist
@@ -231,6 +402,113 @@ class Cache:
                     (index, symbol)
                     for index, symbol in enumerate(symbols)
                 ],
+            )
+
+    # ------------------------------------------------------------------
+    # Asset reference
+    # ------------------------------------------------------------------
+
+    def get_asset_reference(self, symbol: str) -> AssetReference | None:
+        row = self._conn.execute(
+            """
+            SELECT symbol, company_name, refreshed_at
+            FROM asset_reference
+            WHERE symbol = ?
+            """,
+            (symbol.strip().upper(),),
+        ).fetchone()
+        if row is None:
+            return None
+        return AssetReference(
+            symbol=row["symbol"],
+            company_name=row["company_name"],
+            refreshed_at=_ms_to_datetime(row["refreshed_at"]),
+        )
+
+    def put_asset_reference(
+        self,
+        symbol: str,
+        company_name: str,
+        refreshed_at: datetime,
+    ) -> None:
+        normalized = symbol.strip().upper()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO asset_reference (symbol, company_name, refreshed_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    company_name = excluded.company_name,
+                    refreshed_at = excluded.refreshed_at
+                """,
+                (normalized, company_name, _datetime_to_ms(refreshed_at)),
+            )
+
+    # ------------------------------------------------------------------
+    # Provider connections
+    # ------------------------------------------------------------------
+
+    def get_provider_connections(self) -> list[ProviderConnection]:
+        cursor = self._conn.execute(
+            """
+            SELECT connection_id, display_name, provider_name, environment, feed
+            FROM provider_connections
+            ORDER BY sort_order ASC, display_name ASC
+            """
+        )
+        return [_row_to_provider_connection(row) for row in cursor]
+
+    def get_provider_connection(
+        self,
+        connection_id: str,
+    ) -> ProviderConnection | None:
+        row = self._conn.execute(
+            """
+            SELECT connection_id, display_name, provider_name, environment, feed
+            FROM provider_connections
+            WHERE connection_id = ?
+            """,
+            (connection_id,),
+        ).fetchone()
+        return None if row is None else _row_to_provider_connection(row)
+
+    def set_provider_connection_feed(
+        self,
+        connection_id: str,
+        feed: MarketDataFeed,
+    ) -> None:
+        connection = self.get_provider_connection(connection_id)
+        if connection is None or connection.provider_name != "alpaca":
+            raise ValueError(f"Connection {connection_id!r} is not an Alpaca connection.")
+        with self._conn:
+            self._conn.execute(
+                "UPDATE provider_connections SET feed = ? WHERE connection_id = ?",
+                (feed, connection_id),
+            )
+
+    def get_active_provider_connection_id(self) -> str:
+        row = self._conn.execute(
+            """
+            SELECT setting_value
+            FROM application_settings
+            WHERE setting_key = 'active_provider_connection'
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("The active provider connection is not configured.")
+        return str(row[0])
+
+    def set_active_provider_connection_id(self, connection_id: str) -> None:
+        if self.get_provider_connection(connection_id) is None:
+            raise ValueError(f"Unknown provider connection: {connection_id}")
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE application_settings
+                SET setting_value = ?
+                WHERE setting_key = 'active_provider_connection'
+                """,
+                (connection_id,),
             )
 
     # ------------------------------------------------------------------
@@ -343,4 +621,20 @@ def _row_to_extension_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:
         symbol=row["symbol"],
         sort_key=row["sort_key"],
         payload=payload,
+    )
+
+
+def _row_to_provider_connection(row: sqlite3.Row) -> ProviderConnection:
+    environment_value = row["environment"]
+    feed_value = row["feed"]
+    return ProviderConnection(
+        connection_id=row["connection_id"],
+        display_name=row["display_name"],
+        provider_name=row["provider_name"],
+        environment=(
+            None
+            if environment_value is None
+            else ConnectionEnvironment(environment_value)
+        ),
+        feed=None if feed_value is None else MarketDataFeed(feed_value),
     )

@@ -143,6 +143,13 @@ class Level1Quote:
 
 
 @dataclass(frozen=True)
+class AssetReference:
+    symbol: str
+    company_name: str
+    refreshed_at: datetime
+
+
+@dataclass(frozen=True)
 class ChartExtensionStoreRecord:
     record_id: int
     store_key: str

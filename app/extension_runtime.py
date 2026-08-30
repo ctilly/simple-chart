@@ -45,13 +45,18 @@ class ChartExtensionRuntime:
         cache: Cache,
         extension_store: ChartExtensionStore,
         lookback_days: int,
+        cache_namespace: str = "yfinance",
     ) -> None:
         self._state = state
         self._cache = cache
         self._extension_store = extension_store
         self._lookback_days = lookback_days
+        self._cache_namespace = cache_namespace
         self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
+
+    def set_cache_namespace(self, cache_namespace: str) -> None:
+        self._cache_namespace = cache_namespace
 
     def render_all(self, series: OHLCVSeries) -> list[ChartExtensionRenderPass]:
         self._extension_store.prepare_active_extensions()
@@ -440,6 +445,7 @@ class ChartExtensionRuntime:
         )
         end_ms = int(now.timestamp() * 1000)
         return self._cache.get_bars(
+            self._cache_namespace,
             series.symbol,
             Timeframe.DAILY,
             start_ms,

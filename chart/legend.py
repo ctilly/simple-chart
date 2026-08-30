@@ -320,7 +320,7 @@ class ChartLegend(QWidget):
 
         layout.addStretch(1)
 
-        tools_btn = QToolButton()
+        tools_btn = QToolButton(self)
         tools_btn.setText("Tools")
         tools_btn.setFixedHeight(20)
         tools_btn.setToolTip("Drawing tools")

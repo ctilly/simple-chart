@@ -47,6 +47,9 @@ The normal install is sufficient for plain `.py` user plugins dropped into
 - Do not hard-code user-specific paths into source files.
 - Keep platform-specific changes minimal and explain them before applying them.
 - If setup fails, fix the smallest concrete issue blocking launch on that host.
+- Never troubleshoot a provider by placing credentials in environment
+  variables, SQLite, config files, command-line arguments, or source files.
+  Follow the non-negotiable contract in `docs/credential-security.md`.
 
 ## Important Files
 
@@ -55,6 +58,8 @@ The normal install is sufficient for plain `.py` user plugins dropped into
   `simplechart.api` contract; read this before editing code
 - `pyproject.toml` — dependencies, dev extras, mypyc compile targets, and the
   `simplechart` CLI entry point
+- `docs/credential-security.md` — mandatory credential storage and provider
+  dependency rules
 - `docs/skills/compute-indicator.md` — step-by-step skill file for compute
   indicators
 - `docs/skills/interactive-indicator.md` — step-by-step skill file for

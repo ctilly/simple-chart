@@ -16,8 +16,8 @@ Workflows:
 
 Data fetch strategy:
   1. Maintain daily reference bars before intraday loads.
-  2. Check the newest cached timestamp for the requested symbol + timeframe.
-  3. Fetch only missing bars from the provider via the aggregator.
+  2. Determine the desired history window and apply the provider's limit.
+  3. Fetch missing ranges on both sides of the cached coverage interval.
   4. Build an OHLCVSeries from the requested cached range.
 
 Threading:
@@ -33,23 +33,26 @@ Initial workspace extension set:
 """
 
 import copy
-from collections.abc import Iterable
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
+    QDialog,
+    QFrame,
     QHBoxLayout,
     QMainWindow,
     QMenu,
-    QMessageBox,
-    QFrame,
     QVBoxLayout,
     QWidget,
 )
 
 from app.extension_config import ExtensionConfigDialog
+from app.application_settings import ApplicationSettingsDialog
+from app.dialogs import show_information, show_warning
 from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
 from app.extension_store import ChartExtensionStore
 from app.header_bar import AppHeader
@@ -60,7 +63,19 @@ from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
-from data.provider import get_provider
+from data.provider import (
+    ProviderAvailability,
+    ProviderConfigurationError,
+    create_provider,
+    provider_availability,
+)
+from data.provider.base import DataProvider
+from data.provider.config import ProviderConnection, YFINANCE_CONNECTION_ID
+from data.provider.credentials import (
+    CredentialStore,
+    CredentialStoreAccess,
+    initialize_keyring_credential_store,
+)
 from simplechart.api import (
     ChartEvent,
     ChoiceParam,
@@ -95,29 +110,152 @@ INITIAL_EXTENSIONS: list[tuple[str, dict[str, Any]]] = [
     ("sma", {"days": 50, "color": "#1E90FF", "line_width": 1.0, "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS)}),  # blue
 ]
 
-# How many calendar days of bars to load by default.
-# 600 days ensures the 50-day SMA has ample warmup history visible from
-# the left edge of the chart (~50 warmup bars + ~550 days of visible data).
+# Intraday data is intentionally bounded to keep the initial request and local
+# cache size practical. Daily and weekly history use the fixed start below.
 _DEFAULT_LOOKBACK_DAYS = 600
-
-# yfinance hard-limits intraday bar history by timeframe. Requesting
-# dates outside these windows returns empty data (no exception raised).
-#   1m: 7 days
-#   5m / 15m / 30m / 39m (synthesized from 5m) / 65m (synthesized from 5m): 60 days
-# Use 55 / 6 to stay comfortably inside the window.
-_INTRADAY_SHORT_LOOKBACK = 6     # for 1m only
-_INTRADAY_MEDIUM_LOOKBACK = 55   # for 5m/15m/30m/39m/65m
+_DAILY_HISTORY_START = datetime(2016, 1, 1, tzinfo=timezone.utc)
 _SNAPSHOT_REFRESH_MS = 60_000
 _DRAWING_PREVIEW_FRAME_MS = 16
+_ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
+_ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
 
 
-def _lookback_days(tf: Timeframe) -> int:
-    """Return the safe lookback window in calendar days for a timeframe."""
-    if tf in (Timeframe.MIN1,):
-        return _INTRADAY_SHORT_LOOKBACK
-    if tf in (Timeframe.MIN5, Timeframe.MIN15, Timeframe.MIN30, Timeframe.MIN39, Timeframe.MIN65):
-        return _INTRADAY_MEDIUM_LOOKBACK
-    return _DEFAULT_LOOKBACK_DAYS
+def _history_start(
+    timeframe: Timeframe,
+    aggregator: Aggregator,
+    end: datetime,
+) -> datetime:
+    desired = (
+        end - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+        if timeframe.is_intraday
+        else _DAILY_HISTORY_START
+    )
+    provider_limit = aggregator.earliest_history_start(timeframe, end)
+    if provider_limit is None:
+        return desired
+    return max(desired, provider_limit)
+
+
+def _history_end(
+    timeframe: Timeframe,
+    aggregator: Aggregator,
+    end: datetime,
+) -> datetime:
+    return aggregator.latest_history_end(timeframe, end)
+
+
+@dataclass(frozen=True)
+class _DataRoute:
+    aggregator: Aggregator
+    connection: ProviderConnection
+
+    @property
+    def cache_namespace(self) -> str:
+        return self.connection.cache_namespace
+
+    @property
+    def display_name(self) -> str:
+        feed = self.connection.feed
+        if feed is None:
+            return self.connection.display_name
+        return f"{self.connection.display_name} / {feed.display_name}"
+
+
+@dataclass(frozen=True)
+class _StartupRoutes:
+    selected: _DataRoute
+    yahoo: _DataRoute
+    fallback_reason: str | None
+
+
+@dataclass(frozen=True)
+class _SnapshotBatch:
+    aggregator: Aggregator
+    symbols: list[str]
+
+
+def _is_yahoo_futures_symbol(symbol: str) -> bool:
+    return symbol.strip().upper().endswith("=F")
+
+
+def _route_for_symbol(
+    symbol: str,
+    selected_route: _DataRoute,
+    yahoo_route: _DataRoute,
+) -> _DataRoute:
+    return yahoo_route if _is_yahoo_futures_symbol(symbol) else selected_route
+
+
+def _provider_availability_by_name(
+    connections: Iterable[ProviderConnection],
+    credential_access: CredentialStoreAccess,
+) -> dict[str, ProviderAvailability]:
+    return {
+        connection.provider_name: provider_availability(
+            connection.provider_name,
+            credential_access,
+        )
+        for connection in connections
+    }
+
+
+def _build_startup_routes(
+    cache: Cache,
+    connection_id: str,
+    credential_store: CredentialStore,
+    availability_by_name: Mapping[str, ProviderAvailability],
+) -> _StartupRoutes:
+    selected_connection = cache.get_provider_connection(connection_id)
+    if selected_connection is None:
+        raise ValueError(f"Unknown provider connection: {connection_id}")
+
+    yahoo_connection = cache.get_provider_connection(YFINANCE_CONNECTION_ID)
+    if yahoo_connection is None:
+        raise RuntimeError("The Yahoo Finance connection is not configured.")
+    yahoo_availability = availability_by_name.get(yahoo_connection.provider_name)
+    if yahoo_availability is None or not yahoo_availability.available:
+        reason = (
+            "Provider availability was not checked."
+            if yahoo_availability is None
+            else yahoo_availability.reason
+        )
+        raise ProviderConfigurationError(f"Yahoo Finance is unavailable: {reason}")
+
+    yahoo_route = _DataRoute(
+        Aggregator(create_provider(yahoo_connection, credential_store)),
+        yahoo_connection,
+    )
+    if selected_connection.connection_id == YFINANCE_CONNECTION_ID:
+        return _StartupRoutes(yahoo_route, yahoo_route, None)
+
+    selected_availability = availability_by_name.get(
+        selected_connection.provider_name
+    )
+    if selected_availability is None or not selected_availability.available:
+        reason = (
+            "Provider availability was not checked."
+            if selected_availability is None
+            else selected_availability.reason
+        )
+        return _StartupRoutes(
+            yahoo_route,
+            yahoo_route,
+            f"{selected_connection.display_name} is unavailable: {reason}",
+        )
+
+    try:
+        selected_provider = create_provider(selected_connection, credential_store)
+    except ProviderConfigurationError as exc:
+        return _StartupRoutes(
+            yahoo_route,
+            yahoo_route,
+            f"{selected_connection.display_name} is unavailable: {exc}",
+        )
+    return _StartupRoutes(
+        _DataRoute(Aggregator(selected_provider), selected_connection),
+        yahoo_route,
+        None,
+    )
 
 
 class _FetchWorker(QObject):
@@ -136,16 +274,16 @@ class _FetchWorker(QObject):
         self,
         aggregator: Aggregator,
         cache:      Cache,
+        cache_namespace: str,
         symbol:     str,
         timeframe:  Timeframe,
-        lookback_days: int,
     ) -> None:
         super().__init__()
         self._aggregator    = aggregator
         self._cache         = cache
+        self._cache_namespace = cache_namespace
         self._symbol        = symbol
         self._timeframe     = timeframe
-        self._lookback_days = lookback_days
 
     def run(self) -> None:
         """
@@ -159,9 +297,9 @@ class _FetchWorker(QObject):
             series = _fetch_series_with_references(
                 self._aggregator,
                 self._cache,
+                self._cache_namespace,
                 self._symbol,
                 self._timeframe,
-                self._lookback_days,
                 now,
             )
             self.finished.emit(series)
@@ -174,14 +312,16 @@ class _SnapshotWorker(QObject):
     finished: pyqtSignal = pyqtSignal(object)   # emits dict[str, MarketSnapshot]
     error:    pyqtSignal = pyqtSignal(str)
 
-    def __init__(self, aggregator: Aggregator, symbols: list[str]) -> None:
+    def __init__(self, batches: list[_SnapshotBatch]) -> None:
         super().__init__()
-        self._aggregator = aggregator
-        self._symbols = list(symbols)
+        self._batches = list(batches)
 
     def run(self) -> None:
         try:
-            self.finished.emit(self._aggregator.fetch_snapshots(self._symbols))
+            snapshots: dict[str, MarketSnapshot] = {}
+            for batch in self._batches:
+                snapshots.update(batch.aggregator.fetch_snapshots(batch.symbols))
+            self.finished.emit(snapshots)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -189,50 +329,179 @@ class _SnapshotWorker(QObject):
 class _Level1Worker(QObject):
     finished: pyqtSignal = pyqtSignal(object)   # emits Level1Quote | None
 
-    def __init__(self, aggregator: Aggregator, symbol: str) -> None:
+    def __init__(
+        self,
+        aggregator: Aggregator,
+        reference_aggregator: Aggregator,
+        cache: Cache,
+        symbol: str,
+        refresh_reference: bool,
+        now: datetime,
+    ) -> None:
         super().__init__()
         self._aggregator = aggregator
+        self._reference_aggregator = reference_aggregator
+        self._cache = cache
         self._symbol = symbol
+        self._refresh_reference = refresh_reference
+        self._now = now
 
     def run(self) -> None:
-        self.finished.emit(self._aggregator.fetch_level1(self._symbol))
+        quote = self._aggregator.fetch_level1(self._symbol)
+        if quote is None:
+            self.finished.emit(None)
+            return
+        known_reference_name = (
+            quote.company_name
+            if self._aggregator is self._reference_aggregator
+            else None
+        )
+        company_name = _resolve_company_name(
+            self._cache,
+            self._reference_aggregator,
+            self._symbol,
+            self._now,
+            self._refresh_reference,
+            known_reference_name,
+        )
+        if company_name != quote.company_name:
+            quote = replace(quote, company_name=company_name)
+        self.finished.emit(quote)
+
+
+class _ProviderValidationWorker(QObject):
+    finished: pyqtSignal = pyqtSignal()
+    error: pyqtSignal = pyqtSignal(str)
+
+    def __init__(self, provider: DataProvider) -> None:
+        super().__init__()
+        self._provider = provider
+
+    def run(self) -> None:
+        try:
+            _validate_provider_connection(self._provider)
+            self.finished.emit()
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+def _validate_provider_connection(provider: DataProvider) -> None:
+    if provider.fetch_level1("SPY") is None:
+        raise RuntimeError("The provider returned no SPY market-data snapshot.")
+
+
+def _resolve_company_name(
+    cache: Cache,
+    reference_aggregator: Aggregator,
+    symbol: str,
+    now: datetime,
+    refresh_reference: bool,
+    known_reference_name: str | None = None,
+) -> str | None:
+    reference = cache.get_asset_reference(symbol)
+    if (
+        reference is not None
+        and reference.refreshed_at >= now - _ASSET_REFERENCE_MAX_AGE
+    ):
+        return reference.company_name
+    if not refresh_reference:
+        return (
+            reference.company_name
+            if reference is not None
+            else _normalized_company_name(known_reference_name)
+        )
+
+    company_name = _normalized_company_name(known_reference_name)
+    if company_name is None:
+        company_name = _normalized_company_name(
+            reference_aggregator.fetch_company_name(symbol)
+        )
+    if company_name is not None:
+        cache.put_asset_reference(symbol, company_name, now)
+        return company_name
+    return None if reference is None else reference.company_name
+
+
+def _asset_reference_refresh_due(
+    cache: Cache,
+    symbol: str,
+    now: datetime,
+    last_attempt: datetime | None,
+) -> bool:
+    reference = cache.get_asset_reference(symbol)
+    if (
+        reference is not None
+        and reference.refreshed_at >= now - _ASSET_REFERENCE_MAX_AGE
+    ):
+        return False
+    return (
+        last_attempt is None
+        or last_attempt <= now - _ASSET_REFERENCE_RETRY_DELAY
+    )
+
+
+def _normalized_company_name(name: str | None) -> str | None:
+    if name is None:
+        return None
+    normalized = name.strip()
+    return normalized or None
 
 
 def _fetch_series_with_references(
     aggregator: Aggregator,
     cache: Cache,
+    cache_namespace: str,
     symbol: str,
     timeframe: Timeframe,
-    lookback_days: int,
     now: datetime,
 ) -> OHLCVSeries:
     if timeframe.is_intraday:
+        daily_end = _history_end(Timeframe.DAILY, aggregator, now)
+        daily_start = _history_start(Timeframe.DAILY, aggregator, daily_end)
         _fetch_and_cache_bars(
             aggregator,
             cache,
+            cache_namespace,
             symbol,
             Timeframe.DAILY,
-            _DEFAULT_LOOKBACK_DAYS,
-            now,
+            daily_start,
+            daily_end,
         )
-    return _fetch_series(aggregator, cache, symbol, timeframe, lookback_days, now)
+    return _fetch_series(
+        aggregator,
+        cache,
+        cache_namespace,
+        symbol,
+        timeframe,
+        now,
+    )
 
 
 def _fetch_series(
     aggregator: Aggregator,
     cache: Cache,
+    cache_namespace: str,
     symbol: str,
     timeframe: Timeframe,
-    lookback_days: int,
     now: datetime,
 ) -> OHLCVSeries:
-    _fetch_and_cache_bars(aggregator, cache, symbol, timeframe, lookback_days, now)
-    lookback_ms = int((now.timestamp() - lookback_days * 86_400) * 1000)
-    bars = cache.get_bars(
+    history_end = _history_end(timeframe, aggregator, now)
+    history_start = _history_start(timeframe, aggregator, history_end)
+    _fetch_and_cache_bars(
+        aggregator,
+        cache,
+        cache_namespace,
         symbol,
         timeframe,
-        lookback_ms,
-        int(now.timestamp() * 1000),
+        history_start,
+        history_end,
+    )
+    bars = cache.get_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        int(history_start.timestamp() * 1000),
+        int(history_end.timestamp() * 1000),
     )
     return OHLCVSeries(
         symbol=symbol,
@@ -244,23 +513,85 @@ def _fetch_series(
 def _fetch_and_cache_bars(
     aggregator: Aggregator,
     cache: Cache,
+    cache_namespace: str,
     symbol: str,
     timeframe: Timeframe,
-    lookback_days: int,
+    history_start: datetime,
     now: datetime,
 ) -> None:
-    newest_ts = cache.newest_cached_timestamp(symbol, timeframe)
-    if newest_ts is not None:
-        start = datetime.fromtimestamp(newest_ts / 1000, tz=timezone.utc)
-    else:
-        start = datetime.fromtimestamp(
-            now.timestamp() - lookback_days * 86_400,
-            tz=timezone.utc,
+    requested_start_ms = int(history_start.timestamp() * 1000)
+    requested_end_ms = int(now.timestamp() * 1000)
+    coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+    )
+    if coverage is None:
+        oldest_ts = cache.oldest_cached_timestamp(
+            cache_namespace,
+            symbol,
+            timeframe,
+        )
+        newest_ts = cache.newest_cached_timestamp(
+            cache_namespace,
+            symbol,
+            timeframe,
+        )
+        if oldest_ts is None or newest_ts is None:
+            _fetch_bar_range(
+                aggregator,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                history_start,
+                now,
+            )
+            return
+        coverage = (oldest_ts, newest_ts)
+
+    coverage_start_ms, coverage_end_ms = coverage
+    if requested_start_ms < coverage_start_ms:
+        _fetch_bar_range(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            datetime.fromtimestamp(coverage_start_ms / 1000, tz=timezone.utc),
+        )
+    if requested_end_ms > coverage_end_ms:
+        _fetch_bar_range(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            datetime.fromtimestamp(coverage_end_ms / 1000, tz=timezone.utc),
+            now,
         )
 
-    new_bars = aggregator.fetch_bars(symbol, timeframe, start, now)
+
+def _fetch_bar_range(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    start: datetime,
+    end: datetime,
+) -> None:
+    new_bars = aggregator.fetch_bars(symbol, timeframe, start, end)
     if new_bars:
-        cache.put_bars(symbol, timeframe, new_bars)
+        cache.put_bars(cache_namespace, symbol, timeframe, new_bars)
+    cache.extend_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+        int(start.timestamp() * 1000),
+        int(end.timestamp() * 1000),
+    )
 
 
 class MainWindow(QMainWindow):
@@ -275,7 +606,11 @@ class MainWindow(QMainWindow):
         └─────────────────────────────────┘
     """
 
-    def __init__(self, db_path: str, provider_name: str = "yfinance") -> None:
+    def __init__(
+        self,
+        db_path: str,
+        provider_connection_id: str | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("Simple Chart")
         self.resize(1400, 800)
@@ -283,8 +618,30 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         # Data layer
         # ------------------------------------------------------------------
-        self._cache      = Cache(db_path)
-        self._aggregator = Aggregator(get_provider(provider_name))
+        self._cache = Cache(db_path)
+        connection_id = (
+            provider_connection_id
+            if provider_connection_id is not None
+            else self._cache.get_active_provider_connection_id()
+        )
+        connection = self._cache.get_provider_connection(connection_id)
+        if connection is None:
+            raise ValueError(f"Unknown provider connection: {connection_id}")
+        self._credential_access = initialize_keyring_credential_store()
+        self._credential_store = self._credential_access.store
+        self._provider_availability = _provider_availability_by_name(
+            self._cache.get_provider_connections(),
+            self._credential_access,
+        )
+        startup_routes = _build_startup_routes(
+            self._cache,
+            connection.connection_id,
+            self._credential_store,
+            self._provider_availability,
+        )
+        self._selected_route = startup_routes.selected
+        self._yahoo_route = startup_routes.yahoo
+        self._startup_provider_fallback_reason = startup_routes.fallback_reason
 
         # ------------------------------------------------------------------
         # App state
@@ -296,6 +653,7 @@ class MainWindow(QMainWindow):
             self._cache,
             self._extension_store,
             _DEFAULT_LOOKBACK_DAYS,
+            self._selected_route.cache_namespace,
         )
         self._active_drawing_tool: str | None = None
         self._drawing_session: DrawingSession | None = None
@@ -382,6 +740,7 @@ class MainWindow(QMainWindow):
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
         self._symbol_bar.timeframe_changed.connect(self._on_timeframe_changed)
+        self._symbol_bar.settings_requested.connect(self._on_application_settings)
 
         # Active fetch thread — kept as an attribute to prevent GC.
         self._fetch_thread: QThread | None = None
@@ -391,6 +750,10 @@ class MainWindow(QMainWindow):
         self._snapshot_worker: _SnapshotWorker | None = None
         self._level1_thread: QThread | None = None
         self._level1_worker: _Level1Worker | None = None
+        self._asset_reference_refresh_attempts: dict[str, datetime] = {}
+        self._validation_thread: QThread | None = None
+        self._validation_worker: _ProviderValidationWorker | None = None
+        self._pending_route: _DataRoute | None = None
         self._snapshot_timer = QTimer(self)
         self._snapshot_timer.setInterval(_SNAPSHOT_REFRESH_MS)
         self._snapshot_timer.timeout.connect(self._refresh_watchlist_snapshots)
@@ -410,6 +773,13 @@ class MainWindow(QMainWindow):
         initial_symbol = watchlist[0] if watchlist else "SPY"
         self._state.symbol = initial_symbol
         self._symbol_bar.set_symbol(initial_symbol)
+        if self._startup_provider_fallback_reason is not None:
+            status_bar = self.statusBar()
+            if status_bar is not None:
+                status_bar.showMessage(
+                    f"{self._startup_provider_fallback_reason} Using Yahoo "
+                    "Finance for this session.",
+                )
         self._load()
         self._snapshot_timer.start()
         self._refresh_watchlist_snapshots()
@@ -425,6 +795,9 @@ class MainWindow(QMainWindow):
     def _on_timeframe_changed(self, tf: Timeframe) -> None:
         self._state.timeframe = tf
         self._load()
+
+    def _route_for_symbol(self, symbol: str) -> _DataRoute:
+        return _route_for_symbol(symbol, self._selected_route, self._yahoo_route)
 
     def _load(self) -> None:
         """
@@ -443,13 +816,15 @@ class MainWindow(QMainWindow):
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
+        route = self._route_for_symbol(self._state.symbol)
+        self._symbol_bar.set_data_source(route.display_name, "pending")
 
         worker = _FetchWorker(
-            aggregator=self._aggregator,
+            aggregator=route.aggregator,
             cache=self._cache,
+            cache_namespace=route.cache_namespace,
             symbol=self._state.symbol,
             timeframe=self._state.timeframe,
-            lookback_days=_lookback_days(self._state.timeframe),
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -499,6 +874,9 @@ class MainWindow(QMainWindow):
 
         self._loaded_symbol = series.symbol
         self._current_series = series
+        route = self._route_for_symbol(series.symbol)
+        self._symbol_bar.set_data_source(route.display_name, "connected")
+        self._extension_runtime.set_cache_namespace(route.cache_namespace)
         self._extension_store.load_for_symbol(series.symbol)
         self._render(series)
         self._symbol_bar.set_symbol(series.symbol)
@@ -506,7 +884,10 @@ class MainWindow(QMainWindow):
         self._refresh_level1()
 
     def _on_fetch_error(self, message: str) -> None:
-        QMessageBox.warning(self, "Load Error", message)
+        if self._state.symbol is not None:
+            route = self._route_for_symbol(self._state.symbol)
+            self._symbol_bar.set_data_source(route.display_name, "error")
+        show_warning(self, "Load Error", message)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -518,7 +899,7 @@ class MainWindow(QMainWindow):
         Called after a successful fetch, and after a timeframe switch.
         """
         if not series.bars:
-            QMessageBox.warning(
+            show_warning(
                 self,
                 "No Data",
                 f"No bars returned for {series.symbol} "
@@ -551,7 +932,7 @@ class MainWindow(QMainWindow):
             try:
                 self._chart.ensure_extension_panel(render_pass.render_target)
             except RuntimeError as exc:
-                QMessageBox.warning(self, "Panel Limit Reached", str(exc))
+                show_warning(self, "Panel Limit Reached", str(exc))
                 return
 
         ind_state = render_pass.state
@@ -978,14 +1359,23 @@ class MainWindow(QMainWindow):
             series = self._current_series
         else:
             now = datetime.now(tz=timezone.utc)
-            lookback_ms = int(
-                (now.timestamp() - _lookback_days(self._state.timeframe) * 86_400) * 1000
+            route = self._route_for_symbol(self._state.symbol)
+            history_end = _history_end(
+                self._state.timeframe,
+                route.aggregator,
+                now,
+            )
+            history_start = _history_start(
+                self._state.timeframe,
+                route.aggregator,
+                history_end,
             )
             bars = self._cache.get_bars(
+                route.cache_namespace,
                 self._state.symbol,
                 self._state.timeframe,
-                lookback_ms,
-                int(now.timestamp() * 1000),
+                int(history_start.timestamp() * 1000),
+                int(history_end.timestamp() * 1000),
             )
             if (
                 not bars
@@ -1097,6 +1487,125 @@ class MainWindow(QMainWindow):
             pm.set_visible(key, visible)
             self._chart.legend.set_extension_visible(key, visible)
 
+    def _on_application_settings(self) -> None:
+        if self._validation_thread is not None and self._validation_thread.isRunning():
+            show_information(
+                self,
+                "Connection Test In Progress",
+                "Wait for the current provider connection test to finish.",
+            )
+            return
+        dialog = ApplicationSettingsDialog(
+            self._cache,
+            self._credential_store,
+            self._provider_availability,
+            self,
+            active_connection_id=self._selected_route.connection.connection_id,
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._request_provider_activation(dialog.selected_connection_id())
+
+    def _request_provider_activation(self, connection_id: str) -> None:
+        connection = self._cache.get_provider_connection(connection_id)
+        if connection is None:
+            raise RuntimeError(f"Unknown provider connection: {connection_id}")
+
+        if connection.connection_id == YFINANCE_CONNECTION_ID:
+            self._commit_provider_route(self._yahoo_route)
+            return
+
+        availability = self._provider_availability.get(connection.provider_name)
+        if availability is None or not availability.available:
+            reason = (
+                "Provider availability was not checked."
+                if availability is None
+                else availability.reason
+            )
+            status_bar = self.statusBar()
+            if status_bar is not None:
+                status_bar.showMessage(
+                    f"Could not activate {connection.display_name}: {reason}",
+                    10000,
+                )
+            return
+
+        try:
+            provider = create_provider(connection, self._credential_store)
+        except Exception as exc:
+            show_warning(
+                self,
+                "Connection Failed",
+                f"Could not configure {connection.display_name}.\n\n{exc}",
+            )
+            return
+
+        self._pending_route = _DataRoute(Aggregator(provider), connection)
+        worker = _ProviderValidationWorker(provider)
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_provider_validation_done)
+        worker.error.connect(self._on_provider_validation_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+
+        self._validation_thread = thread
+        self._validation_worker = worker
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(f"Testing {connection.display_name}...")
+        thread.start()
+
+    def _on_provider_validation_done(self) -> None:
+        route = self._pending_route
+        self._pending_route = None
+        if route is None:
+            return
+        self._commit_provider_route(route)
+
+    def _on_provider_validation_error(self, message: str) -> None:
+        route = self._pending_route
+        self._pending_route = None
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.clearMessage()
+        display_name = "the selected provider"
+        if route is not None:
+            display_name = route.connection.display_name
+        show_warning(
+            self,
+            "Connection Failed",
+            f"Could not activate {display_name}.\n\n{message}",
+        )
+
+    def _commit_provider_route(self, route: _DataRoute) -> None:
+        self._stop_data_workers()
+        self._selected_route = route
+        self._cache.set_active_provider_connection_id(route.connection.connection_id)
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(
+                f"Using {route.connection.display_name}",
+                5000,
+            )
+        if self._state.symbol is not None:
+            active_route = self._route_for_symbol(self._state.symbol)
+            self._extension_runtime.set_cache_namespace(
+                active_route.cache_namespace
+            )
+            self._load()
+        self._refresh_watchlist_snapshots()
+
+    def _stop_data_workers(self) -> None:
+        for thread in (
+            self._fetch_thread,
+            self._snapshot_thread,
+            self._level1_thread,
+        ):
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+
     def _on_extension_configure(self, series_key: str) -> None:
         """Open the config dialog for the extension owning series_key."""
         request = self._extension_runtime.config_request(series_key)
@@ -1163,7 +1672,23 @@ class MainWindow(QMainWindow):
         if not symbols:
             return
 
-        worker = _SnapshotWorker(self._aggregator, symbols)
+        symbols_by_namespace: dict[str, tuple[Aggregator, list[str]]] = {}
+        for symbol in symbols:
+            route = self._route_for_symbol(symbol)
+            existing = symbols_by_namespace.get(route.cache_namespace)
+            if existing is None:
+                symbols_by_namespace[route.cache_namespace] = (
+                    route.aggregator,
+                    [symbol],
+                )
+            else:
+                existing[1].append(symbol)
+        worker = _SnapshotWorker(
+            [
+                _SnapshotBatch(aggregator, batch_symbols)
+                for aggregator, batch_symbols in symbols_by_namespace.values()
+            ]
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1195,7 +1720,26 @@ class MainWindow(QMainWindow):
         if self._state.symbol is None:
             return
 
-        worker = _Level1Worker(self._aggregator, self._state.symbol)
+        symbol = self._state.symbol
+        route = self._route_for_symbol(symbol)
+        now = datetime.now(tz=timezone.utc)
+        last_attempt = self._asset_reference_refresh_attempts.get(symbol)
+        refresh_reference = _asset_reference_refresh_due(
+            self._cache,
+            symbol,
+            now,
+            last_attempt,
+        )
+        if refresh_reference:
+            self._asset_reference_refresh_attempts[symbol] = now
+        worker = _Level1Worker(
+            route.aggregator,
+            self._yahoo_route.aggregator,
+            self._cache,
+            symbol,
+            refresh_reference,
+            now,
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -1296,14 +1840,9 @@ class MainWindow(QMainWindow):
         """Clean up on close."""
         if self._snapshot_timer.isActive():
             self._snapshot_timer.stop()
-        if self._snapshot_thread and self._snapshot_thread.isRunning():
-            self._snapshot_thread.quit()
-            self._snapshot_thread.wait()
-        if self._level1_thread and self._level1_thread.isRunning():
-            self._level1_thread.quit()
-            self._level1_thread.wait()
-        if self._fetch_thread and self._fetch_thread.isRunning():
-            self._fetch_thread.quit()
-            self._fetch_thread.wait()
+        self._stop_data_workers()
+        if self._validation_thread and self._validation_thread.isRunning():
+            self._validation_thread.quit()
+            self._validation_thread.wait()
         self._cache.close()
         super().closeEvent(event)  # type: ignore[arg-type]

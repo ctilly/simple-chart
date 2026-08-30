@@ -22,6 +22,7 @@ def test_chart_legend_toggles_drawing_tool_palette(qtbot) -> None:  # type: igno
         button for button in legend.findChildren(QToolButton)
         if button.text() == "Tools"
     )
+    assert legend.height() == 24
     palette = legend.findChild(QWidget, "drawingToolPalette")
     assert palette is not None
     palette_button = palette.findChild(QToolButton, "drawingToolButton_trendline")

@@ -15,12 +15,17 @@ The currently active timeframe button is highlighted. The symbol field
 shows the last successfully loaded symbol.
 """
 
-from PyQt6.QtCore import QTimer, pyqtSignal
-from PyQt6.QtGui import QFocusEvent
+from pathlib import Path
+from typing import Literal
+
+from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFocusEvent, QIcon
 from PyQt6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
+    QToolButton,
     QWidget,
 )
 
@@ -37,6 +42,14 @@ _TIMEFRAME_LABELS: list[tuple[Timeframe, str]] = [
     (Timeframe.DAILY,  "D"),
     (Timeframe.WEEKLY, "W"),
 ]
+
+_SETTINGS_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "settings.svg"
+_SOURCE_STATUS_COLORS: dict[str, str] = {
+    "pending": "#8a8e96",
+    "connected": "#198754",
+    "error": "#c43d3d",
+}
+SourceStatus = Literal["pending", "connected", "error"]
 
 # MIN1 is intentionally excluded — it is an internal base timeframe
 # used by the aggregator, not a user-chartable timeframe.
@@ -62,6 +75,7 @@ class SymbolBar(QWidget):
 
     symbol_changed:    pyqtSignal = pyqtSignal(str)
     timeframe_changed: pyqtSignal = pyqtSignal(object)   # emits Timeframe
+    settings_requested: pyqtSignal = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -103,12 +117,57 @@ class SymbolBar(QWidget):
             layout.addWidget(btn)
 
         layout.addStretch()
+
+        self._source_dot = QLabel(self)
+        self._source_dot.setObjectName("dataSourceStatusDot")
+        self._source_dot.setFixedSize(8, 8)
+        layout.addWidget(self._source_dot)
+
+        self._source_label = QLabel(self)
+        self._source_label.setObjectName("dataSourceStatusLabel")
+        self._source_label.setFixedWidth(150)
+        self._source_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self._source_label.setStyleSheet("color: #555555; font-size: 12px;")
+        layout.addWidget(self._source_label)
+
+        settings_button = QToolButton(self)
+        settings_button.setObjectName("applicationSettingsButton")
+        settings_button.setIcon(QIcon(str(_SETTINGS_ICON_PATH)))
+        settings_button.setIconSize(QSize(16, 16))
+        settings_button.setFixedSize(24, 24)
+        settings_button.setToolTip("Application settings")
+        settings_button.setStyleSheet(
+            "QToolButton { background: transparent; border: 1px solid #cccccc; "
+            "border-radius: 3px; }"
+            "QToolButton:hover { background: #eeeeee; }"
+        )
+        settings_button.clicked.connect(self.settings_requested.emit)
+        layout.addWidget(settings_button)
+
         self.setLayout(layout)
         self._highlight(self._active_timeframe)
+        self.set_data_source("Yahoo Finance", "pending")
 
     def set_symbol(self, symbol: str) -> None:
         """Update the symbol field (called after a successful load)."""
         self._symbol_input.setText(symbol.upper())
+
+    def set_data_source(self, label: str, status: SourceStatus) -> None:
+        color = _SOURCE_STATUS_COLORS[status]
+        self._source_dot.setStyleSheet(
+            f"background: {color}; border: none; border-radius: 4px;"
+        )
+        self._source_label.setText(label)
+        status_text = {
+            "pending": "Waiting for a data response",
+            "connected": "Last data request succeeded",
+            "error": "Last data request failed",
+        }[status]
+        tooltip = f"{label}: {status_text}"
+        self._source_dot.setToolTip(tooltip)
+        self._source_label.setToolTip(tooltip)
 
     # ------------------------------------------------------------------
     # Private

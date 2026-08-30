@@ -139,6 +139,21 @@ On Windows, you can launch the `uv` environment directly:
 .\.venv\Scripts\simplechart.exe
 ```
 
+## Credential Security
+
+Provider API credentials are stored only in the current user's operating-
+system credential store: Windows Credential Locker, macOS Keychain, or a
+supported Linux keyring. SimpleChart does not store credentials in its SQLite
+database, environment variables, config files, command-line arguments, or an
+automatic plaintext or in-memory fallback.
+
+If secure credential storage or a provider dependency is unavailable, that
+provider is disabled and Yahoo remains available. Each operating-system user
+and computer must configure its own provider credentials.
+
+See [Credential Security Contract](docs/credential-security.md) for the full
+storage and provider implementation rules.
+
 ## Launch Options
 
 By default, Simple Chart stores its local database here:
@@ -157,6 +172,12 @@ The default data provider is `yfinance`:
 ```bash
 simplechart --provider yfinance
 ```
+
+The selected provider supplies equity and cryptocurrency market data. Futures
+symbols ending in `=F` always use Yahoo Finance. Company and fund names are
+also resolved through Yahoo Finance, stored in the provider-neutral SQLite
+reference table, and refreshed automatically after 30 days. A failed refresh
+keeps the last known name and is retried later.
 
 ## Optional Linux Launcher
 
