@@ -18,8 +18,13 @@ No external dependencies — only the standard library.
 
 import bisect
 import math
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from data.models import Timeframe
+
+
+MARKET_TIMEZONE = ZoneInfo("America/New_York")
 
 
 # NYSE regular session: 9:30 AM – 4:00 PM ET = 390 minutes.
@@ -36,6 +41,23 @@ _BARS_PER_TRADING_DAY: dict[Timeframe, int] = {
 }
 
 _TRADING_DAYS_PER_WEEK = 5
+
+
+def session_date_anchor(session_date: date, timeframe: Timeframe) -> date:
+    """Return the date anchor used to identify a daily or weekly bar."""
+    if timeframe == Timeframe.WEEKLY:
+        return session_date - timedelta(days=session_date.weekday())
+    return session_date
+
+
+def bar_session_key(timestamp: datetime, timeframe: Timeframe) -> int | date:
+    """Return UTC milliseconds for intraday or a UTC date anchor for EOD bars."""
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("Bar timestamps must be timezone-aware.")
+    if timeframe.is_intraday:
+        return int(timestamp.timestamp() * 1000)
+    utc_date = timestamp.astimezone(timezone.utc).date()
+    return session_date_anchor(utc_date, timeframe)
 
 
 def bars_for_n_days(n_days: int, timeframe: Timeframe) -> int:

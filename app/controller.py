@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 
 from app.extension_config import ExtensionConfigDialog
 from app.application_settings import ApplicationSettingsDialog
+from app.bar_comparison import BarComparisonService
 from app.dialogs import show_information, show_warning
 from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
 from app.extension_store import ChartExtensionStore
@@ -762,6 +763,7 @@ class MainWindow(QMainWindow):
         # Most recently loaded series — used to convert bar index to timestamp
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
         self._current_series: OHLCVSeries | None = None
+        self._bar_correction_notice: str | None = None
 
         # The symbol for which self._state.extensions currently holds state.
         # Used to save/restore per-symbol extension state on symbol switch.
@@ -879,6 +881,7 @@ class MainWindow(QMainWindow):
         self._extension_runtime.set_cache_namespace(route.cache_namespace)
         self._extension_store.load_for_symbol(series.symbol)
         self._render(series)
+        self._update_bar_correction_notice(series)
         self._symbol_bar.set_symbol(series.symbol)
         self._watchlist.set_active_symbol(series.symbol)
         self._refresh_level1()
@@ -1422,6 +1425,39 @@ class MainWindow(QMainWindow):
                 self._draw_extension_render(render_pass)
             self._remove_stale_extension_renders(render_passes)
         pm.refresh(preserve_view=preserve_view)
+        if draw_bars:
+            self._update_bar_correction_notice(series)
+
+    def _update_bar_correction_notice(self, series: OHLCVSeries) -> None:
+        status_bar = self.statusBar()
+        if status_bar is None:
+            return
+        if not series.bars:
+            if status_bar.currentMessage() == self._bar_correction_notice:
+                status_bar.clearMessage()
+            self._bar_correction_notice = None
+            return
+
+        route = self._route_for_symbol(series.symbol)
+        conflict_count = self._cache.count_bar_correction_conflicts(
+            route.cache_namespace,
+            series.symbol,
+            series.timeframe,
+            int(series.bars[0].timestamp.timestamp() * 1000),
+            int(series.bars[-1].timestamp.timestamp() * 1000),
+        )
+        if conflict_count == 0:
+            if status_bar.currentMessage() == self._bar_correction_notice:
+                status_bar.clearMessage()
+            self._bar_correction_notice = None
+            return
+
+        noun = "bar correction" if conflict_count == 1 else "bar corrections"
+        verb = "needs" if conflict_count == 1 else "need"
+        self._bar_correction_notice = (
+            f"{conflict_count} {noun} {verb} review in Settings > Data Quality."
+        )
+        status_bar.showMessage(self._bar_correction_notice)
 
     def _remove_stale_extension_renders(
         self,
@@ -1495,14 +1531,36 @@ class MainWindow(QMainWindow):
                 "Wait for the current provider connection test to finish.",
             )
             return
+        current_route = (
+            None
+            if self._state.symbol is None
+            else self._route_for_symbol(self._state.symbol)
+        )
+        comparison_service = BarComparisonService(
+            self._credential_store,
+            self._cache.get_provider_connections(),
+            self._provider_availability,
+            preferred_connection_id=(
+                self._selected_route.connection.connection_id
+            ),
+        )
         dialog = ApplicationSettingsDialog(
             self._cache,
             self._credential_store,
             self._provider_availability,
             self,
             active_connection_id=self._selected_route.connection.connection_id,
+            current_cache_namespace=(
+                None if current_route is None else current_route.cache_namespace
+            ),
+            current_symbol=self._state.symbol,
+            current_timeframe=self._state.timeframe,
+            comparison_service=comparison_service,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        result = dialog.exec()
+        if dialog.bars_changed():
+            self._reload_extensions()
+        if result == QDialog.DialogCode.Accepted:
             self._request_provider_activation(dialog.selected_connection_id())
 
     def _request_provider_activation(self, connection_id: str) -> None:

@@ -18,12 +18,22 @@ to populate the cache for next time.
 """
 
 import json
+import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from data.models import AssetReference, Bar, ChartExtensionStoreRecord, Timeframe
+from data.calendar import MARKET_TIMEZONE, bar_session_key, session_date_anchor
+from data.models import (
+    AssetReference,
+    Bar,
+    BarCorrection,
+    BarInspection,
+    ChartExtensionStoreRecord,
+    SuspiciousBarCandidate,
+    Timeframe,
+)
 from data.provider.config import (
     FIXED_CONNECTION_IDS,
     ConnectionEnvironment,
@@ -200,6 +210,12 @@ class Cache:
     # Bars
     # ------------------------------------------------------------------
 
+    def get_bar_cache_namespaces(self) -> list[str]:
+        rows = self._conn.execute(
+            "SELECT DISTINCT cache_namespace FROM bars ORDER BY cache_namespace"
+        )
+        return [row["cache_namespace"] for row in rows]
+
     def get_bars(
         self,
         cache_namespace: str,
@@ -219,18 +235,37 @@ class Cache:
         """
         cursor = self._conn.execute(
             """
-            SELECT timestamp, open, high, low, close, volume, vwap
+            SELECT
+                bars.timestamp,
+                COALESCE(bar_corrections.open, bars.open) AS open,
+                COALESCE(bar_corrections.high, bars.high) AS high,
+                COALESCE(bar_corrections.low, bars.low) AS low,
+                COALESCE(bar_corrections.close, bars.close) AS close,
+                COALESCE(bar_corrections.volume, bars.volume) AS volume,
+                bars.open AS raw_open,
+                bars.high AS raw_high,
+                bars.low AS raw_low,
+                bars.close AS raw_close,
+                bars.volume AS raw_volume,
+                bars.vwap,
+                bar_corrections.timestamp AS correction_timestamp
             FROM bars
-            WHERE cache_namespace = ?
-              AND symbol    = ?
-              AND timeframe  = ?
-              AND timestamp >= ?
-              AND timestamp <= ?
-            ORDER BY timestamp ASC
+            LEFT JOIN bar_corrections USING (
+                cache_namespace, symbol, timeframe, timestamp
+            )
+            WHERE bars.cache_namespace = ?
+              AND bars.symbol = ?
+              AND bars.timeframe = ?
+              AND bars.timestamp >= ?
+              AND bars.timestamp <= ?
+            ORDER BY bars.timestamp ASC
             """,
             (cache_namespace, symbol, timeframe.value, start_ts_ms, end_ts_ms),
         )
-        return [_row_to_bar(row) for row in cursor]
+        return [
+            _row_to_effective_bar(row)
+            for row in cursor
+        ]
 
     def put_bars(
         self,
@@ -273,6 +308,497 @@ class Cache:
                     )
                     for bar in bars
                 ],
+            )
+
+    def refresh_provider_bar(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        original_timestamp: datetime,
+        refreshed_bar: Bar,
+    ) -> None:
+        original_timestamp_ms = _datetime_to_ms(original_timestamp)
+        refreshed_timestamp_ms = _datetime_to_ms(refreshed_bar.timestamp)
+        _validate_bar(refreshed_bar)
+        if bar_session_key(original_timestamp, timeframe) != bar_session_key(
+            refreshed_bar.timestamp,
+            timeframe,
+        ):
+            raise ValueError(
+                "The refreshed provider bar does not match the same bar session."
+            )
+
+        with self._conn:
+            # Lock before reading so a background fetch cannot replace the
+            # selected row between correction normalization and the writes.
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                """
+                SELECT
+                    bars.timestamp,
+                    bar_corrections.timestamp AS correction_timestamp,
+                    bar_corrections.open AS corrected_open,
+                    bar_corrections.high AS corrected_high,
+                    bar_corrections.low AS corrected_low,
+                    bar_corrections.close AS corrected_close,
+                    bar_corrections.volume AS corrected_volume
+                FROM bars
+                LEFT JOIN bar_corrections USING (
+                    cache_namespace, symbol, timeframe, timestamp
+                )
+                WHERE bars.cache_namespace = ?
+                  AND bars.symbol = ?
+                  AND bars.timeframe = ?
+                  AND bars.timestamp = ?
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    original_timestamp_ms,
+                ),
+            ).fetchone()
+            if row is None:
+                raise ValueError("The provider bar to refresh does not exist.")
+
+            if refreshed_timestamp_ms != original_timestamp_ms:
+                collision = self._conn.execute(
+                    """
+                    SELECT 1
+                    FROM bars
+                    WHERE cache_namespace = ?
+                      AND symbol = ?
+                      AND timeframe = ?
+                      AND timestamp = ?
+                    """,
+                    (
+                        cache_namespace,
+                        symbol,
+                        timeframe.value,
+                        refreshed_timestamp_ms,
+                    ),
+                ).fetchone()
+                if collision is not None:
+                    raise ValueError(
+                        "The refreshed provider timestamp already has a cached bar."
+                    )
+
+            correction_values: tuple[
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                int | None,
+            ] | None = None
+            if row["correction_timestamp"] is not None:
+                correction_values = (
+                    None
+                    if row["corrected_open"] == refreshed_bar.open
+                    else row["corrected_open"],
+                    None
+                    if row["corrected_high"] == refreshed_bar.high
+                    else row["corrected_high"],
+                    None
+                    if row["corrected_low"] == refreshed_bar.low
+                    else row["corrected_low"],
+                    None
+                    if row["corrected_close"] == refreshed_bar.close
+                    else row["corrected_close"],
+                    None
+                    if row["corrected_volume"] == refreshed_bar.volume
+                    else row["corrected_volume"],
+                )
+
+            key = (
+                cache_namespace,
+                symbol,
+                timeframe.value,
+                original_timestamp_ms,
+            )
+            self._conn.execute(
+                """
+                DELETE FROM bar_corrections
+                WHERE cache_namespace = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND timestamp = ?
+                """,
+                key,
+            )
+            self._conn.execute(
+                """
+                DELETE FROM bars
+                WHERE cache_namespace = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND timestamp = ?
+                """,
+                key,
+            )
+            self._conn.execute(
+                """
+                INSERT INTO bars (
+                    cache_namespace, symbol, timeframe, timestamp,
+                    open, high, low, close, volume, vwap
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    refreshed_timestamp_ms,
+                    refreshed_bar.open,
+                    refreshed_bar.high,
+                    refreshed_bar.low,
+                    refreshed_bar.close,
+                    refreshed_bar.volume,
+                    refreshed_bar.vwap,
+                ),
+            )
+            if correction_values is not None and any(
+                value is not None for value in correction_values
+            ):
+                self._conn.execute(
+                    """
+                    INSERT INTO bar_corrections (
+                        cache_namespace, symbol, timeframe, timestamp,
+                        open, high, low, close, volume
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cache_namespace,
+                        symbol,
+                        timeframe.value,
+                        refreshed_timestamp_ms,
+                        *correction_values,
+                    ),
+                )
+
+    def get_bar_inspection(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        timestamp: datetime,
+    ) -> BarInspection | None:
+        timestamp_ms = _datetime_to_ms(timestamp)
+        row = self._conn.execute(
+            """
+            SELECT
+                bars.timestamp,
+                bars.open AS raw_open,
+                bars.high AS raw_high,
+                bars.low AS raw_low,
+                bars.close AS raw_close,
+                bars.volume AS raw_volume,
+                bars.vwap,
+                bar_corrections.open AS corrected_open,
+                bar_corrections.high AS corrected_high,
+                bar_corrections.low AS corrected_low,
+                bar_corrections.close AS corrected_close,
+                bar_corrections.volume AS corrected_volume,
+                bar_corrections.timestamp AS correction_timestamp
+            FROM bars
+            LEFT JOIN bar_corrections USING (
+                cache_namespace, symbol, timeframe, timestamp
+            )
+            WHERE bars.cache_namespace = ?
+              AND bars.symbol = ?
+              AND bars.timeframe = ?
+              AND bars.timestamp = ?
+            """,
+            (cache_namespace, symbol, timeframe.value, timestamp_ms),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_bar_inspection(
+            row,
+            cache_namespace,
+            symbol,
+            timeframe,
+        )
+
+    def get_bar_inspections_for_date(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        session_date: date,
+    ) -> list[BarInspection]:
+        start_date = session_date_anchor(session_date, timeframe)
+        period_days = 7 if timeframe == Timeframe.WEEKLY else 1
+        boundary_timezone = (
+            MARKET_TIMEZONE if timeframe.is_intraday else timezone.utc
+        )
+        start = datetime.combine(
+            start_date,
+            time.min,
+            tzinfo=boundary_timezone,
+        )
+        end = start + timedelta(days=period_days)
+        rows = self._conn.execute(
+            """
+            SELECT
+                bars.timestamp,
+                bars.open AS raw_open,
+                bars.high AS raw_high,
+                bars.low AS raw_low,
+                bars.close AS raw_close,
+                bars.volume AS raw_volume,
+                bars.vwap,
+                bar_corrections.open AS corrected_open,
+                bar_corrections.high AS corrected_high,
+                bar_corrections.low AS corrected_low,
+                bar_corrections.close AS corrected_close,
+                bar_corrections.volume AS corrected_volume,
+                bar_corrections.timestamp AS correction_timestamp
+            FROM bars
+            LEFT JOIN bar_corrections USING (
+                cache_namespace, symbol, timeframe, timestamp
+            )
+            WHERE bars.cache_namespace = ?
+              AND bars.symbol = ?
+              AND bars.timeframe = ?
+              AND bars.timestamp >= ?
+              AND bars.timestamp < ?
+            ORDER BY bars.timestamp ASC
+            """,
+            (
+                cache_namespace,
+                symbol,
+                timeframe.value,
+                _datetime_to_ms(start),
+                _datetime_to_ms(end),
+            ),
+        )
+        return [
+            _row_to_bar_inspection(
+                row,
+                cache_namespace,
+                symbol,
+                timeframe,
+            )
+            for row in rows
+        ]
+
+    def find_suspicious_bars(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        minimum_deviation_percent: float,
+    ) -> list[SuspiciousBarCandidate]:
+        if not math.isfinite(minimum_deviation_percent):
+            raise ValueError("Minimum deviation must be finite.")
+        if minimum_deviation_percent < 0:
+            raise ValueError("Minimum deviation cannot be negative.")
+        rows = self._conn.execute(
+            """
+            SELECT
+                bars.timestamp,
+                bars.open AS raw_open,
+                bars.high AS raw_high,
+                bars.low AS raw_low,
+                bars.close AS raw_close,
+                bars.volume AS raw_volume,
+                bars.vwap,
+                bar_corrections.open AS corrected_open,
+                bar_corrections.high AS corrected_high,
+                bar_corrections.low AS corrected_low,
+                bar_corrections.close AS corrected_close,
+                bar_corrections.volume AS corrected_volume,
+                bar_corrections.timestamp AS correction_timestamp
+            FROM bars
+            LEFT JOIN bar_corrections USING (
+                cache_namespace, symbol, timeframe, timestamp
+            )
+            WHERE bars.cache_namespace = ?
+              AND bars.symbol = ?
+              AND bars.timeframe = ?
+            ORDER BY bars.timestamp ASC
+            """,
+            (cache_namespace, symbol, timeframe.value),
+        )
+        candidates: list[SuspiciousBarCandidate] = []
+        for row in rows:
+            deviation_percent = _bar_deviation_values(
+                row["raw_high"],
+                row["raw_low"],
+                row["raw_close"],
+            )
+            if deviation_percent < minimum_deviation_percent:
+                continue
+            inspection = _row_to_bar_inspection(
+                row,
+                cache_namespace,
+                symbol,
+                timeframe,
+            )
+            candidates.append(
+                SuspiciousBarCandidate(inspection, deviation_percent)
+            )
+        return sorted(
+            candidates,
+            key=lambda candidate: candidate.deviation_percent,
+            reverse=True,
+        )
+
+    def count_bar_correction_conflicts(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        start_ts_ms: int,
+        end_ts_ms: int,
+    ) -> int:
+        rows = self._conn.execute(
+            """
+            SELECT
+                bars.timestamp,
+                bars.open AS raw_open,
+                bars.high AS raw_high,
+                bars.low AS raw_low,
+                bars.close AS raw_close,
+                bars.volume AS raw_volume,
+                bars.vwap,
+                bar_corrections.open AS corrected_open,
+                bar_corrections.high AS corrected_high,
+                bar_corrections.low AS corrected_low,
+                bar_corrections.close AS corrected_close,
+                bar_corrections.volume AS corrected_volume,
+                bar_corrections.timestamp AS correction_timestamp
+            FROM bars
+            JOIN bar_corrections USING (
+                cache_namespace, symbol, timeframe, timestamp
+            )
+            WHERE bars.cache_namespace = ?
+              AND bars.symbol = ?
+              AND bars.timeframe = ?
+              AND bars.timestamp >= ?
+              AND bars.timestamp <= ?
+            """,
+            (
+                cache_namespace,
+                symbol,
+                timeframe.value,
+                start_ts_ms,
+                end_ts_ms,
+            ),
+        )
+        return sum(
+            _row_to_bar_inspection(
+                row,
+                cache_namespace,
+                symbol,
+                timeframe,
+            ).correction_error
+            is not None
+            for row in rows
+        )
+
+    def put_bar_correction(self, correction: BarCorrection) -> None:
+        """Replace the complete override set for one provider bar.
+
+        ``None`` means that field should use the provider value. Values equal
+        to the provider bar are normalized back to ``None`` before storage, so
+        only actual differences persist. Callers editing an existing
+        correction must therefore submit every override they intend to keep.
+        """
+        timestamp_ms = _datetime_to_ms(correction.timestamp)
+        inspection = self.get_bar_inspection(
+            correction.cache_namespace,
+            correction.symbol,
+            correction.timeframe,
+            correction.timestamp,
+        )
+        if inspection is None:
+            raise ValueError("The provider bar to correct does not exist.")
+        if all(
+            value is None
+            for value in (
+                correction.open,
+                correction.high,
+                correction.low,
+                correction.close,
+                correction.volume,
+            )
+        ):
+            raise ValueError("A bar correction must override at least one field.")
+        effective = _apply_bar_correction(inspection.raw_bar, correction)
+        _validate_bar(effective)
+        raw = inspection.raw_bar
+        normalized = BarCorrection(
+            cache_namespace=correction.cache_namespace,
+            symbol=correction.symbol,
+            timeframe=correction.timeframe,
+            timestamp=correction.timestamp,
+            open=None if effective.open == raw.open else effective.open,
+            high=None if effective.high == raw.high else effective.high,
+            low=None if effective.low == raw.low else effective.low,
+            close=None if effective.close == raw.close else effective.close,
+            volume=None if effective.volume == raw.volume else effective.volume,
+        )
+        if all(
+            value is None
+            for value in (
+                normalized.open,
+                normalized.high,
+                normalized.low,
+                normalized.close,
+                normalized.volume,
+            )
+        ):
+            raise ValueError("A bar correction must differ from the provider bar.")
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO bar_corrections (
+                    cache_namespace, symbol, timeframe, timestamp,
+                    open, high, low, close, volume
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_namespace, symbol, timeframe, timestamp)
+                DO UPDATE SET
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume
+                """,
+                (
+                    correction.cache_namespace,
+                    correction.symbol,
+                    correction.timeframe.value,
+                    timestamp_ms,
+                    normalized.open,
+                    normalized.high,
+                    normalized.low,
+                    normalized.close,
+                    normalized.volume,
+                ),
+            )
+
+    def delete_bar_correction(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        timestamp: datetime,
+    ) -> None:
+        timestamp_ms = _datetime_to_ms(timestamp)
+        with self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM bar_corrections
+                WHERE cache_namespace = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND timestamp = ?
+                """,
+                (cache_namespace, symbol, timeframe.value, timestamp_ms),
             )
 
     def newest_cached_timestamp(
@@ -591,6 +1117,8 @@ class Cache:
 
 def _datetime_to_ms(dt: datetime) -> int:
     """Convert a UTC-aware datetime to a Unix millisecond timestamp."""
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError("Bar timestamps must be timezone-aware.")
     return int(dt.timestamp() * 1000)
 
 
@@ -609,6 +1137,112 @@ def _row_to_bar(row: sqlite3.Row) -> Bar:
         volume=row["volume"],
         vwap=row["vwap"],
     )
+
+
+def _row_to_effective_bar(
+    row: sqlite3.Row,
+) -> Bar:
+    bar = _row_to_bar(row)
+    if row["correction_timestamp"] is None:
+        return bar
+    try:
+        _validate_bar(bar)
+    except ValueError:
+        return _row_to_raw_bar(row)
+    return bar
+
+
+def _row_to_bar_inspection(
+    row: sqlite3.Row,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+) -> BarInspection:
+    timestamp = _ms_to_datetime(row["timestamp"])
+    raw_bar = _row_to_raw_bar(row)
+
+    correction = None
+    if row["correction_timestamp"] is not None:
+        correction = BarCorrection(
+            cache_namespace=cache_namespace,
+            symbol=symbol,
+            timeframe=timeframe,
+            timestamp=timestamp,
+            open=row["corrected_open"],
+            high=row["corrected_high"],
+            low=row["corrected_low"],
+            close=row["corrected_close"],
+            volume=row["corrected_volume"],
+        )
+    effective_bar = (
+        raw_bar
+        if correction is None
+        else _apply_bar_correction(raw_bar, correction)
+    )
+    correction_error = None
+    if correction is not None:
+        try:
+            _validate_bar(effective_bar)
+        except ValueError as exc:
+            correction_error = str(exc)
+    return BarInspection(
+        cache_namespace=cache_namespace,
+        symbol=symbol,
+        timeframe=timeframe,
+        raw_bar=raw_bar,
+        effective_bar=effective_bar,
+        correction=correction,
+        correction_error=correction_error,
+    )
+
+
+def _row_to_raw_bar(row: sqlite3.Row) -> Bar:
+    return Bar(
+        timestamp=_ms_to_datetime(row["timestamp"]),
+        open=row["raw_open"],
+        high=row["raw_high"],
+        low=row["raw_low"],
+        close=row["raw_close"],
+        volume=row["raw_volume"],
+        vwap=row["vwap"],
+    )
+
+
+def _apply_bar_correction(raw: Bar, correction: BarCorrection) -> Bar:
+    return Bar(
+        timestamp=raw.timestamp,
+        open=raw.open if correction.open is None else correction.open,
+        high=raw.high if correction.high is None else correction.high,
+        low=raw.low if correction.low is None else correction.low,
+        close=raw.close if correction.close is None else correction.close,
+        volume=raw.volume if correction.volume is None else correction.volume,
+        vwap=raw.vwap,
+    )
+
+
+def _validate_bar(bar: Bar) -> None:
+    prices = (bar.open, bar.high, bar.low, bar.close)
+    if not all(math.isfinite(value) and value > 0 for value in prices):
+        raise ValueError("Corrected prices must be positive and finite.")
+    if bar.high < max(bar.open, bar.close):
+        raise ValueError("Corrected high cannot be below open or close.")
+    if bar.low > min(bar.open, bar.close):
+        raise ValueError("Corrected low cannot be above open or close.")
+    if (
+        not isinstance(bar.volume, int)
+        or isinstance(bar.volume, bool)
+        or bar.volume < 0
+    ):
+        raise ValueError("Corrected volume must be a nonnegative integer.")
+
+
+def _bar_deviation_values(high: float, low: float, close: float) -> float:
+    if high <= 0 or low <= 0 or close <= 0:
+        return math.inf
+    return max(
+        high / close - 1.0,
+        close / low - 1.0,
+    ) * 100.0
 
 
 def _row_to_extension_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:

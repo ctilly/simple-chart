@@ -4,6 +4,7 @@
 --
 -- Tables:
 --   bars              — cached OHLCV data from the data provider
+--   bar_corrections    — user-authored overrides for cached provider bars
 --   bar_fetch_coverage — successfully requested bar-data intervals
 --   extension_records — plugin-owned persisted records
 --   watchlist         — user-curated symbols
@@ -42,6 +43,27 @@ CREATE TABLE IF NOT EXISTS bars (
     close       REAL    NOT NULL,
     volume      INTEGER NOT NULL,
     vwap        REAL,               -- nullable
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe, timestamp)
+);
+
+
+-- bar corrections
+-- ----------------------------------------------------------------------------
+-- User-authored field overrides for provider bars. Provider data remains in
+-- bars unchanged, and nullable columns identify exactly which values the user
+-- corrected. Corrections are scoped to the provider/feed cache namespace.
+
+CREATE TABLE IF NOT EXISTS bar_corrections (
+    cache_namespace TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
+    timestamp       INTEGER NOT NULL,
+    open            REAL,
+    high            REAL,
+    low             REAL,
+    close           REAL,
+    volume          INTEGER,
 
     PRIMARY KEY (cache_namespace, symbol, timeframe, timestamp)
 );

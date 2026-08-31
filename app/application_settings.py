@@ -23,7 +23,9 @@ from PyQt6.QtWidgets import (
 )
 
 from app.dialogs import build_dialog_content, show_information, show_warning
+from app.data_quality import BarComparisonServiceLike, DataQualityTab
 from data.cache import Cache
+from data.models import Timeframe
 from data.provider import ProviderAvailability
 from data.provider.config import (
     MarketDataFeed,
@@ -143,6 +145,10 @@ class ApplicationSettingsDialog(QDialog):
             [ProviderConnection, Cache, CredentialStore, QWidget | None],
             AlpacaConnectionDialog,
         ] = AlpacaConnectionDialog,
+        current_cache_namespace: str | None = None,
+        current_symbol: str | None = None,
+        current_timeframe: Timeframe | None = None,
+        comparison_service: BarComparisonServiceLike | None = None,
     ) -> None:
         super().__init__(parent)
         self._cache = cache
@@ -151,10 +157,11 @@ class ApplicationSettingsDialog(QDialog):
         self._active_connection_id = active_connection_id
         self._alpaca_dialog_factory = alpaca_dialog_factory
         self._selected_connection_id: str | None = None
+        self._bars_changed = False
 
         self.setWindowTitle("Application Settings")
         self.setModal(True)
-        self.resize(620, 380)
+        self.resize(1000, 780)
         layout = build_dialog_content(
             self,
             "applicationSettingsDialog",
@@ -164,6 +171,31 @@ class ApplicationSettingsDialog(QDialog):
         self._tabs.setObjectName("applicationSettingsTabs")
         self._tabs.addTab(self._build_connections_tab(), "Connections")
         self._tabs.addTab(self._build_ui_tab(), "UI")
+        active_id = (
+            active_connection_id
+            if active_connection_id is not None
+            else cache.get_active_provider_connection_id()
+        )
+        active_connection = cache.get_provider_connection(active_id)
+        initial_namespace = (
+            current_cache_namespace
+            if current_cache_namespace is not None
+            else (
+                None
+                if active_connection is None
+                else active_connection.cache_namespace
+            )
+        )
+        self._data_quality = DataQualityTab(
+            cache,
+            self,
+            comparison_service=comparison_service,
+            initial_cache_namespace=initial_namespace,
+            initial_symbol=current_symbol,
+            initial_timeframe=current_timeframe,
+        )
+        self._data_quality.bars_changed.connect(self._on_bars_changed)
+        self._tabs.addTab(self._data_quality, "Data Quality")
         layout.addWidget(self._tabs)
 
         buttons = QDialogButtonBox(
@@ -174,6 +206,10 @@ class ApplicationSettingsDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def done(self, result: int) -> None:
+        self._data_quality.shutdown_comparison()
+        super().done(result)
 
     def accept(self) -> None:
         connection_id = self._active_source.currentData()
@@ -205,6 +241,12 @@ class ApplicationSettingsDialog(QDialog):
         if self._selected_connection_id is None:
             raise RuntimeError("Application settings were not accepted.")
         return self._selected_connection_id
+
+    def bars_changed(self) -> bool:
+        return self._bars_changed
+
+    def _on_bars_changed(self) -> None:
+        self._bars_changed = True
 
     def _build_connections_tab(self) -> QWidget:
         tab = QWidget(self)

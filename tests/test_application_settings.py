@@ -76,6 +76,7 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
         assert [tabs.tabText(index) for index in range(tabs.count())] == [
             "Connections",
             "UI",
+            "Data Quality",
         ]
         assert table is not None
         assert table.rowCount() == 3

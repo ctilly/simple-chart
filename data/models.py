@@ -88,6 +88,36 @@ class Bar:
     vwap: float | None = None
 
 
+@dataclass(frozen=True)
+class BarCorrection:
+    cache_namespace: str
+    symbol: str
+    timeframe: Timeframe
+    timestamp: datetime
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+
+
+@dataclass(frozen=True)
+class BarInspection:
+    cache_namespace: str
+    symbol: str
+    timeframe: Timeframe
+    raw_bar: Bar
+    effective_bar: Bar
+    correction: BarCorrection | None
+    correction_error: str | None
+
+
+@dataclass(frozen=True)
+class SuspiciousBarCandidate:
+    inspection: BarInspection
+    deviation_percent: float
+
+
 @dataclass
 class OHLCVSeries:
     """
