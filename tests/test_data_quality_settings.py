@@ -1,3 +1,4 @@
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 import threading
@@ -42,6 +43,21 @@ _AVAILABLE_PROVIDERS = {
 _SESSION = datetime(2026, 2, 2, 5, 0, tzinfo=UTC)
 
 
+def _never_cancel() -> bool:
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _no_detached_comparison_workers() -> Iterator[None]:
+    owner = data_quality_module._COMPARISON_THREAD_OWNER
+    if owner is not None:
+        assert owner.active_count() == 0
+    yield
+    owner = data_quality_module._COMPARISON_THREAD_OWNER
+    if owner is not None:
+        assert owner.active_count() == 0
+
+
 class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return None
@@ -72,6 +88,7 @@ class _ComparisonService:
         symbol: str,
         timeframe: Timeframe,
         cached_bar: Bar,
+        should_cancel: Callable[[], bool] = _never_cancel,
     ) -> BarComparisonResult:
         self.calls.append((origin_namespace, symbol, timeframe, cached_bar))
         self.thread_ids.append(threading.get_ident())
@@ -84,6 +101,7 @@ class _BlockingComparisonService(_ComparisonService):
         self.started = threading.Event()
         self.release = threading.Event()
         self.finished = threading.Event()
+        self.cancelled = False
 
     def compare(
         self,
@@ -91,14 +109,17 @@ class _BlockingComparisonService(_ComparisonService):
         symbol: str,
         timeframe: Timeframe,
         cached_bar: Bar,
+        should_cancel: Callable[[], bool] = _never_cancel,
     ) -> BarComparisonResult:
         self.started.set()
         self.release.wait(timeout=2.0)
+        self.cancelled = should_cancel()
         result = super().compare(
             origin_namespace,
             symbol,
             timeframe,
             cached_bar,
+            should_cancel,
         )
         self.finished.set()
         return result
@@ -798,6 +819,7 @@ def test_settings_detaches_running_comparison_until_application_shutdown(
         release_timer.join()
 
         assert service.finished.is_set()
+        assert service.cancelled
         assert owner.active_count() == 0
         assert not tab.comparison_running()
 

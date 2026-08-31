@@ -503,6 +503,35 @@ def test_synthesized_timeframe_is_rejected_without_provider_requests() -> None:
     assert factory.connections == []
 
 
+def test_cancellation_stops_before_starting_the_next_provider_request() -> None:
+    factory = _ProviderFactory(
+        {
+            "alpaca:delayed_sip": _Provider([_bar()]),
+            "alpaca:iex": _Provider([_bar()]),
+            "yfinance": _Provider([_bar()]),
+        }
+    )
+    checks = 0
+
+    def should_cancel() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    with pytest.raises(InterruptedError):
+        _service(factory).compare(
+            "alpaca:delayed_sip",
+            "SPY",
+            Timeframe.DAILY,
+            _bar(),
+            should_cancel=should_cancel,
+        )
+
+    assert [
+        connection.cache_namespace for connection in factory.connections
+    ] == ["alpaca:delayed_sip"]
+
+
 def _service(
     factory: _ProviderFactory,
     *,

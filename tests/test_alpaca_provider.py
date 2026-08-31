@@ -1,14 +1,20 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import pytest
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.common.exceptions import APIError
+from requests import PreparedRequest, Response, Session
+from requests.adapters import HTTPAdapter
 
 from data.models import Timeframe
 from data.provider import create_provider
-from data.provider.alpaca_provider import AlpacaProvider
+from data.provider.alpaca_provider import (
+    AlpacaProvider,
+    _create_stock_historical_data_client,
+)
 from data.provider.base import MarketDataEntitlementError, UnsupportedTimeframeError
 from data.provider.config import MarketDataFeed, alpaca_paper_connection
 from data.provider.credentials import ProviderCredentials
@@ -125,6 +131,39 @@ def test_provider_factory_constructs_alpaca_provider() -> None:
     )
 
     assert isinstance(provider, AlpacaProvider)
+
+
+def test_production_alpaca_transport_supplies_default_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_timeouts: list[object] = []
+
+    def record_send(
+        _adapter: HTTPAdapter,
+        _request: PreparedRequest,
+        stream: bool = False,
+        timeout: object = None,
+        verify: bool | str = True,
+        cert: str | tuple[str, str] | None = None,
+        proxies: dict[str, str] | None = None,
+    ) -> Response:
+        observed_timeouts.append(timeout)
+        return Response()
+
+    monkeypatch.setattr(HTTPAdapter, "send", record_send)
+    client = _create_stock_historical_data_client("key", "secret")
+    session = cast(Session, cast(Any, client)._session)
+    adapter = session.get_adapter("https://data.alpaca.markets/v2/stocks/bars")
+    request = PreparedRequest()
+    request.prepare(
+        method="GET",
+        url="https://data.alpaca.markets/v2/stocks/bars",
+    )
+
+    adapter.send(request)
+    adapter.send(request, timeout=2.0)
+
+    assert observed_timeouts == [(5.0, 15.0), 2.0]
 
 
 def test_fetch_bars_maps_request_and_filters_extended_hours() -> None:

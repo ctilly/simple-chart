@@ -10,6 +10,8 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame as AlpacaTimeFrame
 from alpaca.data.timeframe import TimeFrameUnit
+from requests import PreparedRequest, Response, Session  # type: ignore[import-untyped]
+from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import (
@@ -25,6 +27,7 @@ _SESSION_OPEN = time(9, 30)
 _SESSION_CLOSE = time(16, 0)
 _DELAYED_SIP_SAFE_LAG = timedelta(minutes=16)
 _SIP_ENTITLEMENT_ERROR_CODE = 40310000
+_ALPACA_REQUEST_TIMEOUT = (5.0, 15.0)
 
 _TIMEFRAME_MAP: dict[Timeframe, AlpacaTimeFrame] = {
     Timeframe.MIN1: AlpacaTimeFrame.Minute,
@@ -98,6 +101,37 @@ class _MarketDataClient(Protocol):
     ) -> Mapping[str, _AlpacaSnapshot]: ...
 
 
+class _DefaultTimeoutHTTPAdapter(HTTPAdapter):  # type: ignore[misc]
+    def send(
+        self,
+        request: PreparedRequest,
+        stream: bool = False,
+        timeout: float | tuple[float, float] | None = None,
+        verify: bool | str = True,
+        cert: str | tuple[str, str] | None = None,
+        proxies: Mapping[str, str] | None = None,
+    ) -> Response:
+        return super().send(
+            request,
+            stream=stream,
+            timeout=_ALPACA_REQUEST_TIMEOUT if timeout is None else timeout,
+            verify=verify,
+            cert=cert,
+            proxies=proxies,
+        )
+
+
+def _create_stock_historical_data_client(
+    api_key_id: str,
+    api_secret: str,
+) -> _MarketDataClient:
+    client = StockHistoricalDataClient(api_key_id, api_secret)
+    session = cast(Session, client._session)
+    session.mount("https://", _DefaultTimeoutHTTPAdapter())
+    session.mount("http://", _DefaultTimeoutHTTPAdapter())
+    return cast(_MarketDataClient, client)
+
+
 class AlpacaProvider(DataProvider):
     def __init__(
         self,
@@ -112,9 +146,9 @@ class AlpacaProvider(DataProvider):
         self._client = (
             client
             if client is not None
-            else cast(
-                _MarketDataClient,
-                StockHistoricalDataClient(api_key_id, api_secret),
+            else _create_stock_historical_data_client(
+                api_key_id,
+                api_secret,
             )
         )
 

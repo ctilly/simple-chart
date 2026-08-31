@@ -44,6 +44,10 @@ _SOURCE_LABELS = {
 }
 
 
+def _never_cancel() -> bool:
+    return False
+
+
 class BarComparisonRowKind(StrEnum):
     CACHED_ORIGIN = "cached_origin"
     REFRESHED_ORIGIN = "refreshed_origin"
@@ -104,6 +108,7 @@ class BarComparisonService:
         symbol: str,
         timeframe: Timeframe,
         cached_bar: Bar,
+        should_cancel: Callable[[], bool] = _never_cancel,
     ) -> BarComparisonResult:
         if timeframe in _SYNTHESIZED_TIMEFRAMES:
             raise ValueError(
@@ -120,10 +125,12 @@ class BarComparisonService:
                 cached_bar,
             )
         ]
-        rows.extend(
-            self._fetch_source(request, symbol, timeframe, cached_bar)
-            for request in requests
-        )
+        for request in requests:
+            if should_cancel():
+                raise InterruptedError
+            rows.append(
+                self._fetch_source(request, symbol, timeframe, cached_bar)
+            )
 
         refreshed_bar = next(
             row.bar

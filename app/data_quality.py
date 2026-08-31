@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -71,6 +72,7 @@ class BarComparisonServiceLike(Protocol):
         symbol: str,
         timeframe: Timeframe,
         cached_bar: Bar,
+        should_cancel: Callable[[], bool] = ...,
     ) -> BarComparisonResult: ...
 
 
@@ -104,11 +106,14 @@ class _ComparisonWorker(QObject):
     @pyqtSlot()
     def run(self) -> None:
         try:
+            thread = QThread.currentThread()
+            assert thread is not None
             result = self._service.compare(
                 self._request.key.cache_namespace,
                 self._request.key.symbol,
                 self._request.key.timeframe,
                 self._request.cached_bar,
+                should_cancel=thread.isInterruptionRequested,
             )
         except Exception:
             self.failed.emit(self._request, "The source comparison failed.")
@@ -135,6 +140,7 @@ class _ComparisonThreadOwner(QObject):
         threads = tuple(self._tasks)
         for thread in threads:
             if thread.isRunning():
+                thread.requestInterruption()
                 thread.quit()
         for thread in threads:
             if thread.isRunning():
@@ -838,6 +844,7 @@ class DataQualityTab(QWidget):
             worker = self._comparison_worker
             assert worker is not None
             _comparison_thread_owner().adopt(thread, worker)
+            thread.requestInterruption()
             thread.quit()
         self._comparison_thread = None
         self._comparison_worker = None
