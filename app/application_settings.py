@@ -167,6 +167,7 @@ class ApplicationSettingsDialog(QDialog):
             "applicationSettingsDialog",
             "Application Settings",
         )
+        self.setSizeGripEnabled(True)
         self._tabs = QTabWidget(self)
         self._tabs.setObjectName("applicationSettingsTabs")
         self._tabs.addTab(self._build_connections_tab(), "Connections")

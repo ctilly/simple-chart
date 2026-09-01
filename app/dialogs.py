@@ -2,7 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from PyQt6.QtCore import QPoint, Qt
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
     QDialog,
@@ -30,6 +30,9 @@ class _DialogColors:
     border: str
     divider: str
     hover: str
+
+
+_FRAME_WIDTH = 2
 
 
 class DialogTitleBar(QFrame):
@@ -62,8 +65,6 @@ class DialogTitleBar(QFrame):
             f" background: {colors.hover};"
             "}"
         )
-        self._drag_offset: QPoint | None = None
-
         row = QHBoxLayout(self)
         row.setContentsMargins(8, 4, 5, 4)
         row.setSpacing(4)
@@ -87,32 +88,12 @@ class DialogTitleBar(QFrame):
         row.addWidget(close_button)
 
     def mousePressEvent(self, event: QMouseEvent | None) -> None:
-        window = self.window()
-        if (
-            event is not None
-            and window is not None
-            and event.button() == Qt.MouseButton.LeftButton
-        ):
-            self._drag_offset = (
-                event.globalPosition().toPoint()
-                - window.frameGeometry().topLeft()
-            )
-            event.accept()
-
-    def mouseMoveEvent(self, event: QMouseEvent | None) -> None:
-        window = self.window()
-        if (
-            event is not None
-            and window is not None
-            and self._drag_offset is not None
-            and event.buttons() & Qt.MouseButton.LeftButton
-        ):
-            window.move(event.globalPosition().toPoint() - self._drag_offset)
-            event.accept()
-
-    def mouseReleaseEvent(self, event: QMouseEvent | None) -> None:
-        self._drag_offset = None
-        if event is not None:
+        if event is not None and event.button() == Qt.MouseButton.LeftButton:
+            window = self.window()
+            assert window is not None
+            window_handle = window.windowHandle()
+            assert window_handle is not None
+            window_handle.startSystemMove()
             event.accept()
 
 
@@ -133,7 +114,7 @@ def build_dialog_content(
         f"QDialog#{object_name} {{"
         f" background: {colors.window};"
         f" color: {colors.text};"
-        f" border: 2px solid {colors.border};"
+        f" border: {_FRAME_WIDTH}px solid {colors.border};"
         "}"
         f"QDialog#{object_name} QLabel {{"
         f" color: {colors.text};"
@@ -141,7 +122,12 @@ def build_dialog_content(
     )
 
     outer = QVBoxLayout(dialog)
-    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setContentsMargins(
+        _FRAME_WIDTH,
+        _FRAME_WIDTH,
+        _FRAME_WIDTH,
+        _FRAME_WIDTH,
+    )
     outer.setSpacing(0)
     outer.addWidget(DialogTitleBar(title, dialog.reject, dialog))
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtWidgets import QDialog, QSizeGrip
 
 import app.controller as controller_module
 from app.bar_comparison import BarComparisonService
@@ -129,6 +129,52 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
         settings_arguments["comparison_service"],
         BarComparisonService,
     )
+
+
+def test_main_window_opens_resizable_application_settings(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialogs: list[controller_module.ApplicationSettingsDialog] = []
+
+    def skip_load(window: MainWindow) -> None:
+        pass
+
+    def skip_snapshots(window: MainWindow) -> None:
+        pass
+
+    def capture_exec(
+        dialog: controller_module.ApplicationSettingsDialog,
+    ) -> QDialog.DialogCode:
+        dialogs.append(dialog)
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(MainWindow, "_load", skip_load)
+    monkeypatch.setattr(
+        MainWindow,
+        "_refresh_watchlist_snapshots",
+        skip_snapshots,
+    )
+    monkeypatch.setattr(
+        controller_module.ApplicationSettingsDialog,
+        "exec",
+        capture_exec,
+    )
+
+    window = MainWindow(str(tmp_path / "test.db"))
+    qtbot.addWidget(window)
+    window._on_application_settings()
+
+    assert len(dialogs) == 1
+    dialog = dialogs[0]
+    assert dialog.isSizeGripEnabled()
+    assert dialog.findChild(QSizeGrip) is not None
+    resized_width = dialog.width() + 100
+    resized_height = dialog.height() + 100
+    dialog.resize(resized_width, resized_height)
+    assert (dialog.width(), dialog.height()) == (resized_width, resized_height)
 
 
 def test_settings_bar_change_reloads_chart_when_dialog_is_cancelled(

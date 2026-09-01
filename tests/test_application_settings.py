@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QLineEdit,
     QPushButton,
+    QSizeGrip,
     QTabWidget,
     QTableWidget,
     QToolButton,
@@ -21,6 +22,7 @@ from app.application_settings import (
     AlpacaConnectionDialog,
     ApplicationSettingsDialog,
 )
+from app.dialogs import _FRAME_WIDTH
 from data.cache import Cache
 from data.provider import ProviderAvailability
 from data.provider.config import (
@@ -71,6 +73,7 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
         table = dialog.findChild(QTableWidget, "providerConnections")
         dark_mode = dialog.findChild(QCheckBox, "darkMode")
         title_bar = dialog.findChild(QFrame, "dialogTitleBar")
+        size_grip = dialog.findChild(QSizeGrip)
 
         assert tabs is not None
         assert [tabs.tabText(index) for index in range(tabs.count())] == [
@@ -94,10 +97,12 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
         assert not dark_mode.isEnabled()
         assert dialog.objectName() == "applicationSettingsDialog"
         assert "background:" in dialog.styleSheet()
-        assert "border: 2px solid" in dialog.styleSheet()
+        assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
         assert title_bar is not None
         assert "background:" in title_bar.styleSheet()
         assert "border-bottom: 1px solid" in title_bar.styleSheet()
+        assert dialog.isSizeGripEnabled()
+        assert size_grip is not None
 
 
 def test_application_settings_returns_configured_source_without_persisting_it(
@@ -238,7 +243,7 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
         assert dialog.objectName() == "alpacaConnectionDialog"
         assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert "background:" in dialog.styleSheet()
-        assert "border: 2px solid" in dialog.styleSheet()
+        assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
         assert title_bar is not None
         assert "background:" in title_bar.styleSheet()
         assert "border-bottom: 1px solid" in title_bar.styleSheet()
