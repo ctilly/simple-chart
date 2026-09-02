@@ -38,8 +38,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
@@ -60,6 +60,11 @@ from app.header_bar import AppHeader
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
+from app.window_chrome import (
+    MainWindowTitleBar,
+    WindowResizeController,
+    is_wayland_platform,
+)
 from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
@@ -601,6 +606,8 @@ class MainWindow(QMainWindow):
 
     Layout:
         ┌─────────────────────────────────┐
+        │  MainWindowTitleBar (Wayland)   │
+        ├─────────────────────────────────┤
         │  SymbolBar (symbol + timeframe) │
         ├─────────────────────────────────┤
         │  ChartWidget (chart + legend)   │
@@ -613,6 +620,11 @@ class MainWindow(QMainWindow):
         provider_connection_id: str | None = None,
     ) -> None:
         super().__init__()
+        self._uses_custom_window_chrome = is_wayland_platform(
+            QGuiApplication.platformName()
+        )
+        if self._uses_custom_window_chrome:
+            self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setWindowTitle("Simple Chart")
         self.resize(1400, 800)
 
@@ -674,10 +686,11 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         frame = QFrame()
         frame.setObjectName("appFrame")
+        frame_border_width = 3 if self._uses_custom_window_chrome else 5
         frame.setStyleSheet(
             "QFrame#appFrame {"
             " background: #ffffff;"
-            " border: 5px solid #9d978d;"
+            f" border: {frame_border_width}px solid #9d978d;"
             "}"
         )
 
@@ -685,6 +698,16 @@ class MainWindow(QMainWindow):
         root_layout = QVBoxLayout(frame)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
+
+        self._window_title_bar: MainWindowTitleBar | None = None
+        self._window_resize_controller: WindowResizeController | None = None
+        if self._uses_custom_window_chrome:
+            self._window_title_bar = MainWindowTitleBar(self, frame)
+            root_layout.addWidget(self._window_title_bar)
+            self._window_resize_controller = WindowResizeController(
+                frame,
+                frame_border_width,
+            )
 
         self._app_header = AppHeader()
         root_layout.addWidget(self._app_header)

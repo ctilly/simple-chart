@@ -30,6 +30,7 @@ dev = [
 
 [project.scripts]
 simplechart = "main:main"
+simplechart-claude-qc = "simplechart.claude_qc.cli:main"
 
 [tool.setuptools]
 py-modules = ["main"]

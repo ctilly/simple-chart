@@ -100,9 +100,22 @@ there is no verified fix after 60 minutes, stop regardless of confidence.
 
 ## Collaboration style
 
-- After completing each logical unit of work (typically one module or one
-  layer), stop and explain what was written and why before proceeding.
-- Wait for review and explicit approval before moving to the next piece.
+- For explicitly approved agentic or multi-agent work, read and follow
+  `docs/agentic-workflow.md` before delegating or editing.
+- The default approval profile is **gated autonomy**. Once the user approves
+  the objective, specification, boundaries, and implementation graph, continue
+  across logical units without waiting after each one. Report what was written,
+  why, and the verification evidence as work proceeds.
+- Stop for explicit approval when work would change approved user-visible
+  behavior, acceptance criteria, architecture, dependencies, security or
+  credential policy, external-data scope, destructive actions, or another
+  boundary named in the approved graph. Also stop for unresolved product
+  choices, unavailable required reviewers, and final acceptance.
+- Evidence-driven implementation adjustments may proceed autonomously when
+  they remain inside the approved objective and boundaries. Record the change,
+  reason, and falsification evidence in the durable project artifact.
+- Use high-touch approval after every logical unit when the user requests it or
+  when the approved graph explicitly requires it.
 - Read files before proposing changes to them.
 - Do not make unrequested changes — bug fix means fix the bug, not clean up the
   surrounding code.
