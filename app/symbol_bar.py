@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QWidget,
 )
@@ -118,19 +119,29 @@ class SymbolBar(QWidget):
 
         layout.addStretch()
 
-        self._source_dot = QLabel(self)
+        self._source_status = QWidget(self)
+        self._source_status.setObjectName("dataSourceStatus")
+        self._source_status.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Preferred,
+        )
+        source_layout = QHBoxLayout(self._source_status)
+        source_layout.setContentsMargins(0, 0, 8, 0)
+        source_layout.setSpacing(4)
+
+        self._source_dot = QLabel(self._source_status)
         self._source_dot.setObjectName("dataSourceStatusDot")
         self._source_dot.setFixedSize(8, 8)
-        layout.addWidget(self._source_dot)
+        source_layout.addWidget(self._source_dot)
 
-        self._source_label = QLabel(self)
+        self._source_label = QLabel(self._source_status)
         self._source_label.setObjectName("dataSourceStatusLabel")
-        self._source_label.setFixedWidth(150)
         self._source_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
         self._source_label.setStyleSheet("color: #555555; font-size: 12px;")
-        layout.addWidget(self._source_label)
+        source_layout.addWidget(self._source_label)
+        layout.addWidget(self._source_status)
 
         settings_button = QToolButton(self)
         settings_button.setObjectName("applicationSettingsButton")
@@ -160,6 +171,7 @@ class SymbolBar(QWidget):
             f"background: {color}; border: none; border-radius: 4px;"
         )
         self._source_label.setText(label)
+        self._source_status.updateGeometry()
         status_text = {
             "pending": "Waiting for a data response",
             "connected": "Last data request succeeded",
