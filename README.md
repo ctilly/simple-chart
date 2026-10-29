@@ -52,14 +52,7 @@ Chart in that environment, then creates a desktop shortcut with the app icon.
 5. Double-click the **Simple Chart** desktop shortcut to launch the app.
 
 Keep the project folder in place after setup. If you move it, rerun `setup.bat`
-to refresh the environment and shortcut. The existing `launch.pyw` is retained;
-the shortcut uses the installed GUI executable directly.
-
-To launch the app after setup, open PowerShell in the project folder and run:
-
-```powershell
-.\.venv\Scripts\simplechart.exe
-```
+to refresh the environment and shortcut. 
 
 
 
