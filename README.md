@@ -39,22 +39,6 @@ The setup process has four basic steps:
 Windows users can use `setup.bat`. MacOS and Linux users can use `setup.sh`.
 Manual setup commands are also included below.
 
-## Windows Setup
-
-For Windows, the easiest path is the included `setup.bat` file. It installs
-`uv` if needed, creates a Python 3.13 virtual environment, and installs Simple
-Chart in that environment, then creates a desktop shortcut with the app icon.
-
-1. Clone or download this repository.
-2. Open the project folder in File Explorer.
-3. Double-click `setup.bat`.
-4. Wait until it says setup is complete.  A shortcut will appear on your desktop.
-5. Double-click the **Simple Chart** desktop shortcut to launch the app.
-
-Keep the project folder in place after setup. If you move it, rerun `setup.bat`
-to refresh the environment and shortcut. 
-
-
 
 ## MacOS and Linux Setup
 
@@ -74,6 +58,24 @@ To launch the app after setup:
 . .venv/bin/activate
 simplechart
 ```
+
+
+## Windows Setup
+
+For Windows, the easiest path is the included `setup.bat` file. It installs
+`uv` if needed, creates a Python 3.13 virtual environment, and installs Simple
+Chart in that environment, then creates a desktop shortcut with the app icon.
+
+1. Clone or download this repository.
+2. Open the project folder in File Explorer.
+3. Double-click `setup.bat`.
+4. Wait until it says setup is complete.  A shortcut will appear on your desktop.
+5. Double-click the **Simple Chart** desktop shortcut to launch the app.
+
+Keep the project folder in place after setup. If you move it, rerun `setup.bat`
+to refresh the environment and shortcut. 
+
+
 
 ## Manual Setup
 
