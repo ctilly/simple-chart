@@ -275,6 +275,20 @@ if !PIP_RC! neq 0 (
 echo  [OK] Application and all dependencies installed.
 
 REM ======================================================================
+REM Create the shortcut only after application installation succeeds.
+REM ======================================================================
+echo.
+echo  [i] Creating the Simple Chart desktop shortcut...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\create_shortcut.ps1"
+if !errorlevel! neq 0 (
+    echo  [X] Application installed, but desktop shortcut creation failed.
+    echo      Review the error above and rerun setup.bat to retry.
+    echo      You can still launch .venv\Scripts\simplechart.exe directly.
+    pause
+    exit /b 1
+)
+
+REM ======================================================================
 REM All done!
 REM ======================================================================
 echo.
@@ -282,7 +296,7 @@ echo  ==============================================================
 echo   [OK] Setup complete! Everything is now installed.
 echo  ==============================================================
 echo.
-echo   The application has been installed successfully.
+echo   Launch Simple Chart using the Simple Chart desktop shortcut.
 echo   You can now close this window.
 echo.
 pause

@@ -43,12 +43,17 @@ Manual setup commands are also included below.
 
 For Windows, the easiest path is the included `setup.bat` file. It installs
 `uv` if needed, creates a Python 3.13 virtual environment, and installs Simple
-Chart in that environment.
+Chart in that environment, then creates a desktop shortcut with the app icon.
 
 1. Clone or download this repository.
 2. Open the project folder in File Explorer.
 3. Double-click `setup.bat`.
-4. Wait until it says setup is complete.
+4. Wait until it says setup is complete.  A shortcut will appear on your desktop.
+5. Double-click the **Simple Chart** desktop shortcut to launch the app.
+
+Keep the project folder in place after setup. If you move it, rerun `setup.bat`
+to refresh the environment and shortcut. The existing `launch.pyw` is retained;
+the shortcut uses the installed GUI executable directly.
 
 To launch the app after setup, open PowerShell in the project folder and run:
 
@@ -56,18 +61,7 @@ To launch the app after setup, open PowerShell in the project folder and run:
 .\.venv\Scripts\simplechart.exe
 ```
 
-If you prefer to activate the environment first:
 
-```powershell
-.\.venv\Scripts\Activate.ps1
-simplechart
-```
-
-If PowerShell blocks activation scripts, use the direct launch command instead:
-
-```powershell
-.\.venv\Scripts\simplechart.exe
-```
 
 ## MacOS and Linux Setup
 
@@ -223,6 +217,11 @@ and reinstall the app.
 
 ### The chart window does not open
 
+If the desktop launcher fails during startup, it displays an error dialog and
+writes stack locations to `%USERPROFILE%\.simplechart\startup-error.log`.
+Exception messages and local variables are omitted to keep credentials out of
+the diagnostic file.
+
 Launch the app from a terminal so any error message stays visible. Common causes
 are an incomplete dependency install, running outside a desktop environment, or
 using the wrong Python environment.
@@ -259,7 +258,8 @@ Then read:
 ## Development Notes
 
 This repository is intentionally source-installed. It does not currently ship
-native installers, a macOS `.app` bundle, or a Windows shortcut installer.
+native installers or a macOS `.app` bundle. Windows setup creates a desktop
+shortcut for the source installation.
 
 Useful commands:
 
