@@ -173,7 +173,15 @@ echo "  --- end uv pip install output ----------------------------------"
 ok "Simple Chart and all dependencies installed."
 echo ""
 
-status "Step 5 of 5: Setup complete."
+status "Step 5 of 5: Finishing setup..."
+if [ "$(uname -s)" = "Darwin" ]; then
+    status "Creating the Simple Chart desktop launcher..."
+    if ! .venv/bin/python scripts/install_macos_app.py; then
+        fail "Application installed, but desktop launcher creation failed."
+        echo "      Review the error above and rerun setup.sh to retry."
+        exit 1
+    fi
+fi
 echo ""
 echo "  =============================================================="
 echo "   [OK] Setup complete! Everything is now installed."
@@ -181,6 +189,13 @@ echo "  =============================================================="
 echo ""
 echo "   To launch Simple Chart:"
 echo ""
+if [ "$(uname -s)" = "Darwin" ]; then
+    echo "     Double-click Simple Chart on your desktop."
+    echo "     You can now close this terminal window."
+    echo ""
+    echo "   To launch with terminal diagnostics instead:"
+    echo ""
+fi
 echo "     . .venv/bin/activate"
 echo "     simplechart"
 echo ""

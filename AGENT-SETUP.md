@@ -14,6 +14,10 @@ This repository is installed from source, not packaged as a native installer.
 6. Launch with `simplechart`.
 7. On Linux only, if the user wants a menu launcher, run:
    `python scripts/install_linux_desktop.py`
+8. On macOS, `setup.sh` creates a desktop `.app` launcher automatically. For an
+   existing installation, run `.venv/bin/python scripts/install_macos_app.py`.
+   Desktop launches discard routine output; use `simplechart` in a terminal
+   for diagnostics.
 
 ## Dev install — when to use it
 

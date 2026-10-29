@@ -1,6 +1,7 @@
 """Console-free entry point with credential-safe startup diagnostics."""
 
 import ctypes
+import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -28,6 +29,14 @@ def main() -> None:
             message += "\n\nThe diagnostic file could not be written."
         if sys.platform == "win32":
             ctypes.windll.user32.MessageBoxW(None, message, "Simple Chart startup error", 0x10)
+        elif sys.platform == "darwin":
+            subprocess.run(
+                ["/usr/bin/osascript", "-e",
+                 ('on run argv\n'
+                 'display alert "Simple Chart startup error" message (item 1 of argv) as critical\n'
+                 'end run'), message],
+                check=False,
+            )
         else:
             print(message, file=sys.stderr)
         raise SystemExit(1) from None

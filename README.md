@@ -46,17 +46,30 @@ For macOS and Linux, the easiest path is the included `setup.sh` file. It
 installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
 Simple Chart in that environment.
 
+On macOS, setup also creates **Simple Chart.app** on your desktop with the
+app icon. Double-click it to launch without a terminal window. Keep the project
+folder in place; if you move it, rerun setup to refresh the environment and
+launcher. You can also drag the launcher to the Dock.
+
 From the project folder, run:
 
 ```bash
 sh setup.sh
 ```
 
-To launch the app after setup:
+To launch on Linux, or on macOS with terminal diagnostics:
 
 ```bash
 . .venv/bin/activate
 simplechart
+```
+
+Desktop launches discard routine output rather than writing a growing log file.
+Launching `simplechart` from a terminal keeps diagnostic output visible.
+For an existing macOS installation, create or refresh just the launcher with:
+
+```bash
+.venv/bin/python scripts/install_macos_app.py
 ```
 
 
@@ -213,7 +226,8 @@ and reinstall the app.
 ### The chart window does not open
 
 If the desktop launcher fails during startup, it displays an error dialog and
-writes stack locations to `%USERPROFILE%\.simplechart\startup-error.log`.
+writes stack locations to `~/.simplechart/startup-error.log` on macOS or
+`%USERPROFILE%\.simplechart\startup-error.log` on Windows.
 Exception messages and local variables are omitted to keep credentials out of
 the diagnostic file.
 
@@ -253,8 +267,9 @@ Then read:
 ## Development Notes
 
 This repository is intentionally source-installed. It does not currently ship
-native installers or a macOS `.app` bundle. Windows setup creates a desktop
-shortcut for the source installation.
+native installers. Windows setup creates a desktop shortcut; macOS setup creates
+a small `.app` launcher. Both use the source installation and its virtual
+environment rather than bundling Python or dependencies.
 
 Useful commands:
 

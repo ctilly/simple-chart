@@ -51,6 +51,26 @@ class GuiLauncherTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 0)
         home.assert_not_called()
 
+    def test_macos_startup_failure_displays_safe_dialog(self) -> None:
+        application = ModuleType("main")
+        application.main = Mock(side_effect=RuntimeError("synthetic-secret"))  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.dict("sys.modules", {"main": application}),
+                patch.object(Path, "home", return_value=Path(directory)),
+                patch.object(gui_launcher.sys, "platform", "darwin"),
+                patch.object(gui_launcher.subprocess, "run") as dialog,
+                self.assertRaises(SystemExit) as caught,
+            ):
+                gui_launcher.main()
+            self.assertEqual(caught.exception.code, 1)
+            dialog.assert_called_once()
+            arguments = dialog.call_args.args[0]
+            self.assertEqual(arguments[0], "/usr/bin/osascript")
+            self.assertIn("startup-error.log", arguments[-1])
+            self.assertNotIn("synthetic-secret", str(dialog.call_args))
+            self.assertNotIn("synthetic-secret", (Path(directory) / ".simplechart" / "startup-error.log").read_text())
+
     @unittest.skipUnless(__import__("sys").platform == "win32", "Windows shortcut integration")
     def test_production_shortcut_helper(self) -> None:
         import subprocess
