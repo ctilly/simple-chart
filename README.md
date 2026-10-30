@@ -40,16 +40,10 @@ Windows users can use `setup.bat`. MacOS and Linux users can use `setup.sh`.
 Manual setup commands are also included below.
 
 
-## MacOS and Linux Setup
+## Linux Setup
 
-For macOS and Linux, the easiest path is the included `setup.sh` file. It
-installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
+For Linux, `setup.sh` installs `uv`, creates a Python 3.13 virtual environment, and installs
 Simple Chart in that environment.
-
-On macOS, setup also creates **Simple Chart.app** on your desktop with the
-app icon. Double-click it to launch without a terminal window. Keep the project
-folder in place; if you move it, rerun setup to refresh the environment and
-launcher. You can also drag the launcher to the Dock.
 
 From the project folder, run:
 
@@ -64,13 +58,24 @@ To launch on Linux, or on macOS with terminal diagnostics:
 simplechart
 ```
 
-Desktop launches discard routine output rather than writing a growing log file.
-Launching `simplechart` from a terminal keeps diagnostic output visible.
-For an existing macOS installation, create or refresh just the launcher with:
 
-```bash
-.venv/bin/python scripts/install_macos_app.py
-```
+## MacOS
+
+For macOS, the easiest path is the included `setup.sh` file. It
+installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
+Simple Chart in that environment.
+
+On macOS, setup also creates **Simple Chart.app** on your desktop with the app icon. Double-click it to launch the app. 
+If you move the project folder then rerun setup to refresh the environment and launcher. 
+You can also drag the launcher to the Dock.
+
+To "install" the app: 
+
+1. Clone or download this repository.
+2. Run `sh setup.sh`
+3. Wait until it says setup is complete.  A shortcut will appear on your desktop.
+4. Double-click the **Simple Chart** desktop shortcut to launch the app.
+
 
 
 ## Windows Setup

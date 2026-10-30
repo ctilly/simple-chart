@@ -2,6 +2,7 @@
 
 import plistlib
 import shlex
+import stat
 import struct
 import sys
 from pathlib import Path
@@ -11,6 +12,12 @@ from PyQt6.QtGui import QImage, QPainter
 from PyQt6.QtSvg import QSvgRenderer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _write_if_changed(destination: Path, content: bytes) -> None:
+    if destination.is_file() and destination.read_bytes() == content:
+        return
+    destination.write_bytes(content)
 
 
 def _write_icon(source: Path, destination: Path) -> None:
@@ -32,7 +39,7 @@ def _write_icon(source: Path, destination: Path) -> None:
             raise OSError("App icon could not be encoded.")
         png = bytes(buffer.data())
         chunks.extend(kind + struct.pack(">I", len(png) + 8) + png)
-    destination.write_bytes(b"icns" + struct.pack(">I", len(chunks) + 8) + chunks)
+    _write_if_changed(destination, b"icns" + struct.pack(">I", len(chunks) + 8) + chunks)
 
 
 def install_app(project_root: Path, destination: Path) -> None:
@@ -48,16 +55,15 @@ def install_app(project_root: Path, destination: Path) -> None:
     executable.parent.mkdir(parents=True, exist_ok=True)
     resources.mkdir(parents=True, exist_ok=True)
     _write_icon(icon, resources / "SimpleChart.icns")
-    executable.write_text(
+    _write_if_changed(executable, (
         "#!/bin/sh\n"
         "exec </dev/null >/dev/null 2>&1\n"
         f"cd {shlex.quote(str(project_root))} || exit 1\n"
-        f"exec {shlex.quote(str(launcher))}\n",
-        encoding="utf-8",
-    )
-    executable.chmod(0o755)
-    with (contents / "Info.plist").open("wb") as stream:
-        plistlib.dump({
+        f"exec {shlex.quote(str(launcher))}\n"
+    ).encode())
+    if stat.S_IMODE(executable.stat().st_mode) != 0o755:
+        executable.chmod(0o755)
+    _write_if_changed(contents / "Info.plist", plistlib.dumps({
             "CFBundleName": "Simple Chart",
             "CFBundleDisplayName": "Simple Chart",
             "CFBundleIdentifier": "io.simplechart.SimpleChart",
@@ -67,7 +73,7 @@ def install_app(project_root: Path, destination: Path) -> None:
             "CFBundleVersion": "1",
             "CFBundleIconFile": "SimpleChart.icns",
             "NSHighResolutionCapable": True,
-        }, stream)
+        }))
 
 
 def main() -> None:
@@ -76,6 +82,13 @@ def main() -> None:
     destination = Path.home() / "Desktop" / "Simple Chart.app"
     try:
         install_app(REPO_ROOT, destination)
+    except PermissionError as error:
+        raise SystemExit(
+            f"Could not create or update the Simple Chart launcher: {error}\n"
+            "If macOS blocked an existing app update, allow the terminal running setup "
+            "under System Settings > Privacy & Security > App Management, "
+            "then rerun setup.sh."
+        ) from None
     except (OSError, ValueError) as error:
         raise SystemExit(f"Could not create the Simple Chart launcher: {error}") from None
     print(f"Desktop launcher created at: {destination}")

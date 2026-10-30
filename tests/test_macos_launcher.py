@@ -4,6 +4,7 @@ import plistlib
 import struct
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from PyQt6.QtGui import QImage
@@ -66,6 +67,53 @@ def test_missing_install_does_not_create_bundle(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="GUI launcher missing"):
         installer.install_app(tmp_path, bundle)
     assert not bundle.exists()
+
+
+def test_repeat_install_does_not_write_unchanged_bundle(tmp_path: Path) -> None:
+    bundle = tmp_path / "Simple Chart.app"
+    installer.install_app(ROOT, bundle)
+    original_open = Path.open
+
+    def deny_bundle_writes(
+        path: Path, mode: str = "r", buffering: int = -1,
+        encoding: str | None = None, errors: str | None = None,
+        newline: str | None = None,
+    ) -> object:
+        if path.is_relative_to(bundle) and any(flag in mode for flag in "wax+"):
+            raise PermissionError("Existing application cannot be modified")
+        return original_open(path, mode, buffering, encoding, errors, newline)
+
+    with (
+        patch.object(Path, "open", deny_bundle_writes),
+        patch.object(Path, "chmod", side_effect=PermissionError("Cannot change mode")),
+    ):
+        installer.install_app(ROOT, bundle)
+
+
+def test_install_updates_changed_files_and_restores_executable_mode(tmp_path: Path) -> None:
+    bundle = tmp_path / "Simple Chart.app"
+    installer.install_app(ROOT, bundle)
+    files = [bundle / relative for relative in (
+        "Contents/Resources/SimpleChart.icns", "Contents/MacOS/SimpleChart",
+        "Contents/Info.plist",
+    )]
+    expected = [path.read_bytes() for path in files]
+    for path in files:
+        path.write_bytes(b"outdated")
+    files[1].chmod(0o644)
+    installer.install_app(ROOT, bundle)
+    assert [path.read_bytes() for path in files] == expected
+    assert files[1].stat().st_mode & 0o777 == 0o755
+
+
+def test_permission_failure_explains_macos_app_management() -> None:
+    with (
+        patch.object(installer.sys, "platform", "darwin"),
+        patch.object(installer, "install_app", side_effect=PermissionError("Update denied")),
+        pytest.raises(SystemExit, match="App Management") as caught,
+    ):
+        installer.main()
+    assert "rerun setup.sh" in str(caught.value)
 
 
 def test_setup_wires_macos_installer_after_package_install(tmp_path: Path) -> None:
