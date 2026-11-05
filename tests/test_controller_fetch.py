@@ -1,5 +1,6 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.controller import (
     _asset_reference_refresh_due,
     _fetch_and_cache_bars,
     _fetch_series_with_references,
+    _expected_last_session_bar_start,
     _history_end,
     _history_start,
     _resolve_company_name,
@@ -18,10 +20,10 @@ from app.controller import (
     _validate_provider_connection,
 )
 from app.header_bar import _level1_html
-from data.aggregator import Aggregator
+from data.aggregator import Aggregator, _bucket_start
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
-from data.provider.base import DataProvider
+from data.provider.base import DataProvider, HistoryUnavailableError
 from data.provider.config import alpaca_paper_connection, yfinance_connection
 
 
@@ -63,7 +65,12 @@ class FakeProvider(DataProvider):
         return "Test Company"
 
     def native_timeframes(self) -> list[Timeframe]:
-        return [Timeframe.MIN15, Timeframe.DAILY]
+        return [
+            Timeframe.MIN5,
+            Timeframe.MIN15,
+            Timeframe.DAILY,
+            Timeframe.WEEKLY,
+        ]
 
 
 class SnapshotProvider(FakeProvider):
@@ -109,6 +116,18 @@ class EmptyProvider(FakeProvider):
         return []
 
 
+class FailingProvider(FakeProvider):
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        raise RuntimeError("Provider request failed")
+
+
 class LimitedHistoryProvider(FakeProvider):
     def earliest_history_start(
         self,
@@ -127,6 +146,95 @@ class DelayedHistoryProvider(FakeProvider):
         end: datetime,
     ) -> datetime:
         return end - timedelta(minutes=16)
+
+
+class FiveMinuteProvider(FakeProvider):
+    def native_timeframes(self) -> list[Timeframe]:
+        return [Timeframe.MIN5, Timeframe.DAILY, Timeframe.WEEKLY]
+
+
+class EmptyFiveMinuteProvider(FiveMinuteProvider):
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        return []
+
+
+class DelayedFiveMinuteProvider(FiveMinuteProvider):
+    def latest_history_end(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime:
+        return end - timedelta(minutes=16)
+
+
+class StaticFiveMinuteProvider(FiveMinuteProvider):
+    def __init__(self, bars: list[Bar]) -> None:
+        super().__init__()
+        self.bars = bars
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        if timeframe != Timeframe.MIN5:
+            return []
+        return [bar for bar in self.bars if start <= bar.timestamp < end]
+
+
+class StaticDailyProvider(FiveMinuteProvider):
+    def __init__(self, bar: Bar) -> None:
+        super().__init__()
+        self.bar = bar
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        return [self.bar] if timeframe == Timeframe.DAILY else []
+
+
+class HistoryUnavailableFiveMinuteProvider(FiveMinuteProvider):
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        raise HistoryUnavailableError(symbol, timeframe)
+
+
+class RevisingFiveMinuteProvider(FiveMinuteProvider):
+    def __init__(self, timestamp: datetime) -> None:
+        super().__init__()
+        self.timestamp = timestamp
+
+    def fetch_bars(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        start: datetime,
+        end: datetime,
+    ) -> list[Bar]:
+        self.calls.append((symbol, timeframe, start, end))
+        revision = 100.0 if len(self.calls) == 1 else 110.0
+        return [_priced_bar(self.timestamp, revision)]
 
 
 def test_intraday_fetch_also_caches_daily_reference_bars(tmp_path: Path) -> None:
@@ -237,10 +345,986 @@ def test_delayed_provider_fetch_and_coverage_stop_at_delayed_endpoint(
 
     assert provider.calls[0][3] == delayed_end
     assert coverage is not None
-    assert coverage[1] == int(delayed_end.timestamp() * 1000)
+    assert coverage[1] == int(
+        datetime(2026, 8, 30, 4, 0, tzinfo=timezone.utc).timestamp() * 1000
+    )
 
 
-def test_existing_cache_is_backfilled_once_and_then_only_extended(
+def test_delayed_intraday_coverage_floors_provider_safe_endpoint(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 4, 15, 7, 12, tzinfo=timezone.utc)
+    safe_end = now - timedelta(minutes=16)
+    provider = DelayedFiveMinuteProvider()
+    aggregator = Aggregator(provider)
+    history_start = now - timedelta(days=10)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_and_cache_bars(
+            aggregator,
+            cache,
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            _history_end(Timeframe.MIN5, aggregator, now),
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls[0][3] == safe_end
+    assert coverage is not None
+    assert coverage[1] == int(
+        datetime(2026, 11, 4, 14, 50, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    assert coverage[1] <= int(safe_end.timestamp() * 1000)
+
+
+def test_complete_premarket_equity_cache_skips_daily_and_intraday_tails(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
+    history_start = now - timedelta(days=600)
+    prior_daily = datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    prior_daily_settled = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
+    prior_last_65m = datetime(2026, 11, 3, 19, 55, tzinfo=timezone.utc)
+    prior_settled = datetime(2026, 11, 3, 21, 5, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.DAILY,
+            [_bar_at(prior_daily)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.DAILY,
+            int(datetime(2016, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            int(prior_daily_settled.timestamp() * 1000),
+        )
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            [_bar_at(prior_last_65m)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            int(history_start.timestamp() * 1000),
+            int(prior_settled.timestamp() * 1000),
+        )
+
+        series = _fetch_series_with_references(
+            Aggregator(provider),
+            cache,
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            now,
+        )
+
+    assert provider.calls == []
+    assert series.bars == [_bar_at(prior_last_65m)]
+
+
+def test_delayed_endpoint_controls_premarket_cache_eligibility(
+    tmp_path: Path,
+) -> None:
+    wall_clock = datetime(2026, 11, 4, 14, 40, tzinfo=timezone.utc)
+    safe_endpoint = wall_clock - timedelta(minutes=16)
+    history_start = safe_endpoint - timedelta(days=600)
+    prior_daily = datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    prior_daily_settled = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
+    prior_last_5m = datetime(2026, 11, 3, 20, 55, tzinfo=timezone.utc)
+    prior_settled = datetime(2026, 11, 3, 21, 5, tzinfo=timezone.utc)
+    provider = DelayedFiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.DAILY,
+            [_bar_at(prior_daily)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.DAILY,
+            int(datetime(2016, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            int(prior_daily_settled.timestamp() * 1000),
+        )
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.MIN5,
+            [_bar_at(prior_last_5m)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(prior_settled.timestamp() * 1000),
+        )
+
+        series = _fetch_series_with_references(
+            Aggregator(provider),
+            cache,
+            "alpaca:delayed_sip",
+            "AAPL",
+            Timeframe.MIN5,
+            wall_clock,
+        )
+
+    assert provider.calls == []
+    assert series.bars == [_bar_at(prior_last_5m)]
+
+
+def test_premarket_equity_cache_missing_prior_session_fetches_from_newest_bars(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
+    history_start = now - timedelta(days=600)
+    stale_daily = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+    stale_last_65m = datetime(2026, 11, 2, 19, 55, tzinfo=timezone.utc)
+    misleading_coverage_end = datetime(
+        2026,
+        11,
+        3,
+        21,
+        0,
+        tzinfo=timezone.utc,
+    )
+    provider = FiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.DAILY,
+            [_bar_at(stale_daily)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.DAILY,
+            int(datetime(2016, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            int(datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc).timestamp() * 1000),
+        )
+        cache.put_bars(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            [_bar_at(stale_last_65m)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            int(history_start.timestamp() * 1000),
+            int(misleading_coverage_end.timestamp() * 1000),
+        )
+
+        _fetch_series_with_references(
+            Aggregator(provider),
+            cache,
+            "alpaca:delayed_sip",
+            "IWM",
+            Timeframe.MIN65,
+            now,
+        )
+
+    assert [call[1] for call in provider.calls] == [
+        Timeframe.DAILY,
+        Timeframe.MIN5,
+    ]
+    assert provider.calls[0][2] == stale_daily
+    assert provider.calls[1][2] == stale_last_65m
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    [
+        "BTC-USD",
+        "BTCUSD",
+        "^GSPC",
+        "EURUSD=X",
+        "GC=F",
+        "BP.L",
+        "BRK.B",
+    ],
+)
+def test_unknown_or_non_equity_symbols_retain_tail_refresh(
+    tmp_path: Path,
+    symbol: str,
+) -> None:
+    request_end = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
+    prior_last_bar = datetime(2026, 11, 3, 20, 55, tzinfo=timezone.utc)
+    prior_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "yfinance",
+            symbol,
+            Timeframe.MIN5,
+            [_bar_at(prior_last_bar)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "yfinance",
+            symbol,
+            Timeframe.MIN5,
+            int((request_end - timedelta(days=30)).timestamp() * 1000),
+            int(prior_close.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "yfinance",
+            symbol,
+            Timeframe.MIN5,
+            request_end - timedelta(days=30),
+            request_end,
+        )
+
+    assert provider.calls == [
+        (symbol, Timeframe.MIN5, prior_close, request_end)
+    ]
+
+
+def test_weekly_tail_refresh_is_not_session_suppressed(tmp_path: Path) -> None:
+    request_end = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
+    week_start = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+    provider = EmptyProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "yfinance",
+            "AAPL",
+            Timeframe.WEEKLY,
+            [_bar_at(week_start)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.WEEKLY,
+            int(datetime(2016, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+            int(week_start.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "yfinance",
+            "AAPL",
+            Timeframe.WEEKLY,
+            datetime(2016, 1, 1, tzinfo=timezone.utc),
+            request_end,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.WEEKLY, week_start, request_end)
+    ]
+
+
+def test_empty_existing_cache_tail_preserves_native_coverage(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    stale_bar = datetime(2026, 11, 3, 19, 55, tzinfo=timezone.utc)
+    coverage_end = datetime(2026, 11, 3, 20, 0, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 3, 22, 0, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+    original_coverage = (
+        int(history_start.timestamp() * 1000),
+        int(coverage_end.timestamp() * 1000),
+    )
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            [_bar_at(stale_bar)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            *original_coverage,
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            request_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, stale_bar, request_end)
+    ]
+    assert coverage == original_coverage
+
+
+def test_postclose_load_finalizes_partial_last_intraday_bar(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    last_bar_start = datetime(2026, 11, 3, 20, 55, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 3, 21, 30, tzinfo=timezone.utc)
+    provider = StaticFiveMinuteProvider([_priced_bar(last_bar_start, 110.0)])
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            [_priced_bar(last_bar_start, 100.0)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(last_bar_start.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            request_end,
+        )
+        bars = cache.get_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(request_end.timestamp() * 1000),
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, last_bar_start, request_end)
+    ]
+    assert bars[-1] == _priced_bar(last_bar_start, 110.0)
+
+
+def test_postclose_load_finalizes_partial_daily_reference(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2016, 1, 1, tzinfo=timezone.utc)
+    daily_start = datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    next_day = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 3, 22, 0, tzinfo=timezone.utc)
+    provider = StaticDailyProvider(_priced_bar(daily_start, 110.0))
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            [_priced_bar(daily_start, 100.0)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            int(history_start.timestamp() * 1000),
+            int(daily_start.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            history_start,
+            request_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+        )
+        bars = cache.get_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            int(history_start.timestamp() * 1000),
+            int(request_end.timestamp() * 1000),
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.DAILY, daily_start, request_end)
+    ]
+    assert coverage is not None
+    assert coverage[1] == int(next_day.timestamp() * 1000)
+    assert bars[-1] == _priced_bar(daily_start, 110.0)
+
+
+def test_empty_cold_daily_postclose_load_retries_from_session_start(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2016, 1, 1, tzinfo=timezone.utc)
+    daily_start = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 11, 2, 21, 30, tzinfo=timezone.utc)
+    second_end = datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            history_start,
+            first_end,
+        )
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            history_start,
+            second_end,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.DAILY, history_start, first_end),
+        ("AAPL", Timeframe.DAILY, daily_start, second_end),
+    ]
+
+
+def test_lagging_daily_postclose_load_retries_missing_session_bar(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2016, 1, 1, tzinfo=timezone.utc)
+    friday_start = datetime(2026, 10, 30, 4, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 11, 2, 21, 30, tzinfo=timezone.utc)
+    second_end = datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)
+    provider = StaticDailyProvider(_bar_at(friday_start))
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        for request_end in (first_end, second_end):
+            _fetch_and_cache_bars(
+                Aggregator(provider),
+                cache,
+                "alpaca:iex",
+                "AAPL",
+                Timeframe.DAILY,
+                history_start,
+                request_end,
+            )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.DAILY, history_start, first_end),
+        ("AAPL", Timeframe.DAILY, friday_start, second_end),
+    ]
+
+
+def test_close_boundary_does_not_settle_partial_intraday_bar(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    last_bar_start = datetime(2026, 11, 3, 20, 55, tzinfo=timezone.utc)
+    session_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 3, 21, 2, tzinfo=timezone.utc)
+    provider = StaticFiveMinuteProvider([_priced_bar(last_bar_start, 110.0)])
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            [_priced_bar(last_bar_start, 100.0)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(session_close.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            request_end,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, last_bar_start, request_end)
+    ]
+
+
+def test_daily_close_boundary_does_not_write_settled_watermark(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2016, 1, 1, tzinfo=timezone.utc)
+    daily_start = datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    session_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
+    provider = StaticDailyProvider(_priced_bar(daily_start, 110.0))
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            [_priced_bar(daily_start, 100.0)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            int(history_start.timestamp() * 1000),
+            int(daily_start.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            history_start,
+            session_close,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+        )
+
+    assert coverage is not None
+    assert coverage[1] == int(daily_start.timestamp() * 1000)
+
+
+def test_daily_bar_refreshes_again_after_settlement_delay(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2016, 1, 1, tzinfo=timezone.utc)
+    daily_start = datetime(2026, 11, 3, 5, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 11, 3, 21, 0, 30, tzinfo=timezone.utc)
+    second_end = datetime(2026, 11, 3, 21, 20, tzinfo=timezone.utc)
+    premarket_end = datetime(2026, 11, 4, 13, 0, tzinfo=timezone.utc)
+    next_day = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
+    provider = RevisingFiveMinuteProvider(daily_start)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        for request_end in (first_end, second_end):
+            _fetch_and_cache_bars(
+                Aggregator(provider),
+                cache,
+                "alpaca:iex",
+                "AAPL",
+                Timeframe.DAILY,
+                history_start,
+                request_end,
+            )
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            history_start,
+            premarket_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+        )
+        bars = cache.get_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.DAILY,
+            int(history_start.timestamp() * 1000),
+            int(second_end.timestamp() * 1000),
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.DAILY, history_start, first_end),
+        ("AAPL", Timeframe.DAILY, daily_start, second_end),
+    ]
+    assert bars[-1] == _priced_bar(daily_start, 110.0)
+    assert coverage is not None
+    assert coverage[1] == int(next_day.timestamp() * 1000)
+
+
+def test_existing_coverage_without_bars_uses_bounded_tail_start(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2025, 3, 14, 14, 0, tzinfo=timezone.utc)
+    coverage_end = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(coverage_end.timestamp() * 1000),
+        )
+
+        for _ in range(2):
+            _fetch_and_cache_bars(
+                Aggregator(provider),
+                cache,
+                "alpaca:iex",
+                "AAPL",
+                Timeframe.MIN5,
+                history_start,
+                request_end,
+            )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, coverage_end, request_end),
+        ("AAPL", Timeframe.MIN5, coverage_end, request_end),
+    ]
+
+
+@pytest.mark.parametrize(
+    "timeframe",
+    [
+        Timeframe.MIN1,
+        Timeframe.MIN5,
+        Timeframe.MIN15,
+        Timeframe.MIN30,
+        Timeframe.MIN39,
+        Timeframe.MIN65,
+    ],
+)
+@pytest.mark.parametrize(
+    "session_date",
+    [date(2026, 1, 14), date(2026, 7, 14)],
+)
+def test_expected_last_session_bar_matches_aggregator_bucket(
+    timeframe: Timeframe,
+    session_date: date,
+) -> None:
+    final_session_minute = datetime.combine(
+        session_date,
+        time(15, 59),
+        tzinfo=ZoneInfo("America/New_York"),
+    )
+    expected = _expected_last_session_bar_start(
+        timeframe,
+        session_date,
+        timezone.utc,
+    )
+
+    assert expected == _bucket_start(
+        final_session_minute.astimezone(timezone.utc),
+        timeframe.minutes or 1,
+    )
+
+
+def test_weekday_closure_empty_tail_is_safe_and_retryable(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    prior_last_bar = datetime(2026, 11, 3, 20, 55, tzinfo=timezone.utc)
+    prior_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
+    holiday_endpoint = datetime(2026, 11, 4, 17, 0, tzinfo=timezone.utc)
+    provider = EmptyFiveMinuteProvider()
+    original_coverage = (
+        int(history_start.timestamp() * 1000),
+        int(prior_close.timestamp() * 1000),
+    )
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            [_bar_at(prior_last_bar)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            *original_coverage,
+        )
+
+        for _ in range(2):
+            _fetch_and_cache_bars(
+                Aggregator(provider),
+                cache,
+                "alpaca:iex",
+                "AAPL",
+                Timeframe.MIN5,
+                history_start,
+                holiday_endpoint,
+            )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, prior_close, holiday_endpoint),
+        ("AAPL", Timeframe.MIN5, prior_close, holiday_endpoint),
+    ]
+    assert coverage == original_coverage
+
+
+def test_typed_history_unavailable_is_suppressed_only_for_cached_tail(
+    tmp_path: Path,
+) -> None:
+    history_start = datetime(2026, 10, 1, 13, 30, tzinfo=timezone.utc)
+    stale_bar = datetime(2026, 11, 3, 19, 55, tzinfo=timezone.utc)
+    coverage_end = datetime(2026, 11, 3, 20, 0, tzinfo=timezone.utc)
+    request_end = datetime(2026, 11, 3, 22, 0, tzinfo=timezone.utc)
+    provider = HistoryUnavailableFiveMinuteProvider()
+    original_coverage = (
+        int(history_start.timestamp() * 1000),
+        int(coverage_end.timestamp() * 1000),
+    )
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN5,
+            [_bar_at(stale_bar)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN5,
+            *original_coverage,
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            request_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls == [
+        ("AAPL", Timeframe.MIN5, stale_bar, request_end)
+    ]
+    assert coverage == original_coverage
+
+    with Cache(str(tmp_path / "cold.db")) as cache:
+        with pytest.raises(HistoryUnavailableError):
+            _fetch_and_cache_bars(
+                Aggregator(HistoryUnavailableFiveMinuteProvider()),
+                cache,
+                "yfinance",
+                "AAPL",
+                Timeframe.MIN5,
+                history_start,
+                request_end,
+            )
+
+
+def test_repeat_empty_intraday_refresh_starts_at_completed_boundary(
+    tmp_path: Path,
+) -> None:
+    first_end = datetime(2026, 11, 4, 15, 3, 4, tzinfo=timezone.utc)
+    second_end = first_end + timedelta(seconds=4)
+    history_start = first_end - timedelta(days=10)
+    provider = FiveMinuteProvider()
+    aggregator = Aggregator(provider)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_and_cache_bars(
+            aggregator,
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            first_end,
+        )
+        _fetch_and_cache_bars(
+            aggregator,
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            second_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls[1] == (
+        "AAPL",
+        Timeframe.MIN5,
+        datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc),
+        second_end,
+    )
+    assert coverage is not None
+    assert coverage[1] == int(
+        datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+
+def test_preopen_subminute_endpoint_persists_only_completed_coverage(
+    tmp_path: Path,
+) -> None:
+    request_end = datetime(2026, 11, 4, 8, 59, 50, tzinfo=timezone.utc)
+    history_start = request_end - timedelta(days=10)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_and_cache_bars(
+            Aggregator(EmptyFiveMinuteProvider()),
+            cache,
+            "yfinance",
+            "GC=F",
+            Timeframe.MIN5,
+            history_start,
+            request_end,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "yfinance",
+            "GC=F",
+            Timeframe.MIN5,
+        )
+
+    assert coverage is not None
+    assert coverage[1] == int(
+        datetime(2026, 11, 4, 8, 55, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    assert coverage[1] <= int(request_end.timestamp() * 1000)
+
+
+def test_boundary_crossing_finalizes_previous_forming_bar(
+    tmp_path: Path,
+) -> None:
+    bar_start = datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc)
+    first_end = datetime(2026, 11, 4, 15, 3, tzinfo=timezone.utc)
+    second_end = datetime(2026, 11, 4, 15, 6, tzinfo=timezone.utc)
+    history_start = first_end - timedelta(days=10)
+    provider = RevisingFiveMinuteProvider(bar_start)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            first_end,
+        )
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            history_start,
+            second_end,
+        )
+        bars = cache.get_bars(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            int(second_end.timestamp() * 1000),
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "alpaca:iex",
+            "AAPL",
+            Timeframe.MIN5,
+        )
+
+    assert provider.calls[1][2] == bar_start
+    assert bars == [_priced_bar(bar_start, 110.0)]
+    assert coverage is not None
+    assert coverage[1] == int(
+        datetime(2026, 11, 4, 15, 5, tzinfo=timezone.utc).timestamp() * 1000
+    )
+
+
+def test_repeat_intraday_load_refreshes_daily_from_day_boundary(
+    tmp_path: Path,
+) -> None:
+    first_now = datetime(2026, 11, 4, 15, 3, 4, tzinfo=timezone.utc)
+    second_now = first_now + timedelta(seconds=4)
+    provider = FakeProvider()
+    aggregator = Aggregator(provider)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _fetch_series_with_references(
+            aggregator,
+            cache,
+            "test-provider",
+            "AAPL",
+            Timeframe.MIN15,
+            first_now,
+        )
+        _fetch_series_with_references(
+            aggregator,
+            cache,
+            "test-provider",
+            "AAPL",
+            Timeframe.MIN15,
+            second_now,
+        )
+
+    assert provider.calls[2] == (
+        "AAPL",
+        Timeframe.DAILY,
+        datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc),
+        second_now,
+    )
+    assert provider.calls[3] == (
+        "AAPL",
+        Timeframe.MIN15,
+        datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc),
+        second_now,
+    )
+
+
+def test_existing_bars_without_coverage_are_refetched_then_refreshed(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
@@ -278,10 +1362,82 @@ def test_existing_cache_is_backfilled_once_and_then_only_extended(
             "AAPL",
             Timeframe.DAILY,
             datetime(2016, 1, 1, tzinfo=timezone.utc),
-            cached_at,
+            now,
         ),
-        ("AAPL", Timeframe.DAILY, cached_at, now),
+        (
+            "AAPL",
+            Timeframe.DAILY,
+            cached_at,
+            now,
+        ),
     ]
+
+
+def test_stale_cache_refetches_only_provider_safe_window(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+    safe_start = now - timedelta(days=55)
+    stale_at = now - timedelta(days=100)
+    provider = EmptyProvider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN15,
+            [_bar_at(stale_at)],
+        )
+        cache.extend_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN15,
+            int(stale_at.timestamp() * 1000),
+            int(stale_at.timestamp() * 1000),
+        )
+
+        _fetch_and_cache_bars(
+            Aggregator(provider),
+            cache,
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN15,
+            safe_start,
+            now,
+        )
+        coverage = cache.get_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN15,
+        )
+
+    assert provider.calls == [("AAPL", Timeframe.MIN15, safe_start, now)]
+    assert coverage == (
+        int(safe_start.timestamp() * 1000),
+        int(now.timestamp() * 1000),
+    )
+
+
+def test_failed_fetch_does_not_advance_coverage(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+    start = now - timedelta(days=55)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        with pytest.raises(RuntimeError, match="Provider request failed"):
+            _fetch_and_cache_bars(
+                Aggregator(FailingProvider()),
+                cache,
+                "yfinance",
+                "AAPL",
+                Timeframe.MIN15,
+                start,
+                now,
+            )
+        coverage = cache.get_bar_fetch_coverage(
+            "yfinance",
+            "AAPL",
+            Timeframe.MIN15,
+        )
+
+    assert coverage is None
 
 
 def test_fetch_coverage_is_independent_for_each_provider_namespace(
@@ -529,5 +1685,16 @@ def _bar_at(timestamp: datetime) -> Bar:
         high=101.0,
         low=99.0,
         close=100.0,
+        volume=1_000,
+    )
+
+
+def _priced_bar(timestamp: datetime, price: float) -> Bar:
+    return Bar(
+        timestamp=timestamp,
+        open=price,
+        high=price + 1.0,
+        low=price - 1.0,
+        close=price + 0.5,
         volume=1_000,
     )

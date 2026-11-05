@@ -1,6 +1,6 @@
 import pytest
 
-from simplechart.claude_qc.findings import (
+from devtools.claude_qc.findings import (
     Confidence,
     FindingValidationError,
     Severity,

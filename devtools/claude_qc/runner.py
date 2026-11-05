@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import json
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Final, NoReturn
 
-from simplechart.claude_qc.environment import build_claude_environment
-from simplechart.claude_qc.events import (
-    EventValidationCategory,
-    EventValidationError,
+from devtools.claude_qc.environment import build_claude_environment
+from devtools.claude_qc.output import (
+    OutputValidationCategory,
+    OutputValidationError,
     ReviewResult,
-    parse_event_stream,
+    parse_review_output,
 )
-from simplechart.claude_qc.findings import FINDINGS_JSON_SCHEMA
-from simplechart.claude_qc.packet import EFFORT, MODEL
-from simplechart.claude_qc.preflight import ClaudeCodeInstallation
-from simplechart.claude_qc.process import (
+from devtools.claude_qc.findings import FINDINGS_JSON_SCHEMA
+from devtools.claude_qc.packet import EFFORT, MODEL
+from devtools.claude_qc.preflight import ClaudeCodeInstallation
+from devtools.claude_qc.process import (
     ProcessBackend,
     ProcessRequest,
     ProcessStartError,
@@ -46,16 +46,76 @@ class ReviewRunCategory(StrEnum):
     INVALID = "invalid"
 
 
+class ReviewRunReason(StrEnum):
+    UNEXPECTED_LOCAL_ARTIFACT = "unexpected_local_artifact"
+
+
+class ReviewStage(StrEnum):
+    STARTING = "starting"
+    FINAL_RESPONSE = "final_response"
+
+
+class ReviewProgress(StrEnum):
+    STARTING = "starting"
+    FINAL_RESPONSE = "final_response"
+
+
+ProgressReporter = Callable[[ReviewProgress], None]
+
+
 class ReviewRunError(RuntimeError):
-    def __init__(self, category: ReviewRunCategory, message: str) -> None:
+    def __init__(
+        self,
+        category: ReviewRunCategory,
+        message: str,
+        *,
+        reason: ReviewRunReason | None = None,
+        stage: ReviewStage = ReviewStage.STARTING,
+        validation_message: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.category = category
+        self.reason = reason
+        self.stage = stage
+        self.validation_message = validation_message
 
 
 @dataclass(frozen=True)
 class _ReviewFailure:
     category: ReviewRunCategory
     message: str
+    reason: ReviewRunReason | None = None
+    stage: ReviewStage = ReviewStage.STARTING
+    validation_message: str | None = None
+
+
+class _ProgressTracker:
+    def __init__(self, reporter: ProgressReporter | None) -> None:
+        self.reporter = reporter
+        self.stage = ReviewStage.STARTING
+
+    def emit(self, progress: ReviewProgress) -> None:
+        if self.reporter is None:
+            return
+        try:
+            self.reporter(progress)
+        except Exception:
+            pass
+
+    def observe(self, line: bytes) -> None:
+        value: object | None = None
+        try:
+            value = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+            return
+        if not isinstance(value, dict):
+            return
+        if self.stage is ReviewStage.FINAL_RESPONSE:
+            return
+        event_type = value.get("type")
+        if event_type == "result":
+            self.stage = ReviewStage.FINAL_RESPONSE
+            self.emit(ReviewProgress.FINAL_RESPONSE)
 
 
 def build_review_argv(executable: Path) -> tuple[str, ...]:
@@ -71,18 +131,15 @@ def build_review_argv(executable: Path) -> tuple[str, ...]:
         "",
         "--disallowedTools",
         "mcp__*",
-        "--setting-sources",
-        "",
         "--strict-mcp-config",
         "--mcp-config",
         '{"mcpServers":{}}',
         "--permission-mode",
         "dontAsk",
-        "--max-turns",
-        "1",
+        "--permission-prompts",
+        "none",
         "--output-format",
-        "stream-json",
-        "--verbose",
+        "json",
         "--json-schema",
         schema,
         "--system-prompt",
@@ -96,10 +153,10 @@ def build_review_argv(executable: Path) -> tuple[str, ...]:
     )
 
 
-def _review_category(category: EventValidationCategory) -> ReviewRunCategory:
-    if category is EventValidationCategory.UNSAFE:
+def _review_category(category: OutputValidationCategory) -> ReviewRunCategory:
+    if category is OutputValidationCategory.UNSAFE:
         return ReviewRunCategory.UNSAFE
-    if category is EventValidationCategory.PROVIDER:
+    if category is OutputValidationCategory.PROVIDER:
         return ReviewRunCategory.PROVIDER
     return ReviewRunCategory.INVALID
 
@@ -111,12 +168,15 @@ def _run_review_sensitive(
     parent_environment: Mapping[str, str],
     *,
     platform: str,
+    progress: ProgressReporter | None,
 ) -> ReviewResult | _ReviewFailure:
     child_environment = build_claude_environment(
         parent_environment,
         platform=platform,
     )
-    with tempfile.TemporaryDirectory(prefix="simplechart-claude-qc-") as directory:
+    tracker = _ProgressTracker(progress)
+    tracker.emit(ReviewProgress.STARTING)
+    with tempfile.TemporaryDirectory(prefix="claude-qc-") as directory:
         cwd = Path(directory)
         request = ProcessRequest(
             argv=build_review_argv(installation.executable),
@@ -124,6 +184,7 @@ def _run_review_sensitive(
             environment=child_environment,
             stdin=packet,
             timeout_seconds=REVIEW_DEADLINE_SECONDS,
+            stdout_line_handler=tracker.observe,
         )
         outcome = None
         deadline_failed = False
@@ -138,33 +199,39 @@ def _run_review_sensitive(
             return _ReviewFailure(
                 ReviewRunCategory.DEADLINE,
                 "The Claude review deadline expired.",
+                stage=tracker.stage,
             )
         if start_failed or outcome is None:
             return _ReviewFailure(
                 ReviewRunCategory.PROVIDER,
                 "The Claude review process could not start.",
+                stage=tracker.stage,
             )
         if any(cwd.iterdir()):
             return _ReviewFailure(
                 ReviewRunCategory.UNSAFE,
                 "Claude Code created an unexpected local artifact.",
+                ReviewRunReason.UNEXPECTED_LOCAL_ARTIFACT,
+                tracker.stage,
             )
         if outcome.return_code != 0:
             return _ReviewFailure(
                 ReviewRunCategory.PROVIDER,
                 "Claude Code did not complete the review.",
+                stage=tracker.stage,
             )
 
         result: ReviewResult | None = None
-        validation_category: EventValidationCategory | None = None
+        validation_category: OutputValidationCategory | None = None
+        validation_message: str | None = None
         try:
-            result = parse_event_stream(
+            result = parse_review_output(
                 outcome.stdout,
-                expected_cwd=cwd,
                 expected_version=installation.version,
             )
-        except EventValidationError as error:
+        except OutputValidationError as error:
             validation_category = error.category
+            validation_message = str(error)
         if validation_category is not None or result is None:
             category = (
                 _review_category(validation_category)
@@ -174,12 +241,27 @@ def _run_review_sensitive(
             return _ReviewFailure(
                 category,
                 "Claude Code returned an invalid review result.",
+                None,
+                tracker.stage,
+                validation_message,
             )
         return result
 
 
-def _raise_review_error(category: ReviewRunCategory, message: str) -> NoReturn:
-    raise ReviewRunError(category, message)
+def _raise_review_error(
+    category: ReviewRunCategory,
+    message: str,
+    reason: ReviewRunReason | None,
+    stage: ReviewStage,
+    validation_message: str | None,
+) -> NoReturn:
+    raise ReviewRunError(
+        category,
+        message,
+        reason=reason,
+        stage=stage,
+        validation_message=validation_message,
+    )
 
 
 def run_review(
@@ -189,6 +271,7 @@ def run_review(
     parent_environment: Mapping[str, str],
     *,
     platform: str,
+    progress: ProgressReporter | None = None,
 ) -> ReviewResult:
     outcome = _run_review_sensitive(
         installation,
@@ -196,8 +279,15 @@ def run_review(
         backend,
         parent_environment,
         platform=platform,
+        progress=progress,
     )
     del installation, packet, backend, parent_environment, platform
     if isinstance(outcome, _ReviewFailure):
-        _raise_review_error(outcome.category, outcome.message)
+        _raise_review_error(
+            outcome.category,
+            outcome.message,
+            outcome.reason,
+            outcome.stage,
+            outcome.validation_message,
+        )
     return outcome

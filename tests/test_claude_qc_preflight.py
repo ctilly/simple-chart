@@ -1,16 +1,20 @@
 import json
 import subprocess
+import sys
+import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 
 import pytest
 
-from simplechart.claude_qc.environment import (
+from devtools.claude_qc.environment import (
     FIXED_CLAUDE_ENVIRONMENT,
     PROHIBITED_CLAUDE_ENVIRONMENT_KEYS,
     build_claude_environment,
 )
-from simplechart.claude_qc.preflight import (
+from devtools.claude_qc.output import parse_review_output
+from devtools.claude_qc.packet import MODEL
+from devtools.claude_qc.preflight import (
     PREFLIGHT_TIMEOUT_SECONDS,
     REQUIRED_CLAUDE_FLAGS,
     PreflightCategory,
@@ -18,7 +22,7 @@ from simplechart.claude_qc.preflight import (
     preflight_claude_code,
     resolve_claude_code,
 )
-from simplechart.claude_qc.process import (
+from devtools.claude_qc.process import (
     ProcessBackend,
     ProcessOutcome,
     ProcessRequest,
@@ -218,6 +222,144 @@ def test_subprocess_timeout_discards_raw_child_output(
     assert secret.decode() not in repr(caught.value.args)
 
 
+def test_subprocess_backend_streams_stdout_lines_and_retains_final_output(
+    tmp_path: Path,
+) -> None:
+    lines: list[bytes] = []
+    request = ProcessRequest(
+        argv=(
+            sys.executable,
+            "-c",
+            "print('first', flush=True); print('second', flush=True)",
+        ),
+        cwd=tmp_path,
+        environment={},
+        stdin=b"",
+        timeout_seconds=10.0,
+        stdout_line_handler=lines.append,
+    )
+
+    outcome = SubprocessBackend().run(request)
+
+    assert outcome.return_code == 0
+    assert outcome.stdout == b"first\nsecond\n"
+    assert lines == [b"first\n", b"second\n"]
+
+
+def test_streaming_subprocess_round_trips_large_valid_review_output(
+    tmp_path: Path,
+) -> None:
+    finding = {
+        "finding_id": "CQ-001",
+        "severity": "medium",
+        "claim": "Synthetic transport finding.",
+        "evidence": "x" * 2_000_000,
+        "impact": "The transport must preserve the complete response.",
+        "falsification_check": "Compare every output byte and parse the stream.",
+        "suggested_disposition": "accept",
+        "confidence": "high",
+    }
+    structured_output = {"findings": [finding]}
+    raw = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "duration_ms": 1234,
+            "num_turns": 2,
+            "stop_reason": "tool_use",
+            "permission_denials": [],
+            "modelUsage": {MODEL: {"outputTokens": 20}},
+            "structured_output": structured_output,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    observed_lines: list[bytes] = []
+    request = ProcessRequest(
+        argv=(
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())",
+        ),
+        cwd=tmp_path,
+        environment={},
+        stdin=raw,
+        timeout_seconds=10.0,
+        stdout_line_handler=observed_lines.append,
+    )
+
+    outcome = SubprocessBackend().run(request)
+    result = parse_review_output(
+        outcome.stdout,
+        expected_version="2.1.318",
+    )
+
+    assert outcome.return_code == 0
+    assert outcome.stdout == raw
+    assert b"".join(observed_lines) == raw
+    assert result.findings[0].evidence == finding["evidence"]
+
+
+def test_streaming_subprocess_handles_early_exit_with_large_input(
+    tmp_path: Path,
+) -> None:
+    request = ProcessRequest(
+        argv=(sys.executable, "-c", "raise SystemExit(1)"),
+        cwd=tmp_path,
+        environment={},
+        stdin=b"x" * 1_000_000,
+        timeout_seconds=1.0,
+        stdout_line_handler=lambda line: None,
+    )
+
+    outcome = SubprocessBackend().run(request)
+
+    assert outcome.return_code == 1
+
+
+def test_streaming_subprocess_deadline_includes_unread_input(
+    tmp_path: Path,
+) -> None:
+    request = ProcessRequest(
+        argv=(sys.executable, "-c", "import time; time.sleep(30)"),
+        cwd=tmp_path,
+        environment={},
+        stdin=b"x" * 1_000_000,
+        timeout_seconds=0.1,
+        stdout_line_handler=lambda line: None,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ProcessTimeoutError):
+        SubprocessBackend().run(request)
+
+    assert time.monotonic() - started < 3.0
+
+
+def test_streaming_subprocess_timeout_terminates_pipe_inheriting_child(
+    tmp_path: Path,
+) -> None:
+    child_code = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+        "time.sleep(30)"
+    )
+    request = ProcessRequest(
+        argv=(sys.executable, "-c", child_code),
+        cwd=tmp_path,
+        environment={},
+        stdin=b"",
+        timeout_seconds=0.1,
+        stdout_line_handler=lambda line: None,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(ProcessTimeoutError):
+        SubprocessBackend().run(request)
+
+    assert time.monotonic() - started < 3.0
+
+
 def test_resolve_claude_code_reports_missing_executable() -> None:
     with pytest.raises(PreflightError) as caught:
         resolve_claude_code(lambda name: None)
@@ -243,8 +385,6 @@ def test_preflight_accepts_only_compatible_first_party_personal_subscription() -
         ("/opt/claude", "--help"),
         (
             "/opt/claude",
-            "--max-turns",
-            "1",
             "auth",
             "status",
             "--json",
@@ -262,6 +402,51 @@ def test_preflight_accepts_only_compatible_first_party_personal_subscription() -
         == build_claude_environment(parent_environment, platform="linux")
         for request in backend.requests
     )
+
+
+def test_preflight_accepts_current_cli_config_directory_field() -> None:
+    backend = _FakeBackend(
+        [
+            _outcome(b"2.1.314 (Claude Code)"),
+            _outcome(" ".join(REQUIRED_CLAUDE_FLAGS).encode()),
+            _outcome(
+                _auth_status(configDirectory="/home/private/.claude")
+            ),
+        ]
+    )
+
+    installation = preflight_claude_code(
+        backend,
+        {"HOME": "/home/tester", "PATH": "/usr/bin"},
+        finder=_finder("/opt/claude"),
+    )
+
+    assert installation.version == "2.1.314"
+    assert installation.subscription_type == "pro"
+
+
+def test_preflight_accepts_current_cli_login_expiration_field() -> None:
+    backend = _FakeBackend(
+        [
+            _outcome(b"2.1.318 (Claude Code)"),
+            _outcome(" ".join(REQUIRED_CLAUDE_FLAGS).encode()),
+            _outcome(
+                _auth_status(
+                    configDirectory="/home/private/.claude",
+                    loginExpiresAt="2026-12-01T12:00:00.000Z",
+                )
+            ),
+        ]
+    )
+
+    installation = preflight_claude_code(
+        backend,
+        {"HOME": "/home/tester", "PATH": "/usr/bin"},
+        finder=_finder("/opt/claude"),
+    )
+
+    assert installation.version == "2.1.318"
+    assert installation.subscription_type == "pro"
 
 
 def test_preflight_rejects_help_substring_false_positives() -> None:
@@ -289,13 +474,19 @@ def test_preflight_rejects_help_substring_false_positives() -> None:
     "auth_status",
     [
         _auth_status(extraAuthSource="unknown"),
+        _auth_status(configDirectory=3),
+        _auth_status(loginExpiresAt="2026-12-01T12:00:00.000Z"),
+        _auth_status(
+            configDirectory="/home/private/.claude",
+            loginExpiresAt=3,
+        ),
         _auth_status().replace(
             b'"loggedIn": true',
             b'"loggedIn": false, "loggedIn": true',
         ),
     ],
 )
-def test_preflight_rejects_unknown_or_duplicate_auth_status_fields(
+def test_preflight_accepts_unknown_auth_status_fields(
     auth_status: bytes,
 ) -> None:
     backend = _FakeBackend(
@@ -306,29 +497,17 @@ def test_preflight_rejects_unknown_or_duplicate_auth_status_fields(
         ]
     )
 
-    with pytest.raises(PreflightError) as caught:
-        preflight_claude_code(backend, {}, finder=_finder("/opt/claude"))
-
-    assert caught.value.category is PreflightCategory.SUBSCRIPTION
-
-
-def test_preflight_rejects_cli_that_does_not_parse_max_turns() -> None:
-    backend = _FakeBackend(
-        [
-            _outcome(b"2.1.252 (Claude Code)"),
-            _outcome(" ".join(REQUIRED_CLAUDE_FLAGS).encode()),
-            ProcessOutcome(
-                return_code=1,
-                stdout=b"",
-                stderr=b"error: unknown option '--max-turns'",
-            ),
-        ]
-    )
-
-    with pytest.raises(PreflightError) as caught:
-        preflight_claude_code(backend, {}, finder=_finder("/opt/claude"))
-
-    assert caught.value.category is PreflightCategory.INCOMPATIBLE
+    if b'"loggedIn": false, "loggedIn": true' in auth_status:
+        with pytest.raises(PreflightError) as caught:
+            preflight_claude_code(backend, {}, finder=_finder("/opt/claude"))
+        assert caught.value.category is PreflightCategory.SUBSCRIPTION
+    else:
+        installation = preflight_claude_code(
+            backend,
+            {},
+            finder=_finder("/opt/claude"),
+        )
+        assert installation.subscription_type == "pro"
 
 
 @pytest.mark.parametrize(

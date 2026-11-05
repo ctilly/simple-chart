@@ -11,8 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final, NoReturn
 
-from simplechart.claude_qc.environment import build_claude_environment
-from simplechart.claude_qc.process import (
+from devtools.claude_qc.environment import build_claude_environment
+from devtools.claude_qc.process import (
     ProcessBackend,
     ProcessOutcome,
     ProcessRequest,
@@ -28,12 +28,10 @@ REQUIRED_CLAUDE_FLAGS: Final = (
     "--effort",
     "--tools",
     "--disallowedTools",
-    "--setting-sources",
     "--strict-mcp-config",
     "--mcp-config",
     "--no-session-persistence",
     "--output-format",
-    "--verbose",
     "--json-schema",
     "--system-prompt",
     "--restricted",
@@ -41,24 +39,11 @@ REQUIRED_CLAUDE_FLAGS: Final = (
     "--disable-slash-commands",
     "--no-chrome",
     "--permission-mode",
+    "--permission-prompts",
 )
-_MAX_TURNS_ARGUMENTS = ("--max-turns", "1")
 
 _VERSION_PATTERN = re.compile(r"(\d+\.\d+\.\d+) \(Claude Code\)\s*")
 _PERSONAL_SUBSCRIPTIONS = frozenset({"pro", "max"})
-_AUTH_STATUS_FIELDS = frozenset(
-    {
-        "loggedIn",
-        "authMethod",
-        "apiProvider",
-        "subscriptionType",
-        "analyticsDisabled",
-        "projectsDirectory",
-        "email",
-        "orgId",
-        "orgName",
-    }
-)
 
 
 class PreflightCategory(StrEnum):
@@ -184,14 +169,6 @@ def _strict_auth_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _parse_subscription(outcome: ProcessOutcome) -> str:
     if outcome.return_code != 0:
-        if (
-            not outcome.stdout
-            and b"unknown option '--max-turns'" in outcome.stderr
-        ):
-            raise PreflightError(
-                PreflightCategory.INCOMPATIBLE,
-                "Claude Code lacks the required turn-limit control.",
-            )
         raise PreflightError(
             PreflightCategory.SUBSCRIPTION,
             "Claude subscription authentication is unavailable.",
@@ -213,12 +190,10 @@ def _parse_subscription(outcome: ProcessOutcome) -> str:
     if (
         invalid
         or not isinstance(value, dict)
-        or set(value) != _AUTH_STATUS_FIELDS
-        or not isinstance(value.get("analyticsDisabled"), bool)
-        or not isinstance(value.get("projectsDirectory"), str)
-        or not isinstance(value.get("email"), str)
-        or not isinstance(value.get("orgId"), str)
-        or not isinstance(value.get("orgName"), str)
+        or not isinstance(value.get("loggedIn"), bool)
+        or not isinstance(value.get("authMethod"), str)
+        or not isinstance(value.get("apiProvider"), str)
+        or not isinstance(value.get("subscriptionType"), str)
     ):
         raise PreflightError(
             PreflightCategory.SUBSCRIPTION,
@@ -251,7 +226,7 @@ def _perform_preflight(
         parent_environment,
         platform=platform,
     )
-    with tempfile.TemporaryDirectory(prefix="simplechart-claude-qc-") as directory:
+    with tempfile.TemporaryDirectory(prefix="claude-qc-") as directory:
         cwd = Path(directory)
 
         def request(*arguments: str) -> ProcessRequest:
@@ -279,7 +254,7 @@ def _perform_preflight(
         subscription_type = _parse_subscription(
             _run_preflight_command(
                 backend,
-                request(*_MAX_TURNS_ARGUMENTS, "auth", "status", "--json"),
+                request("auth", "status", "--json"),
                 PreflightCategory.SUBSCRIPTION,
             )
         )

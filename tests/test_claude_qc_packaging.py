@@ -1,12 +1,11 @@
 import json
-import os
 import subprocess
 import sys
 import sysconfig
 import tomllib
 from pathlib import Path
 
-from simplechart.claude_qc.packet import PACKET_FIELDS
+from devtools.claude_qc.packet import PACKET_FIELDS
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -25,17 +24,22 @@ def _packet_raw() -> bytes:
     return json.dumps(values).encode()
 
 
-def test_pyproject_registers_separate_claude_qc_executable() -> None:
+def test_pyproject_excludes_claude_qc_from_application_packaging() -> None:
     with (PROJECT_ROOT / "pyproject.toml").open("rb") as stream:
         configuration = tomllib.load(stream)
 
     scripts = configuration["project"]["scripts"]
-    assert scripts["simplechart-claude-qc"] == "simplechart.claude_qc.cli:main"
+    package_patterns = configuration["tool"]["setuptools"]["packages"]["find"][
+        "include"
+    ]
+
+    assert "simplechart-claude-qc" not in scripts
+    assert not any(pattern.startswith("devtools") for pattern in package_patterns)
 
 
 def test_module_preview_smoke_isolated_from_application_startup() -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "simplechart.claude_qc.cli", "preview"],
+        [sys.executable, "-m", "devtools.claude_qc.cli", "preview"],
         input=_packet_raw(),
         cwd=PROJECT_ROOT,
         capture_output=True,
@@ -50,7 +54,7 @@ def test_module_preview_smoke_isolated_from_application_startup() -> None:
     assert envelope["category"] == "preview"
 
 
-def test_generated_console_script_runs_preview_from_isolated_install(
+def test_isolated_application_install_omits_claude_qc_tool(
     tmp_path: Path,
 ) -> None:
     environment = tmp_path / "environment"
@@ -79,34 +83,21 @@ def test_generated_console_script_runs_preview_from_isolated_install(
         if sys.platform == "win32"
         else "simplechart-claude-qc"
     )
-    completed = subprocess.run(
-        [str(executable), "preview"],
-        input=_packet_raw(),
-        cwd=tmp_path,
-        env={
-            **os.environ,
-            "PYTHONNOUSERSITE": "1",
-            "PYTHONPATH": sysconfig.get_path(
-                "purelib",
-                vars={"base": str(environment), "platbase": str(environment)},
-            ),
-        },
-        capture_output=True,
-        check=False,
-        timeout=10.0,
+    purelib = Path(
+        sysconfig.get_path(
+            "purelib",
+            vars={"base": str(environment), "platbase": str(environment)},
+        )
     )
 
-    envelope = json.loads(completed.stdout)
-    assert completed.returncode == 0
-    assert completed.stderr == b""
-    assert envelope["status"] == "complete"
-    assert envelope["category"] == "preview"
+    assert not executable.exists()
+    assert not (purelib / "devtools").exists()
 
 
 def test_normal_package_import_does_not_import_claude_qc_cli() -> None:
     script = (
         "import sys; import simplechart; "
-        "assert 'simplechart.claude_qc.cli' not in sys.modules"
+        "assert 'devtools.claude_qc.cli' not in sys.modules"
     )
 
     completed = subprocess.run(
@@ -149,8 +140,8 @@ assert not any(
     for blocked_name in blocked
 )
 sys.meta_path.insert(0, Blocker())
-from simplechart.claude_qc import cli
-sys.argv = ["simplechart-claude-qc", "preview"]
+from devtools.claude_qc import cli
+sys.argv = ["claude-qc", "preview"]
 raise SystemExit(cli.main())
 '''
 

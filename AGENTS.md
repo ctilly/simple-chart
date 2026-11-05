@@ -102,6 +102,8 @@ there is no verified fix after 60 minutes, stop regardless of confidence.
 
 - For explicitly approved agentic or multi-agent work, read and follow
   `docs/agentic-workflow.md` before delegating or editing.
+- Before preparing, sending, monitoring, retrying, or diagnosing a Claude-QC
+  review, read and follow `docs/skills/claude-collaboration.md`.
 - The default approval profile is **gated autonomy**. Once the user approves
   the objective, specification, boundaries, and implementation graph, continue
   across logical units without waiting after each one. Report what was written,

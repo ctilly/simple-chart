@@ -7,9 +7,9 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import BinaryIO, Final, TextIO
 
-from simplechart.claude_qc.events import ReviewResult
-from simplechart.claude_qc.findings import Finding
-from simplechart.claude_qc.packet import (
+from devtools.claude_qc.findings import Finding
+from devtools.claude_qc.output import ReviewResult
+from devtools.claude_qc.packet import (
     MODEL,
     PacketPreview,
     PacketValidationError,
@@ -18,13 +18,15 @@ from simplechart.claude_qc.packet import (
     parse_packet,
     require_approved_digest,
 )
-from simplechart.claude_qc.preflight import (
+from devtools.claude_qc.preflight import (
     PreflightCategory,
     PreflightError,
     preflight_claude_code,
 )
-from simplechart.claude_qc.process import ProcessBackend, SubprocessBackend
-from simplechart.claude_qc.runner import (
+from devtools.claude_qc.process import ProcessBackend, SubprocessBackend
+from devtools.claude_qc.runner import (
+    ProgressReporter,
+    ReviewProgress,
     ReviewRunCategory,
     ReviewRunError,
     run_review,
@@ -35,6 +37,12 @@ PROTOCOL_VERSION = "1"
 _USAGE_MESSAGE: Final = (
     "Use status, preview, or review --approved-digest DIGEST."
 )
+_PROGRESS_MESSAGES: Final = {
+    ReviewProgress.STARTING: "Starting Claude review.",
+    ReviewProgress.FINAL_RESPONSE: (
+        "Claude returned its final response; validating it."
+    ),
+}
 
 
 def _finding_value(finding: Finding) -> dict[str, str]:
@@ -129,10 +137,16 @@ def _review_failure(error: ReviewRunError) -> tuple[int, dict[str, object]]:
     else:
         category = "invalid_result"
         exit_code = 5
+    details: dict[str, object] = {"stage": error.stage.value}
+    if error.validation_message is not None:
+        details["validation"] = error.validation_message
+    if error.category is ReviewRunCategory.UNSAFE and error.reason is not None:
+        details["reason_code"] = error.reason.value
     return exit_code, _envelope(
         status="incomplete",
         category=category,
         message="The Claude review did not complete safely.",
+        details=details,
     )
 
 
@@ -158,6 +172,7 @@ def _dispatch(
     *,
     finder: Callable[[str], str | None],
     platform: str,
+    progress: ProgressReporter | None,
 ) -> tuple[int, dict[str, object]]:
     if operation == "preview":
         packet = parse_packet(stdin.read())
@@ -201,6 +216,7 @@ def _dispatch(
         backend,
         parent_environment,
         platform=platform,
+        progress=progress,
     )
     return 0, _review_success(result)
 
@@ -214,6 +230,7 @@ def run_cli(
     *,
     finder: Callable[[str], str | None] = shutil.which,
     platform: str = sys.platform,
+    progress: ProgressReporter | None = None,
 ) -> int:
     operation = _parse_operation(argv)
     if operation is None:
@@ -238,6 +255,7 @@ def run_cli(
             parent_environment,
             finder=finder,
             platform=platform,
+            progress=progress,
         )
     except PacketValidationError:
         exit_code = 2
@@ -270,12 +288,16 @@ def run_cli(
 
 
 def main() -> int:
+    def report_progress(progress: ReviewProgress) -> None:
+        print(_PROGRESS_MESSAGES[progress], file=sys.stderr, flush=True)
+
     return run_cli(
         sys.argv[1:],
         sys.stdin.buffer,
         sys.stdout,
         SubprocessBackend(),
         os.environ,
+        progress=report_progress,
     )
 
 

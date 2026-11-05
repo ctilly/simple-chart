@@ -30,7 +30,6 @@ dev = [
 
 [project.scripts]
 simplechart = "main:main"
-simplechart-claude-qc = "simplechart.claude_qc.cli:main"
 
 [project.gui-scripts]
 simplechart-gui = "simplechart.gui_launcher:main"

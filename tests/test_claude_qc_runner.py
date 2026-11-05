@@ -3,29 +3,32 @@ from pathlib import Path
 
 import pytest
 
-from simplechart.claude_qc.environment import build_claude_environment
-from simplechart.claude_qc.findings import FINDINGS_JSON_SCHEMA
-from simplechart.claude_qc.packet import EFFORT, MODEL
-from simplechart.claude_qc.preflight import ClaudeCodeInstallation
-from simplechart.claude_qc.process import (
+from devtools.claude_qc.environment import build_claude_environment
+from devtools.claude_qc.findings import FINDINGS_JSON_SCHEMA
+from devtools.claude_qc.packet import EFFORT, MODEL
+from devtools.claude_qc.preflight import ClaudeCodeInstallation
+from devtools.claude_qc.process import (
     ProcessBackend,
     ProcessOutcome,
     ProcessRequest,
     ProcessStartError,
     ProcessTimeoutError,
 )
-from simplechart.claude_qc.runner import (
+from devtools.claude_qc.runner import (
     REVIEW_DEADLINE_SECONDS,
     REVIEW_INSTRUCTION,
     REVIEW_SYSTEM_PROMPT,
+    ReviewProgress,
     ReviewRunCategory,
     ReviewRunError,
+    ReviewRunReason,
+    ReviewStage,
     build_review_argv,
     run_review,
 )
 
 
-def _event_stream(cwd: Path) -> bytes:
+def _result_output(**changes: object) -> bytes:
     finding = {
         "finding_id": "CQ-001",
         "severity": "low",
@@ -36,62 +39,46 @@ def _event_stream(cwd: Path) -> bytes:
         "suggested_disposition": "defer",
         "confidence": "low",
     }
-    events = [
-        {
-            "type": "system",
-            "subtype": "init",
-            "apiKeySource": "oauth",
-            "claude_code_version": "2.1.252",
-            "cwd": str(cwd),
-            "tools": [],
-            "mcp_servers": [],
-            "model": MODEL,
-            "permissionMode": "dontAsk",
-            "slash_commands": [],
-            "skills": [],
-            "plugins": [],
-            "agents": [],
-        },
-        {
-            "type": "assistant",
-            "error": None,
-            "message": {
-                "id": "msg_synthetic",
-                "content": [{"type": "text", "text": "done"}],
-                "model": MODEL,
-                "stop_reason": "end_turn",
-                "usage": {},
-            },
-        },
-        {
-            "type": "result",
-            "subtype": "success",
-            "is_error": False,
-            "duration_ms": 100,
-            "num_turns": 1,
-            "stop_reason": "end_turn",
-            "permission_denials": [],
-            "usage": {},
-            "modelUsage": {MODEL: {}},
-            "structured_output": {"findings": [finding]},
-        },
-    ]
-    return b"\n".join(json.dumps(event).encode() for event in events) + b"\n"
+    value: dict[str, object] = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "duration_ms": 100,
+        "num_turns": 2,
+        "stop_reason": "tool_use",
+        "permission_denials": [],
+        "usage": {},
+        "modelUsage": {MODEL: {"outputTokens": 20}},
+        "structured_output": {"findings": [finding]},
+    }
+    value.update(changes)
+    return json.dumps(value).encode() + b"\n"
 
 
 class _RecordingBackend(ProcessBackend):
-    def __init__(self, *, create_file: bool = False, return_code: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        create_file: bool = False,
+        return_code: int = 0,
+        output_changes: dict[str, object] | None = None,
+    ) -> None:
         self.create_file = create_file
         self.return_code = return_code
+        self.output_changes = dict(output_changes or {})
         self.requests: list[ProcessRequest] = []
 
     def run(self, request: ProcessRequest) -> ProcessOutcome:
         self.requests.append(request)
         if self.create_file:
             (request.cwd / "unexpected-session.json").write_text("unexpected")
+        stdout = _result_output(**self.output_changes)
+        if request.stdout_line_handler is not None:
+            for line in stdout.splitlines(keepends=True):
+                request.stdout_line_handler(line)
         return ProcessOutcome(
             return_code=self.return_code,
-            stdout=_event_stream(request.cwd),
+            stdout=stdout,
             stderr=b"SYNTHETIC_PROVIDER_ERROR",
         )
 
@@ -116,25 +103,9 @@ class _StartFailureBackend(ProcessBackend):
 
 class _ProviderEventBackend(ProcessBackend):
     def run(self, request: ProcessRequest) -> ProcessOutcome:
-        events = [
-            {
-                "type": "system",
-                "subtype": "init",
-                "apiKeySource": "oauth",
-                "claude_code_version": "2.1.252",
-                "cwd": str(request.cwd),
-                "tools": [],
-                "mcp_servers": [],
-                "model": MODEL,
-                "permissionMode": "dontAsk",
-                "slash_commands": [],
-                "skills": [],
-                "plugins": [],
-                "agents": [],
-            },
-            {"type": "error", "message": "SYNTHETIC_PROVIDER_ERROR"},
-        ]
-        stdout = b"\n".join(json.dumps(event).encode() for event in events) + b"\n"
+        stdout = json.dumps(
+            {"type": "error", "message": "SYNTHETIC_PROVIDER_ERROR"}
+        ).encode()
         return ProcessOutcome(return_code=0, stdout=stdout, stderr=b"")
 
 
@@ -151,11 +122,11 @@ def test_review_argv_is_locked_down_and_contains_no_output_ceiling() -> None:
     assert argv[argv.index("--effort") + 1] == EFFORT
     assert argv[argv.index("--tools") + 1] == ""
     assert argv[argv.index("--disallowedTools") + 1] == "mcp__*"
-    assert argv[argv.index("--setting-sources") + 1] == ""
     assert argv[argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
-    assert argv[argv.index("--max-turns") + 1] == "1"
-    assert argv[argv.index("--output-format") + 1] == "stream-json"
+    assert argv[argv.index("--permission-prompts") + 1] == "none"
+    assert argv[argv.index("--output-format") + 1] == "json"
+    assert "--verbose" not in argv
     assert argv[argv.index("--json-schema") + 1] == json.dumps(
         FINDINGS_JSON_SCHEMA,
         separators=(",", ":"),
@@ -173,6 +144,8 @@ def test_review_argv_is_locked_down_and_contains_no_output_ceiling() -> None:
     assert "--fallback-model" not in argv
     assert "--max-budget-usd" not in argv
     assert "--max-tokens" not in argv
+    assert "--max-turns" not in argv
+    assert "--setting-sources" not in argv
 
 
 def test_review_uses_packet_only_on_stdin_and_one_empty_temporary_directory() -> None:
@@ -202,6 +175,24 @@ def test_review_uses_packet_only_on_stdin_and_one_empty_temporary_directory() ->
     assert "synthetic" not in repr(request)
 
 
+def test_review_reports_safe_progress_without_raw_event_content() -> None:
+    progress: list[ReviewProgress] = []
+
+    run_review(
+        _installation(),
+        b"packet",
+        _RecordingBackend(),
+        {},
+        platform="linux",
+        progress=progress.append,
+    )
+
+    assert progress == [
+        ReviewProgress.STARTING,
+        ReviewProgress.FINAL_RESPONSE,
+    ]
+
+
 def test_review_rejects_nonzero_process_without_raw_error() -> None:
     backend = _RecordingBackend(return_code=1)
 
@@ -209,6 +200,7 @@ def test_review_rejects_nonzero_process_without_raw_error() -> None:
         run_review(_installation(), b"packet", backend, {}, platform="linux")
 
     assert caught.value.category is ReviewRunCategory.PROVIDER
+    assert caught.value.stage is ReviewStage.FINAL_RESPONSE
     assert "SYNTHETIC_PROVIDER_ERROR" not in str(caught.value)
     assert len(backend.requests) == 1
 
@@ -280,3 +272,18 @@ def test_review_rejects_any_file_created_in_isolated_cwd() -> None:
         run_review(_installation(), b"packet", backend, {}, platform="linux")
 
     assert caught.value.category is ReviewRunCategory.UNSAFE
+    assert caught.value.reason is ReviewRunReason.UNEXPECTED_LOCAL_ARTIFACT
+
+
+def test_review_rejects_permission_denial_without_raw_output() -> None:
+    backend = _RecordingBackend(
+        output_changes={
+            "permission_denials": [{"tool": "SYNTHETIC_UNAUTHORIZED_TOOL"}]
+        }
+    )
+
+    with pytest.raises(ReviewRunError) as caught:
+        run_review(_installation(), b"packet", backend, {}, platform="linux")
+
+    assert caught.value.category is ReviewRunCategory.UNSAFE
+    assert "SYNTHETIC_UNAUTHORIZED_TOOL" not in str(caught.value)

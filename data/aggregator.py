@@ -26,7 +26,7 @@ Grouping strategy:
     volume = sum of all volumes
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
@@ -80,16 +80,16 @@ class Aggregator:
         For MIN39/MIN65 the provider is asked for base-timeframe bars and
         the result is resampled into the target timeframe.
         """
-        if timeframe in self._provider.native_timeframes():
+        native_timeframe = self.native_timeframe(timeframe)
+        if native_timeframe == timeframe:
             return self._provider.fetch_bars(symbol, timeframe, start, end)
 
-        if timeframe not in _SYNTHESIS_BASES:
-            raise UnsupportedTimeframeError(
-                f"No synthesis strategy defined for {timeframe!r}."
-            )
-
-        base_tf = _select_base(timeframe, self._provider.native_timeframes())
-        base_bars = self._provider.fetch_bars(symbol, base_tf, start, end)
+        base_bars = self._provider.fetch_bars(
+            symbol,
+            native_timeframe,
+            start,
+            end,
+        )
         return _resample(base_bars, timeframe)
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
@@ -106,14 +106,82 @@ class Aggregator:
         timeframe: Timeframe,
         end: datetime,
     ) -> datetime | None:
-        return self._provider.earliest_history_start(timeframe, end)
+        return self._provider.earliest_history_start(
+            self.native_timeframe(timeframe),
+            end,
+        )
 
     def latest_history_end(
         self,
         timeframe: Timeframe,
         end: datetime,
     ) -> datetime:
-        return self._provider.latest_history_end(timeframe, end)
+        return self._provider.latest_history_end(
+            self.native_timeframe(timeframe),
+            end,
+        )
+
+    def native_timeframe(self, timeframe: Timeframe) -> Timeframe:
+        available = self._provider.native_timeframes()
+        if timeframe in available:
+            return timeframe
+        if timeframe not in _SYNTHESIS_BASES:
+            raise UnsupportedTimeframeError(
+                f"No synthesis strategy defined for {timeframe!r}."
+            )
+        return _select_base(timeframe, available)
+
+    def completed_history_end(
+        self,
+        timeframe: Timeframe,
+        endpoint: datetime,
+    ) -> datetime:
+        native_timeframe = self.native_timeframe(timeframe)
+        if native_timeframe == Timeframe.DAILY:
+            local = endpoint.astimezone(_ET)
+            return local.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            ).astimezone(endpoint.tzinfo)
+        if native_timeframe == Timeframe.WEEKLY:
+            local = endpoint.astimezone(_ET)
+            week_start = local - timedelta(days=local.weekday())
+            return week_start.replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            ).astimezone(endpoint.tzinfo)
+
+        period_minutes = native_timeframe.minutes
+        if period_minutes is None:
+            raise ValueError(
+                f"No completed-interval boundary for {native_timeframe!r}."
+            )
+        return _bucket_start(endpoint, period_minutes)
+
+    def refresh_start(
+        self,
+        timeframe: Timeframe,
+        coverage_end: datetime,
+    ) -> datetime:
+        if self.native_timeframe(timeframe) == timeframe:
+            return coverage_end
+        period_minutes = timeframe.minutes
+        if period_minutes is None:
+            raise ValueError(f"Cannot synthesize non-intraday {timeframe!r}.")
+        return _bucket_start(coverage_end, period_minutes)
+
+    def synthesize_cached_bars(
+        self,
+        bars: list[Bar],
+        target: Timeframe,
+    ) -> list[Bar]:
+        if self.native_timeframe(target) == target:
+            raise ValueError(f"Cannot synthesize native timeframe {target!r}.")
+        return _resample(bars, target)
 
 
 # ------------------------------------------------------------------
@@ -175,11 +243,28 @@ def _group_key(ts: datetime, period_minutes: int) -> tuple[date, int]:
     Using ET for the calculation ensures period boundaries align with the
     NYSE session regardless of DST shifts.
     """
+    session_open, period_index = _session_period(ts, period_minutes)
+    return (session_open.date(), period_index)
+
+
+def _bucket_start(ts: datetime, period_minutes: int) -> datetime:
+    session_open, period_index = _session_period(ts, period_minutes)
+    bucket_start = session_open + timedelta(
+        minutes=period_index * period_minutes
+    )
+    day_start = session_open.replace(hour=0, minute=0)
+    return max(bucket_start, day_start).astimezone(ts.tzinfo)
+
+
+def _session_period(
+    ts: datetime,
+    period_minutes: int,
+) -> tuple[datetime, int]:
     et = ts.astimezone(_ET)
     session_open = et.replace(hour=9, minute=30, second=0, microsecond=0)
-    minutes_elapsed = int((et - session_open).total_seconds() / 60)
-    period_index = minutes_elapsed // period_minutes
-    return (et.date(), period_index)
+    seconds_elapsed = (et - session_open).total_seconds()
+    period_index = int(seconds_elapsed // (period_minutes * 60))
+    return session_open, period_index
 
 
 def _reduce_group(bars: list[Bar]) -> Bar:

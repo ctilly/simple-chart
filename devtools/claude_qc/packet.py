@@ -8,7 +8,7 @@ from enum import StrEnum
 from typing import NoReturn
 
 
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-5-5"
 EFFORT = "high"
 MAX_PACKET_BYTES = 128 * 1024
 PACKET_SCHEMA_VERSION = "1"

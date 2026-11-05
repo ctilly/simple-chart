@@ -23,9 +23,14 @@ from typing import Any, cast
 
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFPricesMissingError
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
-from data.provider.base import DataProvider, UnsupportedTimeframeError
+from data.provider.base import (
+    DataProvider,
+    HistoryUnavailableError,
+    UnsupportedTimeframeError,
+)
 
 
 # Mapping from our Timeframe enum to yfinance interval strings.
@@ -73,13 +78,17 @@ class YFinanceProvider(DataProvider):
             )
 
         ticker = yf.Ticker(symbol)
-        df = ticker.history(
-            interval=interval,
-            start=start,
-            end=end,
-            auto_adjust=True,   # adjusts OHLC for splits and dividends
-            prepost=False,      # regular session only, no pre/post market bars
-        )
+        try:
+            df = ticker.history(
+                interval=interval,
+                start=start,
+                end=end,
+                auto_adjust=True,   # adjusts OHLC for splits and dividends
+                prepost=False,      # regular session only, no pre/post market bars
+                raise_errors=True,
+            )
+        except YFPricesMissingError as exc:
+            raise HistoryUnavailableError(symbol, timeframe) from exc
 
         if df.empty:
             return []

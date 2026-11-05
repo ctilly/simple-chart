@@ -39,6 +39,13 @@ class MarketDataEntitlementError(RuntimeError):
     pass
 
 
+class HistoryUnavailableError(RuntimeError):
+    def __init__(self, symbol: str, timeframe: Timeframe) -> None:
+        super().__init__(
+            f"History is currently unavailable for {symbol} ({timeframe.value})."
+        )
+
+
 class DataProvider(ABC):
     """
     Interface for OHLCV data sources.

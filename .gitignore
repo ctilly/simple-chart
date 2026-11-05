@@ -42,6 +42,7 @@ Thumbs.db
 
 # misc
 notes/
+tmp/
 __.git-backup
 docs/prompts/prompt_language.txt
 To_Do.md

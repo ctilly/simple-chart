@@ -55,6 +55,7 @@ class Timeframe(str, Enum):
         don't have a fixed minute count (trading day length varies slightly).
         """
         mapping: dict[Timeframe, int] = {
+            Timeframe.MIN1: 1,
             Timeframe.MIN5: 5,
             Timeframe.MIN15: 15,
             Timeframe.MIN30: 30,

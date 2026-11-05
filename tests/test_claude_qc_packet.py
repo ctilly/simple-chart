@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from simplechart.claude_qc.packet import (
+from devtools.claude_qc.packet import (
     MAX_PACKET_BYTES,
     PacketValidationError,
     ReviewKind,
@@ -203,7 +203,7 @@ def test_preview_binds_exact_bytes_and_discloses_external_transmission() -> None
     assert preview.canonical_packet == canonical.decode("utf-8")
     assert preview.digest == hashlib.sha256(canonical).hexdigest()
     assert preview.byte_size == len(canonical)
-    assert preview.model == "claude-opus-5"
+    assert preview.model == "claude-opus-5-5"
     assert preview.effort == "high"
     assert preview.categories == tuple(sorted(_packet()))
     assert "leave this machine" in preview.outbound_data_warning

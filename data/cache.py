@@ -267,6 +267,29 @@ class Cache:
             for row in cursor
         ]
 
+    def get_raw_bars(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        start_ts_ms: int,
+        end_ts_ms: int,
+    ) -> list[Bar]:
+        cursor = self._conn.execute(
+            """
+            SELECT timestamp, open, high, low, close, volume, vwap
+            FROM bars
+            WHERE cache_namespace = ?
+              AND symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp ASC
+            """,
+            (cache_namespace, symbol, timeframe.value, start_ts_ms, end_ts_ms),
+        )
+        return [_row_to_bar(row) for row in cursor]
+
     def put_bars(
         self,
         cache_namespace: str,
@@ -308,6 +331,78 @@ class Cache:
                     )
                     for bar in bars
                 ],
+            )
+
+    def replace_materialized_bars(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        start_ts_ms: int,
+        end_ts_ms: int,
+        bars: list[Bar],
+        coverage_start_ts_ms: int,
+        coverage_end_ts_ms: int,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                DELETE FROM bars
+                WHERE cache_namespace = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND timestamp >= ?
+                  AND timestamp <= ?
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    start_ts_ms,
+                    end_ts_ms,
+                ),
+            )
+            self._conn.executemany(
+                """
+                INSERT OR REPLACE INTO bars
+                    (cache_namespace, symbol, timeframe, timestamp,
+                     open, high, low, close, volume, vwap)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        cache_namespace,
+                        symbol,
+                        timeframe.value,
+                        _datetime_to_ms(bar.timestamp),
+                        bar.open,
+                        bar.high,
+                        bar.low,
+                        bar.close,
+                        bar.volume,
+                        bar.vwap,
+                    )
+                    for bar in bars
+                ],
+            )
+            self._conn.execute(
+                """
+                INSERT INTO bar_fetch_coverage (
+                    cache_namespace, symbol, timeframe,
+                    start_timestamp, end_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_namespace, symbol, timeframe) DO UPDATE SET
+                    start_timestamp = excluded.start_timestamp,
+                    end_timestamp = excluded.end_timestamp
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    coverage_start_ts_ms,
+                    coverage_end_ts_ms,
+                ),
             )
 
     def refresh_provider_bar(
@@ -878,6 +973,35 @@ class Cache:
                         start_timestamp, excluded.start_timestamp
                     ),
                     end_timestamp = MAX(end_timestamp, excluded.end_timestamp)
+                """,
+                (
+                    cache_namespace,
+                    symbol,
+                    timeframe.value,
+                    start_ts_ms,
+                    end_ts_ms,
+                ),
+            )
+
+    def replace_bar_fetch_coverage(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        start_ts_ms: int,
+        end_ts_ms: int,
+    ) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO bar_fetch_coverage (
+                    cache_namespace, symbol, timeframe,
+                    start_timestamp, end_timestamp
+                )
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_namespace, symbol, timeframe) DO UPDATE SET
+                    start_timestamp = excluded.start_timestamp,
+                    end_timestamp = excluded.end_timestamp
                 """,
                 (
                     cache_namespace,

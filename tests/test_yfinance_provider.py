@@ -1,9 +1,13 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import pytest
+from yfinance.exceptions import YFPricesMissingError
 
+from data.models import Timeframe
+from data.provider.base import HistoryUnavailableError
 from data.provider.yfinance_provider import (
+    YFinanceProvider,
     _level1_from_info,
     _rows_to_bars,
     _snapshot_from_daily_history,
@@ -12,6 +16,66 @@ from data.provider.yfinance_provider import (
     _snapshot_from_price_fields,
     _snapshot_from_pricing_data,
 )
+
+
+def test_fetch_bars_propagates_yahoo_history_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    history_arguments: dict[str, object] = {}
+
+    class FailingTicker:
+        def history(self, **kwargs: object) -> pd.DataFrame:
+            history_arguments.update(kwargs)
+            raise RuntimeError("Yahoo request failed")
+
+    monkeypatch.setattr(
+        "data.provider.yfinance_provider.yf.Ticker",
+        lambda symbol: FailingTicker(),
+    )
+    end = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
+
+    with pytest.raises(RuntimeError, match="Yahoo request failed"):
+        YFinanceProvider().fetch_bars(
+            "AAPL",
+            Timeframe.MIN30,
+            end - timedelta(days=55),
+            end,
+        )
+
+    assert history_arguments["raise_errors"] is True
+
+
+def test_fetch_bars_translates_exact_missing_prices_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingPricesTicker:
+        def history(self, **kwargs: object) -> pd.DataFrame:
+            raise YFPricesMissingError(
+                "AAPL",
+                "(5m 2026-11-04 13:51:00+00:00 -> "
+                "2026-11-04 14:07:32+00:00)",
+            )
+
+    monkeypatch.setattr(
+        "data.provider.yfinance_provider.yf.Ticker",
+        lambda symbol: MissingPricesTicker(),
+    )
+    start = datetime(2026, 11, 4, 13, 51, tzinfo=UTC)
+    end = datetime(2026, 11, 4, 14, 7, 32, tzinfo=UTC)
+
+    with pytest.raises(
+        HistoryUnavailableError,
+        match="AAPL.*5m",
+    ) as caught:
+        YFinanceProvider().fetch_bars(
+            "AAPL",
+            Timeframe.MIN5,
+            start,
+            end,
+        )
+
+    assert isinstance(caught.value.__cause__, YFPricesMissingError)
+    assert "possibly delisted" not in str(caught.value)
 
 
 def _frame(rows: list[dict[str, float | int | None]]) -> pd.DataFrame:

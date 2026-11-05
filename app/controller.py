@@ -33,10 +33,12 @@ Initial workspace extension set:
 """
 
 import copy
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication
@@ -68,14 +70,14 @@ from app.window_chrome import (
 from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
+from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider import (
     ProviderAvailability,
     ProviderConfigurationError,
     create_provider,
     provider_availability,
 )
-from data.provider.base import DataProvider
+from data.provider.base import DataProvider, HistoryUnavailableError
 from data.provider.config import ProviderConnection, YFINANCE_CONNECTION_ID
 from data.provider.credentials import (
     CredentialStore,
@@ -122,8 +124,16 @@ _DEFAULT_LOOKBACK_DAYS = 600
 _DAILY_HISTORY_START = datetime(2016, 1, 1, tzinfo=timezone.utc)
 _SNAPSHOT_REFRESH_MS = 60_000
 _DRAWING_PREVIEW_FRAME_MS = 16
+_CHART_LOAD_DEBOUNCE_MS = 100
+_MAX_ACTIVE_CHART_LOADS = 2
 _ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
 _ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
+_ET = ZoneInfo("America/New_York")
+_REGULAR_SESSION_OPEN = time(9, 30)
+_REGULAR_SESSION_CLOSE = time(16, 0)
+_REGULAR_SESSION_MINUTES = 390
+_DAILY_SETTLEMENT_DELAY = timedelta(minutes=5)
+_REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
 
 
 def _history_start(
@@ -180,8 +190,166 @@ class _SnapshotBatch:
     symbols: list[str]
 
 
+@dataclass(frozen=True)
+class _ChartLoadRequest:
+    generation: int
+    symbol: str
+    timeframe: Timeframe
+    connection: ProviderConnection
+
+    @property
+    def cache_namespace(self) -> str:
+        return self.connection.cache_namespace
+
+
+@dataclass
+class _ChartLoadTask:
+    request: _ChartLoadRequest
+    thread: QThread
+    worker: "_FetchWorker"
+
+
 def _is_yahoo_futures_symbol(symbol: str) -> bool:
     return symbol.strip().upper().endswith("=F")
+
+
+def _uses_regular_equity_session(symbol: str) -> bool:
+    normalized = symbol.strip().upper()
+    return _REGULAR_EQUITY_SYMBOL.fullmatch(normalized) is not None
+
+
+def _latest_expected_regular_session(
+    endpoint: datetime,
+) -> tuple[date, bool]:
+    local = endpoint.astimezone(_ET)
+    local_time = local.time().replace(tzinfo=None)
+    if (
+        local.weekday() < 5
+        and _REGULAR_SESSION_OPEN <= local_time < _REGULAR_SESSION_CLOSE
+    ):
+        return (local.date(), True)
+    if local.weekday() < 5 and local_time >= _REGULAR_SESSION_CLOSE:
+        return (local.date(), False)
+
+    session_date = local.date() - timedelta(days=1)
+    while session_date.weekday() >= 5:
+        session_date -= timedelta(days=1)
+    return (session_date, False)
+
+
+def _expected_last_session_bar_start(
+    timeframe: Timeframe,
+    session_date: date,
+    tz: tzinfo | None,
+) -> datetime:
+    session_open = datetime.combine(
+        session_date,
+        _REGULAR_SESSION_OPEN,
+        tzinfo=_ET,
+    )
+    if timeframe == Timeframe.DAILY:
+        return session_open.replace(hour=0, minute=0).astimezone(tz)
+    period_minutes = timeframe.minutes
+    if period_minutes is None:
+        raise ValueError(f"No regular-session bar boundary for {timeframe!r}.")
+    final_period = (_REGULAR_SESSION_MINUTES - 1) // period_minutes
+    return (
+        session_open + timedelta(minutes=final_period * period_minutes)
+    ).astimezone(tz)
+
+
+def _regular_session_settled_at(
+    timeframe: Timeframe,
+    session_date: date,
+    tz: tzinfo | None,
+) -> datetime:
+    boundary_date = (
+        session_date + timedelta(days=1)
+        if timeframe == Timeframe.DAILY
+        else session_date
+    )
+    boundary_time = (
+        time.min
+        if timeframe == Timeframe.DAILY
+        else _REGULAR_SESSION_CLOSE
+    )
+    return datetime.combine(
+        boundary_date,
+        boundary_time,
+        tzinfo=_ET,
+    ).astimezone(tz)
+
+
+def _completed_coverage_end(
+    symbol: str,
+    timeframe: Timeframe,
+    endpoint: datetime,
+    completed_end: datetime,
+) -> datetime:
+    if timeframe != Timeframe.DAILY or not _uses_regular_equity_session(symbol):
+        return completed_end
+    local = endpoint.astimezone(_ET)
+    settled_at = datetime.combine(
+        local.date(),
+        _REGULAR_SESSION_CLOSE,
+        tzinfo=_ET,
+    ) + _DAILY_SETTLEMENT_DELAY
+    if local.weekday() >= 5 or local < settled_at:
+        return completed_end
+    return _regular_session_settled_at(
+        timeframe,
+        local.date(),
+        endpoint.tzinfo,
+    )
+
+
+def _cached_tail_refresh_start(
+    aggregator: Aggregator,
+    symbol: str,
+    timeframe: Timeframe,
+    history_start: datetime,
+    coverage_end: datetime,
+    newest_cached: datetime | None,
+    endpoint: datetime,
+) -> datetime | None:
+    coverage_overlap = aggregator.refresh_start(timeframe, coverage_end)
+    if (
+        timeframe == Timeframe.WEEKLY
+        or not _uses_regular_equity_session(symbol)
+    ):
+        return coverage_overlap
+
+    session_date, session_active = _latest_expected_regular_session(endpoint)
+    if session_active:
+        return coverage_overlap
+
+    expected_last_bar = _expected_last_session_bar_start(
+        timeframe,
+        session_date,
+        endpoint.tzinfo,
+    )
+    settled_at = _regular_session_settled_at(
+        timeframe,
+        session_date,
+        endpoint.tzinfo,
+    )
+    coverage_is_settled = (
+        coverage_end >= settled_at
+        if timeframe == Timeframe.DAILY
+        else coverage_end > settled_at
+    )
+    if (
+        newest_cached is not None
+        and newest_cached >= expected_last_bar
+        and coverage_is_settled
+    ):
+        return None
+    if newest_cached is None:
+        if timeframe == Timeframe.DAILY:
+            return max(history_start, min(coverage_overlap, expected_last_bar))
+        return coverage_overlap
+    newest_overlap = aggregator.refresh_start(timeframe, newest_cached)
+    return max(history_start, min(coverage_overlap, newest_overlap))
 
 
 def _route_for_symbol(
@@ -273,23 +441,19 @@ class _FetchWorker(QObject):
     and connects its signals before starting.
     """
 
-    finished: pyqtSignal = pyqtSignal(object)   # emits OHLCVSeries
-    error:    pyqtSignal = pyqtSignal(str)
+    finished: pyqtSignal = pyqtSignal(object, object)
+    error: pyqtSignal = pyqtSignal(object, str)
 
     def __init__(
         self,
-        aggregator: Aggregator,
-        cache:      Cache,
-        cache_namespace: str,
-        symbol:     str,
-        timeframe:  Timeframe,
+        db_path: str,
+        credential_store: CredentialStore,
+        request: _ChartLoadRequest,
     ) -> None:
         super().__init__()
-        self._aggregator    = aggregator
-        self._cache         = cache
-        self._cache_namespace = cache_namespace
-        self._symbol        = symbol
-        self._timeframe     = timeframe
+        self._db_path = db_path
+        self._credential_store = credential_store
+        self._request = request
 
     def run(self) -> None:
         """
@@ -299,19 +463,25 @@ class _FetchWorker(QObject):
         reference data without requiring the user to visit the daily chart.
         """
         try:
-            now = datetime.now(tz=timezone.utc)
-            series = _fetch_series_with_references(
-                self._aggregator,
-                self._cache,
-                self._cache_namespace,
-                self._symbol,
-                self._timeframe,
-                now,
+            provider = create_provider(
+                self._request.connection,
+                self._credential_store,
             )
-            self.finished.emit(series)
+            aggregator = Aggregator(provider)
+            now = datetime.now(tz=timezone.utc)
+            with Cache(self._db_path) as cache:
+                series = _fetch_series_with_references(
+                    aggregator,
+                    cache,
+                    self._request.cache_namespace,
+                    self._request.symbol,
+                    self._request.timeframe,
+                    now,
+                )
+            self.finished.emit(self._request, series)
 
         except Exception as exc:
-            self.error.emit(str(exc))
+            self.error.emit(self._request, str(exc))
 
 
 class _SnapshotWorker(QObject):
@@ -493,6 +663,16 @@ def _fetch_series(
 ) -> OHLCVSeries:
     history_end = _history_end(timeframe, aggregator, now)
     history_start = _history_start(timeframe, aggregator, history_end)
+    if aggregator.native_timeframe(timeframe) != timeframe:
+        return _fetch_synthesized_series(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            history_end,
+        )
     _fetch_and_cache_bars(
         aggregator,
         cache,
@@ -516,6 +696,219 @@ def _fetch_series(
     )
 
 
+def _fetch_synthesized_series(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    history_start: datetime,
+    history_end: datetime,
+) -> OHLCVSeries:
+    requested_start_ms = int(history_start.timestamp() * 1000)
+    requested_end_ms = int(history_end.timestamp() * 1000)
+    existing = cache.get_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        requested_start_ms,
+        requested_end_ms,
+    )
+    target_coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+    )
+    base_timeframe = aggregator.native_timeframe(timeframe)
+    base_coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        base_timeframe,
+    )
+    base_history_start = history_start
+    target_covers_head = False
+    target_refresh_start: datetime | None = None
+    target_coverage_is_legacy = False
+    if existing and target_coverage is not None:
+        target_covers_head = target_coverage[0] <= requested_start_ms
+        target_coverage_is_legacy = _is_legacy_target_coverage(
+            aggregator,
+            timeframe,
+            target_coverage,
+        )
+        target_coverage_end = datetime.fromtimestamp(
+            target_coverage[1] / 1000,
+            tz=timezone.utc,
+        )
+        target_refresh_start = _cached_tail_refresh_start(
+            aggregator,
+            symbol,
+            timeframe,
+            history_start,
+            target_coverage_end,
+            existing[-1].timestamp,
+            history_end,
+        )
+        if (
+            target_covers_head
+            and target_refresh_start is None
+            and (base_coverage is None or not target_coverage_is_legacy)
+        ):
+            return OHLCVSeries(symbol, timeframe, existing)
+        if target_covers_head and target_refresh_start is not None:
+            base_history_start = max(history_start, target_refresh_start)
+    preserved_target_covers_head = target_covers_head or bool(
+        existing and existing[0].timestamp <= history_start
+    )
+    if preserved_target_covers_head and base_coverage is not None:
+        base_coverage_start = datetime.fromtimestamp(
+            base_coverage[0] / 1000,
+            tz=timezone.utc,
+        )
+        base_coverage_end = datetime.fromtimestamp(
+            base_coverage[1] / 1000,
+            tz=timezone.utc,
+        )
+        if target_refresh_start is None:
+            base_history_start = max(history_start, base_coverage_start)
+        elif base_history_start > base_coverage_end:
+            base_history_start = max(history_start, base_coverage_end)
+    try:
+        _fetch_and_cache_bars(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            base_timeframe,
+            base_history_start,
+            history_end,
+        )
+    except HistoryUnavailableError:
+        if base_coverage is None:
+            if not existing:
+                raise
+            return OHLCVSeries(symbol, timeframe, existing)
+
+    base_coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        base_timeframe,
+    )
+    if base_coverage is None:
+        return OHLCVSeries(symbol, timeframe, existing)
+    source_start_ms = max(requested_start_ms, base_coverage[0])
+    source_end_ms = min(requested_end_ms, base_coverage[1])
+    if source_start_ms > source_end_ms:
+        return OHLCVSeries(symbol, timeframe, existing)
+
+    completed_target_end = aggregator.completed_history_end(
+        timeframe,
+        datetime.fromtimestamp(source_end_ms / 1000, tz=timezone.utc),
+    )
+    target_end_ms = int(completed_target_end.timestamp() * 1000)
+    rebuild_start_ms = _materialization_start_ms(
+        aggregator,
+        timeframe,
+        target_coverage,
+        source_start_ms,
+        target_end_ms,
+    )
+    aligned_start_ms = max(
+        source_start_ms,
+        int(
+            _exchange_day_start(
+                datetime.fromtimestamp(rebuild_start_ms / 1000, tz=timezone.utc)
+            ).timestamp()
+            * 1000
+        ),
+    )
+    raw_bars = cache.get_raw_bars(
+        cache_namespace,
+        symbol,
+        base_timeframe,
+        aligned_start_ms,
+        source_end_ms,
+    )
+    if _uses_regular_equity_session(symbol):
+        raw_bars = [bar for bar in raw_bars if _is_regular_session_bar(bar)]
+    materialized = aggregator.synthesize_cached_bars(raw_bars, timeframe)
+    if not materialized:
+        return OHLCVSeries(symbol, timeframe, existing)
+
+    coverage_start_ms = min(
+        aligned_start_ms,
+        (
+            target_coverage[0]
+            if target_coverage is not None and existing
+            else aligned_start_ms
+        ),
+    )
+    cache.replace_materialized_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        aligned_start_ms,
+        source_end_ms,
+        materialized,
+        coverage_start_ms,
+        target_end_ms,
+    )
+    bars = cache.get_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        requested_start_ms,
+        requested_end_ms,
+    )
+    return OHLCVSeries(symbol, timeframe, bars)
+
+
+def _materialization_start_ms(
+    aggregator: Aggregator,
+    timeframe: Timeframe,
+    target_coverage: tuple[int, int] | None,
+    source_start_ms: int,
+    target_end_ms: int,
+) -> int:
+    if target_coverage is None:
+        return source_start_ms
+    target_start_ms, previous_end_ms = target_coverage
+    if _is_legacy_target_coverage(aggregator, timeframe, target_coverage):
+        return source_start_ms
+    if source_start_ms < target_start_ms:
+        return source_start_ms
+    return min(previous_end_ms, target_end_ms)
+
+
+def _is_legacy_target_coverage(
+    aggregator: Aggregator,
+    timeframe: Timeframe,
+    target_coverage: tuple[int, int],
+) -> bool:
+    previous_end_ms = target_coverage[1]
+    previous_end = datetime.fromtimestamp(previous_end_ms / 1000, tz=timezone.utc)
+    aligned_previous_end_ms = int(
+        aggregator.completed_history_end(timeframe, previous_end).timestamp() * 1000
+    )
+    return aligned_previous_end_ms != previous_end_ms
+
+
+def _exchange_day_start(timestamp: datetime) -> datetime:
+    local = timestamp.astimezone(_ET)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timestamp.tzinfo
+    )
+
+
+def _is_regular_session_bar(bar: Bar) -> bool:
+    local = bar.timestamp.astimezone(_ET)
+    local_time = local.time().replace(tzinfo=None)
+    return (
+        local.weekday() < 5
+        and _REGULAR_SESSION_OPEN <= local_time < _REGULAR_SESSION_CLOSE
+    )
+
+
 def _fetch_and_cache_bars(
     aggregator: Aggregator,
     cache: Cache,
@@ -525,8 +918,18 @@ def _fetch_and_cache_bars(
     history_start: datetime,
     now: datetime,
 ) -> None:
+    if aggregator.native_timeframe(timeframe) != timeframe:
+        raise ValueError(
+            f"Synthesized timeframe {timeframe.value} must use the cache path."
+        )
     requested_start_ms = int(history_start.timestamp() * 1000)
     requested_end_ms = int(now.timestamp() * 1000)
+    completed_end = _completed_coverage_end(
+        symbol,
+        timeframe,
+        now,
+        aggregator.completed_history_end(timeframe, now),
+    )
     coverage = cache.get_bar_fetch_coverage(
         cache_namespace,
         symbol,
@@ -552,11 +955,57 @@ def _fetch_and_cache_bars(
                 timeframe,
                 history_start,
                 now,
+                coverage_end=completed_end,
             )
             return
-        coverage = (oldest_ts, newest_ts)
+        _fetch_bar_range(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            now,
+            coverage_end=completed_end,
+            replace_coverage=True,
+        )
+        return
 
     coverage_start_ms, coverage_end_ms = coverage
+    coverage_end = datetime.fromtimestamp(
+        coverage_end_ms / 1000,
+        tz=timezone.utc,
+    )
+    normalized_coverage_end = aggregator.completed_history_end(
+        timeframe,
+        coverage_end,
+    )
+    normalized_coverage_end_ms = int(
+        normalized_coverage_end.timestamp() * 1000
+    )
+    if normalized_coverage_end_ms != coverage_end_ms:
+        cache.replace_bar_fetch_coverage(
+            cache_namespace,
+            symbol,
+            timeframe,
+            coverage_start_ms,
+            normalized_coverage_end_ms,
+        )
+        coverage_end_ms = normalized_coverage_end_ms
+
+    if coverage_end_ms < requested_start_ms:
+        _fetch_bar_range(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            now,
+            coverage_end=completed_end,
+            replace_coverage=True,
+        )
+        return
     if requested_start_ms < coverage_start_ms:
         _fetch_bar_range(
             aggregator,
@@ -566,17 +1015,53 @@ def _fetch_and_cache_bars(
             timeframe,
             history_start,
             datetime.fromtimestamp(coverage_start_ms / 1000, tz=timezone.utc),
+            coverage_end=datetime.fromtimestamp(
+                coverage_start_ms / 1000,
+                tz=timezone.utc,
+            ),
         )
-    if requested_end_ms > coverage_end_ms:
-        _fetch_bar_range(
-            aggregator,
-            cache,
+    if (
+        requested_end_ms > coverage_end_ms
+        or (
+            timeframe == Timeframe.DAILY
+            and _uses_regular_equity_session(symbol)
+        )
+    ):
+        newest_ts = cache.newest_cached_timestamp(
             cache_namespace,
             symbol,
             timeframe,
+        )
+        newest_cached = (
+            None
+            if newest_ts is None
+            else datetime.fromtimestamp(newest_ts / 1000, tz=timezone.utc)
+        )
+        refresh_start = _cached_tail_refresh_start(
+            aggregator,
+            symbol,
+            timeframe,
+            history_start,
             datetime.fromtimestamp(coverage_end_ms / 1000, tz=timezone.utc),
+            newest_cached,
             now,
         )
+        if refresh_start is None:
+            return
+        try:
+            _fetch_bar_range(
+                aggregator,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                refresh_start,
+                now,
+                coverage_end=completed_end,
+                require_bars=True,
+            )
+        except HistoryUnavailableError:
+            return
 
 
 def _fetch_bar_range(
@@ -587,16 +1072,27 @@ def _fetch_bar_range(
     timeframe: Timeframe,
     start: datetime,
     end: datetime,
+    *,
+    coverage_end: datetime | None = None,
+    replace_coverage: bool = False,
+    require_bars: bool = False,
 ) -> None:
     new_bars = aggregator.fetch_bars(symbol, timeframe, start, end)
     if new_bars:
         cache.put_bars(cache_namespace, symbol, timeframe, new_bars)
-    cache.extend_bar_fetch_coverage(
+    elif require_bars:
+        return
+    coverage_writer = (
+        cache.replace_bar_fetch_coverage
+        if replace_coverage
+        else cache.extend_bar_fetch_coverage
+    )
+    coverage_writer(
         cache_namespace,
         symbol,
         timeframe,
         int(start.timestamp() * 1000),
-        int(end.timestamp() * 1000),
+        int((end if coverage_end is None else coverage_end).timestamp() * 1000),
     )
 
 
@@ -631,6 +1127,7 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         # Data layer
         # ------------------------------------------------------------------
+        self._db_path = db_path
         self._cache = Cache(db_path)
         connection_id = (
             provider_connection_id
@@ -766,9 +1263,16 @@ class MainWindow(QMainWindow):
         self._symbol_bar.timeframe_changed.connect(self._on_timeframe_changed)
         self._symbol_bar.settings_requested.connect(self._on_application_settings)
 
-        # Active fetch thread — kept as an attribute to prevent GC.
-        self._fetch_thread: QThread | None = None
-        self._fetch_worker: _FetchWorker | None = None
+        # Chart-load tasks are retained until their QThreads finish.
+        self._chart_load_generation = 0
+        self._current_chart_request: _ChartLoadRequest | None = None
+        self._terminal_chart_generation: int | None = None
+        self._pending_chart_load: _ChartLoadRequest | None = None
+        self._chart_load_tasks: dict[int, _ChartLoadTask] = {}
+        self._chart_load_timer = QTimer(self)
+        self._chart_load_timer.setSingleShot(True)
+        self._chart_load_timer.setInterval(_CHART_LOAD_DEBOUNCE_MS)
+        self._chart_load_timer.timeout.connect(self._dispatch_pending_chart_load)
 
         self._snapshot_thread: QThread | None = None
         self._snapshot_worker: _SnapshotWorker | None = None
@@ -833,35 +1337,122 @@ class MainWindow(QMainWindow):
         if self._state.symbol is None:
             return
 
-        # Cancel any in-progress fetch.
-        if self._fetch_thread and self._fetch_thread.isRunning():
-            self._fetch_thread.quit()
-            self._fetch_thread.wait()
-
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
         route = self._route_for_symbol(self._state.symbol)
         self._symbol_bar.set_data_source(route.display_name, "pending")
 
+        request = self._make_chart_load_request(
+            self._state.symbol,
+            self._state.timeframe,
+            route.connection,
+        )
+        self._current_chart_request = request
+        self._terminal_chart_generation = None
+        self._pending_chart_load = request
+        self._chart_load_timer.start()
+
+    def _make_chart_load_request(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        connection: ProviderConnection,
+    ) -> _ChartLoadRequest:
+        self._chart_load_generation += 1
+        return _ChartLoadRequest(
+            generation=self._chart_load_generation,
+            symbol=symbol,
+            timeframe=timeframe,
+            connection=connection,
+        )
+
+    def _dispatch_pending_chart_load(self) -> None:
+        request = self._pending_chart_load
+        if request is None or len(self._chart_load_tasks) >= _MAX_ACTIVE_CHART_LOADS:
+            return
+        self._pending_chart_load = None
+        self._start_chart_load(request)
+
+    def _start_chart_load(self, request: _ChartLoadRequest) -> None:
+        route = self._route_for_symbol(request.symbol)
+        if route.connection != request.connection:
+            if (
+                self._current_chart_request == request
+                and self._terminal_chart_generation != request.generation
+                and self._state.symbol == request.symbol
+                and self._state.timeframe == request.timeframe
+            ):
+                self._terminal_chart_generation = request.generation
+                self._on_fetch_error(
+                    "The data source changed before the chart load started."
+                )
+            return
+
         worker = _FetchWorker(
-            aggregator=route.aggregator,
-            cache=self._cache,
-            cache_namespace=route.cache_namespace,
-            symbol=self._state.symbol,
-            timeframe=self._state.timeframe,
+            db_path=self._db_path,
+            credential_store=self._credential_store,
+            request=request,
         )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_fetch_done)
-        worker.error.connect(self._on_fetch_error)
+        worker.finished.connect(self._on_chart_fetch_done)
+        worker.error.connect(self._on_chart_fetch_error)
         worker.finished.connect(thread.quit)
         worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda generation=request.generation: self._on_chart_thread_finished(
+                generation
+            )
+        )
 
-        self._fetch_thread = thread
-        self._fetch_worker = worker
+        self._chart_load_tasks[request.generation] = _ChartLoadTask(
+            request,
+            thread,
+            worker,
+        )
         thread.start()
+
+    def _on_chart_thread_finished(self, generation: int) -> None:
+        task = self._chart_load_tasks.pop(generation, None)
+        if task is None:
+            return
+        task.thread.deleteLater()
+        if not self._chart_load_timer.isActive():
+            self._dispatch_pending_chart_load()
+
+    def _is_current_chart_request(self, request: _ChartLoadRequest) -> bool:
+        if (
+            self._current_chart_request != request
+            or self._terminal_chart_generation == request.generation
+            or self._state.symbol != request.symbol
+            or self._state.timeframe != request.timeframe
+        ):
+            return False
+        return self._route_for_symbol(request.symbol).connection == request.connection
+
+    def _on_chart_fetch_done(
+        self,
+        request: _ChartLoadRequest,
+        series: OHLCVSeries,
+    ) -> None:
+        if not self._is_current_chart_request(request):
+            return
+        self._terminal_chart_generation = request.generation
+        self._on_fetch_done(series)
+
+    def _on_chart_fetch_error(
+        self,
+        request: _ChartLoadRequest,
+        message: str,
+    ) -> None:
+        if not self._is_current_chart_request(request):
+            return
+        self._terminal_chart_generation = request.generation
+        self._on_fetch_error(message)
 
     def _on_fetch_done(self, series: OHLCVSeries) -> None:
         """Called on the main thread when the background fetch completes."""
@@ -1660,7 +2251,6 @@ class MainWindow(QMainWindow):
         )
 
     def _commit_provider_route(self, route: _DataRoute) -> None:
-        self._stop_data_workers()
         self._selected_route = route
         self._cache.set_active_provider_connection_id(route.connection.connection_id)
         status_bar = self.statusBar()
@@ -1678,8 +2268,14 @@ class MainWindow(QMainWindow):
         self._refresh_watchlist_snapshots()
 
     def _stop_data_workers(self) -> None:
+        if self._chart_load_timer.isActive():
+            self._chart_load_timer.stop()
+        self._pending_chart_load = None
+        for task in tuple(self._chart_load_tasks.values()):
+            if task.thread.isRunning():
+                task.thread.quit()
+                task.thread.wait()
         for thread in (
-            self._fetch_thread,
             self._snapshot_thread,
             self._level1_thread,
         ):

@@ -5,21 +5,27 @@ from pathlib import Path
 
 import pytest
 
-from simplechart.claude_qc.packet import (
+from devtools.claude_qc.packet import (
     MODEL,
     PACKET_FIELDS,
     canonical_packet_bytes,
     packet_digest,
     parse_packet,
 )
-from simplechart.claude_qc.preflight import (
+from devtools.claude_qc.preflight import (
     REQUIRED_CLAUDE_FLAGS,
     ClaudeCodeInstallation,
     PreflightCategory,
     PreflightError,
 )
-from simplechart.claude_qc.process import ProcessBackend, ProcessOutcome, ProcessRequest
-from simplechart.claude_qc.runner import ReviewRunCategory, ReviewRunError
+from devtools.claude_qc.process import ProcessBackend, ProcessOutcome, ProcessRequest
+from devtools.claude_qc.runner import (
+    ReviewProgress,
+    ReviewRunCategory,
+    ReviewRunError,
+    ReviewRunReason,
+    ReviewStage,
+)
 
 
 def _packet_raw() -> bytes:
@@ -64,48 +70,21 @@ def _finding() -> dict[str, str]:
     }
 
 
-def _events(request: ProcessRequest) -> bytes:
-    values = [
-        {
-            "type": "system",
-            "subtype": "init",
-            "apiKeySource": "oauth",
-            "claude_code_version": "2.1.252",
-            "cwd": str(request.cwd),
-            "tools": [],
-            "mcp_servers": [],
-            "model": MODEL,
-            "permissionMode": "dontAsk",
-            "slash_commands": [],
-            "skills": [],
-            "plugins": [],
-            "agents": [],
-        },
-        {
-            "type": "assistant",
-            "error": None,
-            "message": {
-                "id": "msg_synthetic",
-                "content": [{"type": "text", "text": "done"}],
-                "model": MODEL,
-                "stop_reason": "end_turn",
-                "usage": {},
-            },
-        },
+def _result_output() -> bytes:
+    return json.dumps(
         {
             "type": "result",
             "subtype": "success",
             "is_error": False,
             "duration_ms": 100,
-            "num_turns": 1,
-            "stop_reason": "end_turn",
+            "num_turns": 2,
+            "stop_reason": "tool_use",
             "permission_denials": [],
             "usage": {},
-            "modelUsage": {MODEL: {}},
+            "modelUsage": {MODEL: {"outputTokens": 20}},
             "structured_output": {"findings": [_finding()]},
-        },
-    ]
-    return b"\n".join(json.dumps(value).encode() for value in values) + b"\n"
+        }
+    ).encode()
 
 
 class _WorkflowBackend(ProcessBackend):
@@ -125,7 +104,10 @@ class _WorkflowBackend(ProcessBackend):
             )
         if index == 3:
             return ProcessOutcome(0, _auth_status(), b"")
-        return ProcessOutcome(0, _events(request), b"")
+        output = _result_output()
+        if request.stdout_line_handler is not None:
+            request.stdout_line_handler(output)
+        return ProcessOutcome(0, output, b"")
 
 
 class _ForbiddenBackend(ProcessBackend):
@@ -158,7 +140,7 @@ class _DeepAuthBackend(ProcessBackend):
         return ProcessOutcome(0, _DEEPLY_NESTED_JSON, b"")
 
 
-class _DeepEventBackend(_WorkflowBackend):
+class _DeepOutputBackend(_WorkflowBackend):
     def run(self, request: ProcessRequest) -> ProcessOutcome:
         if len(self.requests) == 3:
             self.requests.append(request)
@@ -167,12 +149,12 @@ class _DeepEventBackend(_WorkflowBackend):
 
 
 class _NoRead(io.BytesIO):
-    def read(self, size: int = -1) -> bytes:
+    def read(self, _size: int | None = -1) -> bytes:
         raise AssertionError("stdin was not expected")
 
 
 class _PoisonEnvironment(Mapping[str, str]):
-    def __getitem__(self, key: str) -> str:
+    def __getitem__(self, _key: str) -> str:
         raise AssertionError("environment was accessed")
 
     def __iter__(self) -> Iterator[str]:
@@ -194,8 +176,9 @@ def _invoke(
     *,
     environment: Mapping[str, str] | None = None,
     finder: Callable[[str], str | None] = _finder,
+    progress: Callable[[ReviewProgress], None] | None = None,
 ) -> tuple[int, dict[str, object], str]:
-    from simplechart.claude_qc.cli import run_cli
+    from devtools.claude_qc.cli import run_cli
 
     stdout = io.StringIO()
     exit_code = run_cli(
@@ -210,6 +193,7 @@ def _invoke(
         ),
         finder=finder,
         platform="linux",
+        progress=progress,
     )
     text = stdout.getvalue()
     return exit_code, json.loads(text), text
@@ -278,6 +262,27 @@ def test_review_handler_traverses_preflight_process_and_event_validation() -> No
     assert backend.requests[-1].stdin == canonical
 
 
+def test_review_progress_is_separate_from_final_json_envelope() -> None:
+    backend = _WorkflowBackend()
+    canonical = canonical_packet_bytes(parse_packet(_packet_raw()))
+    progress: list[ReviewProgress] = []
+
+    exit_code, envelope, text = _invoke(
+        ["review", "--approved-digest", packet_digest(canonical)],
+        io.BytesIO(_packet_raw()),
+        backend,
+        progress=progress.append,
+    )
+
+    assert exit_code == 0
+    assert envelope["category"] == "review"
+    assert text.count("\n") == 1
+    assert progress == [
+        ReviewProgress.STARTING,
+        ReviewProgress.FINAL_RESPONSE,
+    ]
+
+
 def test_unknown_command_returns_one_usage_envelope_and_exit_two() -> None:
     exit_code, envelope, text = _invoke(
         ["unknown"],
@@ -327,13 +332,13 @@ def test_deep_auth_json_returns_versioned_preflight_failure() -> None:
     assert text.count("\n") == 1
 
 
-def test_deep_event_json_returns_versioned_invalid_result() -> None:
+def test_deep_output_json_returns_versioned_invalid_result() -> None:
     canonical = canonical_packet_bytes(parse_packet(_packet_raw()))
 
     exit_code, envelope, text = _invoke(
         ["review", "--approved-digest", packet_digest(canonical)],
         io.BytesIO(_packet_raw()),
-        _DeepEventBackend(),
+        _DeepOutputBackend(),
     )
 
     assert exit_code == 5
@@ -354,11 +359,11 @@ def test_preflight_failures_map_to_exact_sanitized_exit_three(
     preflight_category: PreflightCategory,
     envelope_category: str,
 ) -> None:
-    from simplechart.claude_qc import cli
+    from devtools.claude_qc import cli
 
     secret = "SYNTHETIC_PREFLIGHT_SECRET_6B2F"
 
-    def fail(*args: object, **kwargs: object) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
         raise PreflightError(preflight_category, secret)
 
     monkeypatch.setattr(cli, "preflight_claude_code", fail)
@@ -390,15 +395,15 @@ def test_review_failures_map_to_exact_sanitized_protocol(
     exit_code: int,
     envelope_category: str,
 ) -> None:
-    from simplechart.claude_qc import cli
+    from devtools.claude_qc import cli
 
     secret = "SYNTHETIC_PROVIDER_SECRET_91C4"
     canonical = canonical_packet_bytes(parse_packet(_packet_raw()))
 
-    def installed(*args: object, **kwargs: object) -> ClaudeCodeInstallation:
+    def installed(*_args: object, **_kwargs: object) -> ClaudeCodeInstallation:
         return ClaudeCodeInstallation(Path("/opt/claude"), "2.1.252", "pro")
 
-    def fail(*args: object, **kwargs: object) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
         raise ReviewRunError(review_category, secret)
 
     monkeypatch.setattr(cli, "preflight_claude_code", installed)
@@ -413,4 +418,78 @@ def test_review_failures_map_to_exact_sanitized_protocol(
     assert actual_exit == exit_code
     assert envelope["status"] == "incomplete"
     assert envelope["category"] == envelope_category
+    assert secret not in text
+
+
+def test_unsafe_review_failure_exposes_only_static_reason_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from devtools.claude_qc import cli
+
+    secret = "SYNTHETIC_PROVIDER_SECRET_3A7C"
+    canonical = canonical_packet_bytes(parse_packet(_packet_raw()))
+
+    def installed(*_args: object, **_kwargs: object) -> ClaudeCodeInstallation:
+        return ClaudeCodeInstallation(Path("/opt/claude"), "2.1.252", "pro")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise ReviewRunError(
+            ReviewRunCategory.UNSAFE,
+            secret,
+            reason=ReviewRunReason.UNEXPECTED_LOCAL_ARTIFACT,
+        )
+
+    monkeypatch.setattr(cli, "preflight_claude_code", installed)
+    monkeypatch.setattr(cli, "run_review", fail)
+
+    actual_exit, envelope, text = _invoke(
+        ["review", "--approved-digest", packet_digest(canonical)],
+        io.BytesIO(_packet_raw()),
+        _ForbiddenBackend(),
+    )
+
+    assert actual_exit == 5
+    assert envelope["category"] == "unsafe"
+    assert envelope["details"] == {
+        "reason_code": "unexpected_local_artifact",
+        "stage": "starting",
+    }
+    assert secret not in text
+
+
+def test_invalid_review_failure_reports_only_static_validation_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from devtools.claude_qc import cli
+
+    secret = "SYNTHETIC_PROVIDER_SECRET_07FD"
+    validation = "Claude Code reported an unexpected review turn count."
+    canonical = canonical_packet_bytes(parse_packet(_packet_raw()))
+
+    def installed(*_args: object, **_kwargs: object) -> ClaudeCodeInstallation:
+        return ClaudeCodeInstallation(Path("/opt/claude"), "2.1.252", "pro")
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise ReviewRunError(
+            ReviewRunCategory.INVALID,
+            secret,
+            stage=ReviewStage.FINAL_RESPONSE,
+            validation_message=validation,
+        )
+
+    monkeypatch.setattr(cli, "preflight_claude_code", installed)
+    monkeypatch.setattr(cli, "run_review", fail)
+
+    actual_exit, envelope, text = _invoke(
+        ["review", "--approved-digest", packet_digest(canonical)],
+        io.BytesIO(_packet_raw()),
+        _ForbiddenBackend(),
+    )
+
+    assert actual_exit == 5
+    assert envelope["category"] == "invalid_result"
+    assert envelope["details"] == {
+        "stage": "final_response",
+        "validation": validation,
+    }
     assert secret not in text
