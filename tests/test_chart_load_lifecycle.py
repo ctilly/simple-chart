@@ -11,6 +11,7 @@ import pytest
 
 import app.controller as controller_module
 from app.controller import MainWindow, _FetchWorker
+from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider.base import DataProvider
@@ -47,7 +48,11 @@ class _FinishedThreadStub:
 
 
 def _finished_task_stub(request: Any) -> SimpleNamespace:
-    return SimpleNamespace(thread=_FinishedThreadStub(), request=request)
+    return SimpleNamespace(
+        thread=_FinishedThreadStub(),
+        request=request,
+        cancellation_event=threading.Event(),
+    )
 
 
 def _bar(timestamp: datetime) -> Bar:
@@ -83,6 +88,7 @@ def test_load_never_waits_for_running_fetch(
     tasks[active_request.generation] = SimpleNamespace(
         thread=RunningThread(),
         request=active_request,
+        cancellation_event=threading.Event(),
     )
     generation_before_load = window._chart_load_generation
 
@@ -94,10 +100,47 @@ def test_load_never_waits_for_running_fetch(
         assert window._current_chart_request.symbol == symbol
         assert window._pending_chart_load == window._current_chart_request
         assert window._chart_load_timer.isActive()
+        assert tasks[active_request.generation].cancellation_event.is_set()
     finally:
         window._chart_load_timer.stop()
         window._pending_chart_load = None
         tasks.clear()
+
+
+def test_stopping_data_workers_marks_every_chart_task_cancelled(
+    qtbot: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    tasks = cast(dict[int, Any], window._chart_load_tasks)
+    requests = [
+        window._make_chart_load_request(
+            symbol,
+            Timeframe.DAILY,
+            window._selected_route.connection,
+        )
+        for symbol in ("XLE", "TSLA")
+    ]
+    events = [threading.Event(), threading.Event()]
+    for index, (request, cancellation_event) in enumerate(zip(requests, events)):
+        tasks[index] = SimpleNamespace(
+            request=request,
+            thread=_FinishedThreadStub(),
+            cancellation_event=cancellation_event,
+        )
+    window._pending_chart_load = requests[0]
+    started: list[Any] = []
+    monkeypatch.setattr(window, "_start_chart_load", started.append)
+
+    window._stop_data_workers()
+    window._on_chart_thread_finished(0)
+
+    assert all(event.is_set() for event in events)
+    assert window._pending_chart_load is None
+    assert not window._chart_load_timer.isActive()
+    assert started == []
+    tasks.clear()
 
 
 def test_rapid_navigation_starts_only_latest_debounced_request(
@@ -346,6 +389,10 @@ def test_chart_worker_owns_resources_and_is_retained_until_thread_finishes(
     worker_reference = weakref.ref(
         window._chart_load_tasks[request.generation].worker
     )
+    terminal: list[bool] = []
+    window._chart_load_tasks[request.generation].worker.completed.connect(
+        lambda: terminal.append(True)
+    )
     qtbot.waitUntil(started.is_set, timeout=500)
     gc.collect()
 
@@ -362,8 +409,396 @@ def test_chart_worker_owns_resources_and_is_retained_until_thread_finishes(
     assert provider_thread_ids and provider_thread_ids[0] != main_thread_id
     assert cache_thread_ids and cache_thread_ids[0] != main_thread_id
     assert cleanup_thread_ids == [main_thread_id]
+    assert terminal == [True]
     gc.collect()
     qtbot.waitUntil(lambda: worker_reference() is None, timeout=1000)
+
+
+def test_cancelled_chart_worker_before_run_emits_only_completion(
+    qtbot: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    request = window._make_chart_load_request(
+        "NVDA",
+        Timeframe.DAILY,
+        window._selected_route.connection,
+    )
+    cancelled = threading.Event()
+    cancelled.set()
+    calls: list[str] = []
+
+    def unexpected_provider(
+        connection: ProviderConnection,
+        credential_store: CredentialStore,
+    ) -> DataProvider:
+        calls.append("create")
+        raise AssertionError("cancelled worker created a provider")
+
+    monkeypatch.setattr(controller_module, "create_provider", unexpected_provider)
+    worker = _FetchWorker(
+        window._db_path,
+        window._credential_store,
+        request,
+        cancelled,
+    )
+    finished: list[object] = []
+    errors: list[str] = []
+    completed: list[bool] = []
+    worker.finished.connect(lambda *args: finished.append(args))
+    worker.error.connect(lambda _request, message: errors.append(message))
+    worker.completed.connect(lambda: completed.append(True))
+
+    worker.run()
+
+    assert calls == []
+    assert finished == []
+    assert errors == []
+    assert completed == [True]
+
+
+@pytest.mark.parametrize("provider_fails", [False, True])
+def test_cancel_during_provider_call_persists_range_then_skips_next_call(
+    qtbot: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_fails: bool,
+) -> None:
+    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    request = window._make_chart_load_request(
+        "NVDA",
+        Timeframe.MIN5,
+        window._selected_route.connection,
+    )
+    cancelled = threading.Event()
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    calls: list[Timeframe] = []
+    start = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
+    returned_bar = Bar(start, 10.0, 11.0, 9.0, 10.5, 100)
+
+    class BlockingProvider(DataProvider):
+        def fetch_bars(
+            self,
+            symbol: str,
+            timeframe: Timeframe,
+            start: datetime,
+            end: datetime,
+        ) -> list[Bar]:
+            calls.append(timeframe)
+            provider_started.set()
+            if not release_provider.wait(timeout=2):
+                raise RuntimeError("test provider was not released")
+            if provider_fails:
+                raise RuntimeError("provider failed after cancellation")
+            return [returned_bar]
+
+        def fetch_snapshots(
+            self,
+            _symbols: list[str],
+        ) -> dict[str, MarketSnapshot]:
+            return {}
+
+        def fetch_level1(self, symbol: str) -> Level1Quote | None:
+            return None
+
+        def native_timeframes(self) -> list[Timeframe]:
+            return [Timeframe.MIN5, Timeframe.DAILY]
+
+    monkeypatch.setattr(
+        controller_module,
+        "create_provider",
+        lambda _connection, _store: BlockingProvider(),
+    )
+    worker = _FetchWorker(
+        window._db_path,
+        window._credential_store,
+        request,
+        cancelled,
+    )
+    finished: list[object] = []
+    errors: list[str] = []
+    completed: list[bool] = []
+    worker.finished.connect(lambda *args: finished.append(args))
+    worker.error.connect(lambda _request, message: errors.append(message))
+    worker.completed.connect(lambda: completed.append(True))
+    thread = threading.Thread(target=worker.run)
+    thread.start()
+    assert provider_started.wait(timeout=2)
+    cancelled.set()
+    release_provider.set()
+    thread.join(timeout=3)
+    qtbot.waitUntil(lambda: len(completed) == 1)
+
+    assert not thread.is_alive()
+    assert calls == [Timeframe.DAILY]
+    assert finished == []
+    assert errors == []
+    assert completed == [True]
+    with Cache(window._db_path) as cache:
+        assert cache.get_bars(
+            request.cache_namespace,
+            request.symbol,
+            Timeframe.DAILY,
+            int(start.timestamp() * 1000),
+            int(start.timestamp() * 1000),
+        ) == ([] if provider_fails else [returned_bar])
+        coverage = cache.get_bar_fetch_coverage(
+            request.cache_namespace,
+            request.symbol,
+            Timeframe.DAILY,
+        )
+        assert (coverage is None) is provider_fails
+
+
+def test_cancel_before_synthesized_materialization_keeps_native_cache_only(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled = threading.Event()
+    start = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
+    end = datetime(2026, 11, 4, 18, 0, tzinfo=UTC)
+    native_bar = Bar(start, 10.0, 11.0, 9.0, 10.5, 100)
+
+    class CancellingProvider(DataProvider):
+        def fetch_bars(
+            self,
+            symbol: str,
+            timeframe: Timeframe,
+            start: datetime,
+            end: datetime,
+        ) -> list[Bar]:
+            assert timeframe is Timeframe.MIN5
+            cancelled.set()
+            return [native_bar]
+
+        def fetch_snapshots(
+            self,
+            _symbols: list[str],
+        ) -> dict[str, MarketSnapshot]:
+            return {}
+
+        def fetch_level1(self, symbol: str) -> Level1Quote | None:
+            return None
+
+        def native_timeframes(self) -> list[Timeframe]:
+            return [Timeframe.MIN5]
+
+    aggregator = Aggregator(CancellingProvider())
+    materialization_calls: list[bool] = []
+
+    def unexpected_materialization(
+        _aggregator: Aggregator,
+        _bars: list[Bar],
+        _timeframe: Timeframe,
+    ) -> list[Bar]:
+        materialization_calls.append(True)
+        raise AssertionError("cancelled request entered synthesized materialization")
+
+    monkeypatch.setattr(
+        Aggregator,
+        "synthesize_cached_bars",
+        unexpected_materialization,
+    )
+    namespace = "test-provider"
+    with Cache(str(tmp_path / "cancel-synth.db")) as cache:
+        with pytest.raises(controller_module._ChartLoadCancelled):
+            controller_module._fetch_synthesized_series(
+                aggregator,
+                cache,
+                namespace,
+                "NVDA",
+                Timeframe.MIN65,
+                start,
+                end,
+                cancellation_event=cancelled,
+            )
+        assert cache.get_bars(
+            namespace,
+            "NVDA",
+            Timeframe.MIN5,
+            int(start.timestamp() * 1000),
+            int(end.timestamp() * 1000),
+        ) == [native_bar]
+        assert cache.get_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN5,
+        ) is not None
+        assert cache.get_bars(
+            namespace,
+            "NVDA",
+            Timeframe.MIN65,
+            int(start.timestamp() * 1000),
+            int(end.timestamp() * 1000),
+        ) == []
+        assert cache.get_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN65,
+        ) is None
+    assert materialization_calls == []
+
+
+def test_cancel_after_synthesis_preserves_existing_materialized_cache(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancelled = threading.Event()
+    start = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
+    end = datetime(2026, 11, 4, 18, 0, tzinfo=UTC)
+    old_target_bar = Bar(start, 9.0, 10.0, 8.0, 9.5, 90)
+    native_bar = Bar(start, 10.0, 11.0, 9.0, 10.5, 100)
+
+    class Provider(DataProvider):
+        def fetch_bars(
+            self,
+            symbol: str,
+            timeframe: Timeframe,
+            start: datetime,
+            end: datetime,
+        ) -> list[Bar]:
+            return [native_bar]
+
+        def fetch_snapshots(
+            self,
+            _symbols: list[str],
+        ) -> dict[str, MarketSnapshot]:
+            return {}
+
+        def fetch_level1(self, symbol: str) -> Level1Quote | None:
+            return None
+
+        def native_timeframes(self) -> list[Timeframe]:
+            return [Timeframe.MIN5]
+
+    aggregator = Aggregator(Provider())
+    original_synthesize = Aggregator.synthesize_cached_bars
+    materialization_calls: list[bool] = []
+
+    def cancel_after_synthesis(
+        self: Aggregator,
+        bars: list[Bar],
+        timeframe: Timeframe,
+    ) -> list[Bar]:
+        result = original_synthesize(self, bars, timeframe)
+        materialization_calls.append(True)
+        cancelled.set()
+        return result
+
+    monkeypatch.setattr(Aggregator, "synthesize_cached_bars", cancel_after_synthesis)
+    namespace = "test-provider"
+    target_coverage_start = int((start + timedelta(minutes=5)).timestamp() * 1000)
+    target_coverage_end = int(end.timestamp() * 1000)
+    with Cache(str(tmp_path / "cancel-synth-after.db")) as cache:
+        cache.put_bars(namespace, "NVDA", Timeframe.MIN65, [old_target_bar])
+        cache.extend_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN65,
+            target_coverage_start,
+            target_coverage_end,
+        )
+        with pytest.raises(controller_module._ChartLoadCancelled):
+            controller_module._fetch_synthesized_series(
+                aggregator,
+                cache,
+                namespace,
+                "NVDA",
+                Timeframe.MIN65,
+                start,
+                end,
+                cancellation_event=cancelled,
+            )
+        assert cache.get_bars(
+            namespace,
+            "NVDA",
+            Timeframe.MIN65,
+            int(start.timestamp() * 1000),
+            target_coverage_end,
+        ) == [old_target_bar]
+        assert cache.get_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN65,
+        ) == (target_coverage_start, target_coverage_end)
+    assert materialization_calls == [True]
+
+
+def test_cancel_between_head_extension_and_tail_refresh_skips_tail(
+    tmp_path: Any,
+) -> None:
+    cancelled = threading.Event()
+    history_start = datetime(2026, 11, 4, 14, 0, tzinfo=UTC)
+    coverage_start = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
+    coverage_end = datetime(2026, 11, 4, 16, 0, tzinfo=UTC)
+    now = datetime(2026, 11, 4, 17, 0, tzinfo=UTC)
+    head_bar = Bar(history_start, 10.0, 11.0, 9.0, 10.5, 100)
+    old_bar = Bar(coverage_end - timedelta(minutes=5), 11.0, 12.0, 10.0, 11.5, 100)
+    calls: list[tuple[datetime, datetime]] = []
+
+    class CancellingProvider(DataProvider):
+        def fetch_bars(
+            self,
+            symbol: str,
+            timeframe: Timeframe,
+            start: datetime,
+            end: datetime,
+        ) -> list[Bar]:
+            calls.append((start, end))
+            cancelled.set()
+            return [head_bar]
+
+        def fetch_snapshots(
+            self,
+            _symbols: list[str],
+        ) -> dict[str, MarketSnapshot]:
+            return {}
+
+        def fetch_level1(self, symbol: str) -> Level1Quote | None:
+            return None
+
+        def native_timeframes(self) -> list[Timeframe]:
+            return [Timeframe.MIN5]
+
+    aggregator = Aggregator(CancellingProvider())
+    namespace = "test-provider"
+    coverage_start_ms = int(coverage_start.timestamp() * 1000)
+    coverage_end_ms = int(coverage_end.timestamp() * 1000)
+    with Cache(str(tmp_path / "cancel-head-tail.db")) as cache:
+        cache.put_bars(namespace, "NVDA", Timeframe.MIN5, [old_bar])
+        cache.extend_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN5,
+            coverage_start_ms,
+            coverage_end_ms,
+        )
+        with pytest.raises(controller_module._ChartLoadCancelled):
+            controller_module._fetch_and_cache_bars(
+                aggregator,
+                cache,
+                namespace,
+                "NVDA",
+                Timeframe.MIN5,
+                history_start,
+                now,
+                cancellation_event=cancelled,
+            )
+        assert calls == [(history_start, coverage_start)]
+        assert cache.get_bar_fetch_coverage(
+            namespace,
+            "NVDA",
+            Timeframe.MIN5,
+        ) == (int(history_start.timestamp() * 1000), coverage_end_ms)
+        assert cache.get_bars(
+            namespace,
+            "NVDA",
+            Timeframe.MIN5,
+            int(history_start.timestamp() * 1000),
+            coverage_end_ms,
+        ) == [head_bar, old_bar]
 
 
 def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
@@ -883,8 +1318,23 @@ def test_two_real_workers_do_not_block_latest_debounced_request(
     assert "NVDA" not in fetch_calls
     assert accepted == []
     assert current_errors == []
-    assert sorted(worker_successes) == ["TSLA", "XLE"]
+    assert worker_successes == []
     assert worker_errors == []
+    with Cache(window._db_path) as cache:
+        cache_end_ms = int(datetime.now(tz=UTC).timestamp() * 1000) + 1_000
+        for symbol in ("XLE", "TSLA"):
+            assert cache.get_bars(
+                connection.cache_namespace,
+                symbol,
+                Timeframe.DAILY,
+                0,
+                cache_end_ms,
+            )
+            assert cache.get_bar_fetch_coverage(
+                connection.cache_namespace,
+                symbol,
+                Timeframe.DAILY,
+            ) is not None
 
     window._chart_load_timer.setInterval(0)
     window._chart_load_timer.start()
@@ -895,7 +1345,7 @@ def test_two_real_workers_do_not_block_latest_debounced_request(
     )
 
     assert current_errors == []
-    assert sorted(worker_successes) == ["NVDA", "TSLA", "XLE"]
+    assert worker_successes == ["NVDA"]
     assert worker_errors == []
     assert fetch_calls.count("XLE") == 1
     assert fetch_calls.count("TSLA") == 1

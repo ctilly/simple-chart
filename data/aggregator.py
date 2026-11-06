@@ -26,14 +26,16 @@ Grouping strategy:
     volume = sum of all volumes
 """
 
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, datetime
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, UnsupportedTimeframeError
-
-
-_ET = ZoneInfo("America/New_York")
+from data.session import (
+    bucket_start as _bucket_start,
+    completed_week_start,
+    exchange_day_start,
+    session_period as _session_period,
+)
 
 # Ordered list of base timeframes to try for each non-native timeframe.
 # The aggregator picks the first one the active provider supports.
@@ -138,22 +140,9 @@ class Aggregator:
     ) -> datetime:
         native_timeframe = self.native_timeframe(timeframe)
         if native_timeframe == Timeframe.DAILY:
-            local = endpoint.astimezone(_ET)
-            return local.replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0,
-            ).astimezone(endpoint.tzinfo)
+            return exchange_day_start(endpoint)
         if native_timeframe == Timeframe.WEEKLY:
-            local = endpoint.astimezone(_ET)
-            week_start = local - timedelta(days=local.weekday())
-            return week_start.replace(
-                hour=0,
-                minute=0,
-                second=0,
-                microsecond=0,
-            ).astimezone(endpoint.tzinfo)
+            return completed_week_start(endpoint)
 
         period_minutes = native_timeframe.minutes
         if period_minutes is None:
@@ -245,26 +234,6 @@ def _group_key(ts: datetime, period_minutes: int) -> tuple[date, int]:
     """
     session_open, period_index = _session_period(ts, period_minutes)
     return (session_open.date(), period_index)
-
-
-def _bucket_start(ts: datetime, period_minutes: int) -> datetime:
-    session_open, period_index = _session_period(ts, period_minutes)
-    bucket_start = session_open + timedelta(
-        minutes=period_index * period_minutes
-    )
-    day_start = session_open.replace(hour=0, minute=0)
-    return max(bucket_start, day_start).astimezone(ts.tzinfo)
-
-
-def _session_period(
-    ts: datetime,
-    period_minutes: int,
-) -> tuple[datetime, int]:
-    et = ts.astimezone(_ET)
-    session_open = et.replace(hour=9, minute=30, second=0, microsecond=0)
-    seconds_elapsed = (et - session_open).total_seconds()
-    period_index = int(seconds_elapsed // (period_minutes * 60))
-    return session_open, period_index
 
 
 def _reduce_group(bars: list[Bar]) -> Bar:

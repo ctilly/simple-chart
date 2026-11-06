@@ -7,12 +7,14 @@ import pytest
 from app.controller import (
     _DataRoute,
     _Level1Worker,
+    _Level1Request,
+    _QuoteRouteIdentity,
     _SnapshotBatch,
+    _SnapshotRequest,
     _SnapshotWorker,
     _asset_reference_refresh_due,
     _fetch_and_cache_bars,
     _fetch_series_with_references,
-    _expected_last_session_bar_start,
     _history_end,
     _history_start,
     _resolve_company_name,
@@ -20,11 +22,15 @@ from app.controller import (
     _validate_provider_connection,
 )
 from app.header_bar import _level1_html
-from data.aggregator import Aggregator, _bucket_start
+from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, HistoryUnavailableError
 from data.provider.config import alpaca_paper_connection, yfinance_connection
+from data.session import (
+    bucket_start as _bucket_start,
+    expected_last_session_bar_start as _expected_last_session_bar_start,
+)
 
 
 class FakeProvider(DataProvider):
@@ -1474,9 +1480,10 @@ def test_snapshot_worker_merges_provider_batches() -> None:
         [
             _SnapshotBatch(Aggregator(equity_provider), ["AAPL"]),
             _SnapshotBatch(Aggregator(futures_provider), ["ES=F"]),
-        ]
+        ],
+        _SnapshotRequest(0, ()),
     )
-    worker.finished.connect(received.append)
+    worker.finished.connect(lambda request, snapshots: received.append(snapshots))
 
     worker.run()
 
@@ -1598,12 +1605,12 @@ def test_level1_worker_merges_yahoo_name_into_alpaca_quote(
         worker = _Level1Worker(
             Aggregator(market_provider),
             Aggregator(reference_provider),
-            cache,
-            "AAPL",
+            str(tmp_path / "test.db"),
+            _Level1Request("AAPL", 0, _QuoteRouteIdentity(yfinance_connection(), 0)),
             True,
             now,
         )
-        worker.finished.connect(received.append)
+        worker.finished.connect(lambda request, quote: received.append(quote))
 
         worker.run()
         cached = cache.get_asset_reference("AAPL")
@@ -1628,12 +1635,12 @@ def test_level1_worker_reuses_name_already_returned_by_yahoo_quote(
         worker = _Level1Worker(
             aggregator,
             aggregator,
-            cache,
-            "AAPL",
+            str(tmp_path / "test.db"),
+            _Level1Request("AAPL", 0, _QuoteRouteIdentity(yfinance_connection(), 0)),
             True,
             now,
         )
-        worker.finished.connect(received.append)
+        worker.finished.connect(lambda request, quote: received.append(quote))
 
         worker.run()
         cached = cache.get_asset_reference("AAPL")

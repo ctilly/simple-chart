@@ -33,6 +33,9 @@ from data.provider.base import (
 )
 
 
+yf.config.debug.hide_exceptions = False
+
+
 # Mapping from our Timeframe enum to yfinance interval strings.
 # MIN39 and MIN65 are intentionally absent — they are not native to Yahoo
 # Finance and must be synthesized by the aggregator from MIN5 bars.
@@ -85,7 +88,6 @@ class YFinanceProvider(DataProvider):
                 end=end,
                 auto_adjust=True,   # adjusts OHLC for splits and dividends
                 prepost=False,      # regular session only, no pre/post market bars
-                raise_errors=True,
             )
         except YFPricesMissingError as exc:
             raise HistoryUnavailableError(symbol, timeframe) from exc

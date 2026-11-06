@@ -42,7 +42,7 @@ def test_fetch_bars_propagates_yahoo_history_errors(
             end,
         )
 
-    assert history_arguments["raise_errors"] is True
+    assert "raise_errors" not in history_arguments
 
 
 def test_fetch_bars_translates_exact_missing_prices_error(

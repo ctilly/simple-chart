@@ -1,8 +1,7 @@
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 import math
 from typing import Never, Protocol, cast
-from zoneinfo import ZoneInfo
 
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
@@ -20,11 +19,9 @@ from data.provider.base import (
     UnsupportedTimeframeError,
 )
 from data.provider.config import MarketDataFeed
+from data.session import is_regular_session_timestamp as _is_regular_session
 
 
-_ET = ZoneInfo("America/New_York")
-_SESSION_OPEN = time(9, 30)
-_SESSION_CLOSE = time(16, 0)
 _DELAYED_SIP_SAFE_LAG = timedelta(minutes=16)
 _SIP_ENTITLEMENT_ERROR_CODE = 40310000
 _ALPACA_REQUEST_TIMEOUT = (5.0, 15.0)
@@ -272,11 +269,6 @@ def _unique_symbols(symbols: list[str]) -> list[str]:
             seen.add(value)
             normalized.append(value)
     return normalized
-
-
-def _is_regular_session(timestamp: datetime) -> bool:
-    local = timestamp.astimezone(_ET)
-    return local.weekday() < 5 and _SESSION_OPEN <= local.time() < _SESSION_CLOSE
 
 
 def _to_bar(bar: _AlpacaBar) -> Bar:

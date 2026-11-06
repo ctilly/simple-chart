@@ -1,96 +1,49 @@
-# Claude QC Development Tool
+# Direct Claude Code collaboration
 
-Status: Operational
+Call the installed `claude` CLI directly from the repository root. There is no
+project-owned launcher, packet protocol, digest gate or response validator.
+Codex supplies a short brief and adjudicates Claude's independent analysis.
 
-## Purpose
+## Native invocation
 
-SimpleChart uses Claude as an external, read-only reviewer for explicitly
-approved agentic work. The wrapper makes those reviews reproducible and keeps
-Claude outside the application and its credentials.
+Use the user's normal first-party Claude Code sign-in. `claude auth status --json`
+reports authentication status; resolve unexpected API-key/custom-routing
+configuration before sending repository material. Start a fresh review without
+`--resume` or `--continue`.
 
-The wrapper is development tooling, not application runtime code. It lives at
-`devtools/claude_qc/`, is excluded from application package discovery, and has
-no installed console entry point.
-
-Run it from the repository root:
-
-```text
-python -m devtools.claude_qc.cli status
-python -m devtools.claude_qc.cli preview < packet.json
-python -m devtools.claude_qc.cli review --approved-digest DIGEST < packet.json
+```sh
+claude -p --model claude-opus-5-5 --effort high \
+  --tools Read,Glob,Grep --allowedTools Read,Glob,Grep \
+  --permission-mode dontAsk --permission-prompts none \
+  --restricted --safe-mode --disable-slash-commands --no-chrome \
+  --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
+  --settings '{"permissions":{"deny":["Read(**/*.db)","Read(**/*.db-*)","Read(**/*.sqlite*)","Read(**/.env*)","Read(**/*.pem)","Read(**/*.key)","Read(./.git/**)","Read(./.aws/**)","Read(./.ssh/**)","Read(**/credentials.json)","Read(**/secrets.json)"]}}' \
+  --no-session-persistence --output-format json < brief.txt
 ```
 
-## Review boundary
+These are native Claude Code options. No custom JSON schema or structured-output
+retry setting is needed. The native JSON envelope contains the response in
+`result` and model usage in `modelUsage`; Codex checks that the process succeeded,
+the review completed, the requested model answered, and no permission denials or
+unresolved tool failures prevented inspection. No fallback model is accepted.
+Plain-language findings are sufficient: location, issue, evidence and impact.
 
-- Only a bounded packet approved under `docs/agentic-workflow.md` may be sent.
-- The canonical packet digest must match the approved digest before Claude is
-  started.
-- Packets travel through standard input, never command arguments.
-- Credentials, private databases, raw provider responses, unrelated source,
-  and environment dumps are prohibited.
-- Claude receives no application tools or workspace access.
-- A completed review is not repeated without new falsifying evidence.
+## Source access and review gate
 
-## Claude invocation
+Claude inspects source/tests directly using Read, Glob and Grep. File changes,
+shell, agents, web and MCP tools are unavailable. Restricted mode confines file
+tools to the workspace; Read denials exclude databases, credentials and private
+configuration. Search-tool filtering is best effort under the native permission
+contract. Keep credentials, private databases and live provider data out of the
+brief. Managed machine policy remains a limitation of native safe/restricted mode.
 
-The wrapper uses Claude Code's single-result headless interface with the full
-model identifier `claude-opus-5-5`, high effort, JSON output, and a fixed
-structured-output schema.
+A failed or incomplete review blocks the next implementation slice. Diagnose the
+actual CLI failure and resolve it before a justified retry. Do not silently skip
+Claude, accept a partial answer, or rebuild a wrapper to hide the failure.
+Completed reviews stay closed; follow up only on unresolved issues or substantive
+new changes. Do not archive temporary review output after final acceptance unless
+the user requests retention.
 
-The invocation disables ordinary tools, MCP servers, slash commands, Chrome,
-session persistence, hooks, plugins, project instructions, and interactive
-permission prompts. It runs in a new empty temporary directory with a scrubbed
-environment and no wrapper retry.
-
-Subscription authentication remains owned by Claude Code. The preflight
-accepts only a logged-in first-party `claude.ai` Pro or Max subscription. It
-reads only the authentication fields used for that decision and ignores
-unknown fields.
-
-## Result validation
-
-The wrapper parses one JSON result object and requires:
-
-1. `type == "result"` and `subtype == "success"`.
-2. `is_error == false`.
-3. No permission denials.
-4. Locally valid structured findings.
-5. Positive output-token usage from only the requested full model identifier.
-6. A successful process exit and an unchanged empty working directory.
-
-Unknown result fields are ignored. Internal event ordering, `stop_reason`, and
-`num_turns` are not treated as stable protocol fields.
-
-Raw Claude output is normalized in memory and discarded. The command returns
-only the review status, safe metadata, and validated findings.
-
-## Failure handling
-
-Claude Code, the local wrapper, the sandbox/network path, and Claude's response
-are separate failure domains. Report which domain actually failed.
-
-There is no blind retry. After a failed request:
-
-1. Record the sanitized stage, category, and validation reason.
-2. Reproduce parser or wrapper defects with synthetic fixtures.
-3. Correct and test one falsifiable cause.
-4. Retry the unchanged packet only when the workflow permits it.
-
-DNS or TLS failures inside the sandbox must be checked through the approved
-outside-sandbox path before attributing them to Claude or a certificate
-authority.
-
-## Repository verification
-
-The focused tests are `tests/test_claude_qc_*.py`. They cover packet
-canonicalization, authentication preflight, environment isolation, process
-control, result parsing, command behavior, and packaging exclusion.
-
-`tests/test_claude_qc_packaging.py` proves both sides of the boundary:
-
-- the module runs from a source checkout without importing application layers;
-- an isolated SimpleChart installation contains neither the development tool
-  nor a Claude-QC executable.
-
-Read `docs/skills/claude-collaboration.md` before preparing, sending,
-monitoring, retrying, or diagnosing a review.
+See the [collaboration skill](skills/claude-collaboration.md) for the workflow and
+the official [CLI reference](https://code.claude.com/docs/en/cli-reference) and
+[permission rules](https://code.claude.com/docs/en/permissions) for native controls.

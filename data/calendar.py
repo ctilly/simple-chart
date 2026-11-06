@@ -19,24 +19,21 @@ No external dependencies — only the standard library.
 import bisect
 import math
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-
 from data.models import Timeframe
-
-
-MARKET_TIMEZONE = ZoneInfo("America/New_York")
+from data.session import MARKET_TIMEZONE as MARKET_TIMEZONE
+from data.session import REGULAR_SESSION_MINUTES
 
 
 # NYSE regular session: 9:30 AM – 4:00 PM ET = 390 minutes.
 # Bar count for one complete trading day at each intraday timeframe.
 # DAILY = 1 bar per day, WEEKLY = 1 bar per week (handled separately below).
 _BARS_PER_TRADING_DAY: dict[Timeframe, int] = {
-    Timeframe.MIN1:   390 // 1,    # 390 — internal use, base for MIN39 aggregation
-    Timeframe.MIN5:   390 // 5,    # 78
-    Timeframe.MIN15:  390 // 15,   # 26
-    Timeframe.MIN30:  390 // 30,   # 13
-    Timeframe.MIN39:  390 // 39,   # 10
-    Timeframe.MIN65:  390 // 65,   # 6
+    Timeframe.MIN1:   REGULAR_SESSION_MINUTES // 1,    # 390 — internal use, base for MIN39 aggregation
+    Timeframe.MIN5:   REGULAR_SESSION_MINUTES // 5,    # 78
+    Timeframe.MIN15:  REGULAR_SESSION_MINUTES // 15,   # 26
+    Timeframe.MIN30:  REGULAR_SESSION_MINUTES // 30,   # 13
+    Timeframe.MIN39:  REGULAR_SESSION_MINUTES // 39,   # 10
+    Timeframe.MIN65:  REGULAR_SESSION_MINUTES // 65,   # 6
     Timeframe.DAILY:  1,
 }
 

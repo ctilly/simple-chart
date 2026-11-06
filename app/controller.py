@@ -34,14 +34,14 @@ Initial workspace extension set:
 
 import copy
 import re
+import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QCursor, QGuiApplication
+from PyQt6.QtGui import QCloseEvent, QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QDialog,
     QFrame,
@@ -71,6 +71,14 @@ from chart.window import ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
+from data.session import (
+    exchange_day_start as _exchange_day_start,
+    daily_session_is_settled,
+    expected_last_session_bar_start as _expected_last_session_bar_start,
+    is_regular_session_timestamp,
+    latest_expected_regular_session as _latest_expected_regular_session,
+    regular_session_settled_at as _regular_session_settled_at,
+)
 from data.provider import (
     ProviderAvailability,
     ProviderConfigurationError,
@@ -128,11 +136,6 @@ _CHART_LOAD_DEBOUNCE_MS = 100
 _MAX_ACTIVE_CHART_LOADS = 2
 _ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
 _ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
-_ET = ZoneInfo("America/New_York")
-_REGULAR_SESSION_OPEN = time(9, 30)
-_REGULAR_SESSION_CLOSE = time(16, 0)
-_REGULAR_SESSION_MINUTES = 390
-_DAILY_SETTLEMENT_DELAY = timedelta(minutes=5)
 _REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
 
 
@@ -191,6 +194,33 @@ class _SnapshotBatch:
 
 
 @dataclass(frozen=True)
+class _QuoteRouteIdentity:
+    connection: ProviderConnection
+    generation: int
+
+
+@dataclass(frozen=True)
+class _SnapshotRequest:
+    membership_revision: int
+    routes: tuple[tuple[str, _QuoteRouteIdentity], ...]
+
+
+@dataclass(frozen=True)
+class _MaterializationRange:
+    range_start_ms: int
+    range_end_ms: int
+    coverage_start_ms: int
+    coverage_end_ms: int
+
+
+@dataclass(frozen=True)
+class _Level1Request:
+    symbol: str
+    symbol_generation: int
+    route: _QuoteRouteIdentity
+
+
+@dataclass(frozen=True)
 class _ChartLoadRequest:
     generation: int
     symbol: str
@@ -207,6 +237,7 @@ class _ChartLoadTask:
     request: _ChartLoadRequest
     thread: QThread
     worker: "_FetchWorker"
+    cancellation_event: threading.Event
 
 
 def _is_yahoo_futures_symbol(symbol: str) -> bool:
@@ -218,68 +249,6 @@ def _uses_regular_equity_session(symbol: str) -> bool:
     return _REGULAR_EQUITY_SYMBOL.fullmatch(normalized) is not None
 
 
-def _latest_expected_regular_session(
-    endpoint: datetime,
-) -> tuple[date, bool]:
-    local = endpoint.astimezone(_ET)
-    local_time = local.time().replace(tzinfo=None)
-    if (
-        local.weekday() < 5
-        and _REGULAR_SESSION_OPEN <= local_time < _REGULAR_SESSION_CLOSE
-    ):
-        return (local.date(), True)
-    if local.weekday() < 5 and local_time >= _REGULAR_SESSION_CLOSE:
-        return (local.date(), False)
-
-    session_date = local.date() - timedelta(days=1)
-    while session_date.weekday() >= 5:
-        session_date -= timedelta(days=1)
-    return (session_date, False)
-
-
-def _expected_last_session_bar_start(
-    timeframe: Timeframe,
-    session_date: date,
-    tz: tzinfo | None,
-) -> datetime:
-    session_open = datetime.combine(
-        session_date,
-        _REGULAR_SESSION_OPEN,
-        tzinfo=_ET,
-    )
-    if timeframe == Timeframe.DAILY:
-        return session_open.replace(hour=0, minute=0).astimezone(tz)
-    period_minutes = timeframe.minutes
-    if period_minutes is None:
-        raise ValueError(f"No regular-session bar boundary for {timeframe!r}.")
-    final_period = (_REGULAR_SESSION_MINUTES - 1) // period_minutes
-    return (
-        session_open + timedelta(minutes=final_period * period_minutes)
-    ).astimezone(tz)
-
-
-def _regular_session_settled_at(
-    timeframe: Timeframe,
-    session_date: date,
-    tz: tzinfo | None,
-) -> datetime:
-    boundary_date = (
-        session_date + timedelta(days=1)
-        if timeframe == Timeframe.DAILY
-        else session_date
-    )
-    boundary_time = (
-        time.min
-        if timeframe == Timeframe.DAILY
-        else _REGULAR_SESSION_CLOSE
-    )
-    return datetime.combine(
-        boundary_date,
-        boundary_time,
-        tzinfo=_ET,
-    ).astimezone(tz)
-
-
 def _completed_coverage_end(
     symbol: str,
     timeframe: Timeframe,
@@ -288,17 +257,12 @@ def _completed_coverage_end(
 ) -> datetime:
     if timeframe != Timeframe.DAILY or not _uses_regular_equity_session(symbol):
         return completed_end
-    local = endpoint.astimezone(_ET)
-    settled_at = datetime.combine(
-        local.date(),
-        _REGULAR_SESSION_CLOSE,
-        tzinfo=_ET,
-    ) + _DAILY_SETTLEMENT_DELAY
-    if local.weekday() >= 5 or local < settled_at:
+    if not daily_session_is_settled(endpoint):
         return completed_end
+    session_date, _ = _latest_expected_regular_session(endpoint)
     return _regular_session_settled_at(
         timeframe,
-        local.date(),
+        session_date,
         endpoint.tzinfo,
     )
 
@@ -434,26 +398,29 @@ def _build_startup_routes(
 
 class _FetchWorker(QObject):
     """
-    Runs a data fetch in a background thread.
+    Fetches one chart request and reports UI results separately from cleanup.
 
-    Emits finished(series) on success or error(message) on failure.
-    The controller creates one worker per fetch, moves it to a QThread,
-    and connects its signals before starting.
+    Success and error signals include the request and are suppressed after
+    cancellation. The completed signal fires exactly once on every terminal
+    path so the controller can stop the thread and release task ownership.
     """
 
     finished: pyqtSignal = pyqtSignal(object, object)
     error: pyqtSignal = pyqtSignal(object, str)
+    completed: pyqtSignal = pyqtSignal()
 
     def __init__(
         self,
         db_path: str,
         credential_store: CredentialStore,
         request: _ChartLoadRequest,
+        cancellation_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self._db_path = db_path
         self._credential_store = credential_store
         self._request = request
+        self._cancellation_event = cancellation_event or threading.Event()
 
     def run(self) -> None:
         """
@@ -463,6 +430,7 @@ class _FetchWorker(QObject):
         reference data without requiring the user to visit the daily chart.
         """
         try:
+            _check_chart_load_cancelled(self._cancellation_event)
             provider = create_provider(
                 self._request.connection,
                 self._credential_store,
@@ -477,88 +445,160 @@ class _FetchWorker(QObject):
                     self._request.symbol,
                     self._request.timeframe,
                     now,
+                    cancellation_event=self._cancellation_event,
                 )
+            _check_chart_load_cancelled(self._cancellation_event)
             self.finished.emit(self._request, series)
+        except _ChartLoadCancelled:
+            pass
 
         except Exception as exc:
-            self.error.emit(self._request, str(exc))
+            if not self._cancellation_event.is_set():
+                self.error.emit(self._request, str(exc))
+        finally:
+            self.completed.emit()
+
+
+class _ChartLoadCancelled(Exception):
+    pass
+
+
+def _check_chart_load_cancelled(
+    cancellation_event: threading.Event | None,
+) -> None:
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise _ChartLoadCancelled
 
 
 class _SnapshotWorker(QObject):
-    finished: pyqtSignal = pyqtSignal(object)   # emits dict[str, MarketSnapshot]
-    error:    pyqtSignal = pyqtSignal(str)
+    finished: pyqtSignal = pyqtSignal(object, object)
+    error: pyqtSignal = pyqtSignal(object, str)
+    completed: pyqtSignal = pyqtSignal()
 
-    def __init__(self, batches: list[_SnapshotBatch]) -> None:
+    def __init__(
+        self,
+        batches: list[_SnapshotBatch],
+        request: _SnapshotRequest,
+        cancellation_event: threading.Event | None = None,
+    ) -> None:
         super().__init__()
         self._batches = list(batches)
+        self._request = request
+        self._cancellation_event = cancellation_event or threading.Event()
 
     def run(self) -> None:
         try:
             snapshots: dict[str, MarketSnapshot] = {}
             for batch in self._batches:
+                _check_data_worker_cancelled(self._cancellation_event)
                 snapshots.update(batch.aggregator.fetch_snapshots(batch.symbols))
-            self.finished.emit(snapshots)
+            _check_data_worker_cancelled(self._cancellation_event)
+            self.finished.emit(self._request, snapshots)
+        except _DataWorkerCancelled:
+            pass
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancellation_event.is_set():
+                self.error.emit(self._request, str(exc))
+        finally:
+            self.completed.emit()
 
 
 class _Level1Worker(QObject):
-    finished: pyqtSignal = pyqtSignal(object)   # emits Level1Quote | None
+    finished: pyqtSignal = pyqtSignal(object, object)
+    error: pyqtSignal = pyqtSignal(object, str)
+    completed: pyqtSignal = pyqtSignal()
 
     def __init__(
         self,
         aggregator: Aggregator,
         reference_aggregator: Aggregator,
-        cache: Cache,
-        symbol: str,
+        db_path: str,
+        request: _Level1Request,
         refresh_reference: bool,
         now: datetime,
+        cancellation_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self._aggregator = aggregator
         self._reference_aggregator = reference_aggregator
-        self._cache = cache
-        self._symbol = symbol
+        self._db_path = db_path
+        self._request = request
         self._refresh_reference = refresh_reference
         self._now = now
+        self._cancellation_event = cancellation_event or threading.Event()
 
     def run(self) -> None:
-        quote = self._aggregator.fetch_level1(self._symbol)
-        if quote is None:
-            self.finished.emit(None)
-            return
-        known_reference_name = (
-            quote.company_name
-            if self._aggregator is self._reference_aggregator
-            else None
-        )
-        company_name = _resolve_company_name(
-            self._cache,
-            self._reference_aggregator,
-            self._symbol,
-            self._now,
-            self._refresh_reference,
-            known_reference_name,
-        )
-        if company_name != quote.company_name:
-            quote = replace(quote, company_name=company_name)
-        self.finished.emit(quote)
+        try:
+            _check_data_worker_cancelled(self._cancellation_event)
+            with Cache(self._db_path) as cache:
+                _check_data_worker_cancelled(self._cancellation_event)
+                quote = self._aggregator.fetch_level1(self._request.symbol)
+                _check_data_worker_cancelled(self._cancellation_event)
+                if quote is not None:
+                    known_reference_name = (
+                        quote.company_name
+                        if self._aggregator is self._reference_aggregator
+                        else None
+                    )
+                    company_name = _resolve_company_name(
+                        cache,
+                        self._reference_aggregator,
+                        self._request.symbol,
+                        self._now,
+                        self._refresh_reference,
+                        known_reference_name,
+                    )
+                    _check_data_worker_cancelled(self._cancellation_event)
+                    if company_name != quote.company_name:
+                        quote = replace(quote, company_name=company_name)
+            self.finished.emit(self._request, quote)
+        except _DataWorkerCancelled:
+            pass
+        except Exception as exc:
+            if not self._cancellation_event.is_set():
+                self.error.emit(self._request, str(exc))
+        finally:
+            self.completed.emit()
 
 
 class _ProviderValidationWorker(QObject):
     finished: pyqtSignal = pyqtSignal()
     error: pyqtSignal = pyqtSignal(str)
+    completed: pyqtSignal = pyqtSignal()
 
-    def __init__(self, provider: DataProvider) -> None:
+    def __init__(
+        self,
+        provider: DataProvider,
+        cancellation_event: threading.Event | None = None,
+    ) -> None:
         super().__init__()
         self._provider = provider
+        self._cancellation_event = cancellation_event or threading.Event()
 
     def run(self) -> None:
         try:
+            _check_data_worker_cancelled(self._cancellation_event)
             _validate_provider_connection(self._provider)
+            _check_data_worker_cancelled(self._cancellation_event)
             self.finished.emit()
+        except _DataWorkerCancelled:
+            pass
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancellation_event.is_set():
+                self.error.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class _DataWorkerCancelled(Exception):
+    pass
+
+
+def _check_data_worker_cancelled(
+    cancellation_event: threading.Event | None,
+) -> None:
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise _DataWorkerCancelled
 
 
 def _validate_provider_connection(provider: DataProvider) -> None:
@@ -630,7 +670,10 @@ def _fetch_series_with_references(
     symbol: str,
     timeframe: Timeframe,
     now: datetime,
+    *,
+    cancellation_event: threading.Event | None = None,
 ) -> OHLCVSeries:
+    _check_chart_load_cancelled(cancellation_event)
     if timeframe.is_intraday:
         daily_end = _history_end(Timeframe.DAILY, aggregator, now)
         daily_start = _history_start(Timeframe.DAILY, aggregator, daily_end)
@@ -642,7 +685,9 @@ def _fetch_series_with_references(
             Timeframe.DAILY,
             daily_start,
             daily_end,
+            cancellation_event=cancellation_event,
         )
+        _check_chart_load_cancelled(cancellation_event)
     return _fetch_series(
         aggregator,
         cache,
@@ -650,6 +695,7 @@ def _fetch_series_with_references(
         symbol,
         timeframe,
         now,
+        cancellation_event=cancellation_event,
     )
 
 
@@ -660,7 +706,10 @@ def _fetch_series(
     symbol: str,
     timeframe: Timeframe,
     now: datetime,
+    *,
+    cancellation_event: threading.Event | None = None,
 ) -> OHLCVSeries:
+    _check_chart_load_cancelled(cancellation_event)
     history_end = _history_end(timeframe, aggregator, now)
     history_start = _history_start(timeframe, aggregator, history_end)
     if aggregator.native_timeframe(timeframe) != timeframe:
@@ -672,6 +721,7 @@ def _fetch_series(
             timeframe,
             history_start,
             history_end,
+            cancellation_event=cancellation_event,
         )
     _fetch_and_cache_bars(
         aggregator,
@@ -681,7 +731,9 @@ def _fetch_series(
         timeframe,
         history_start,
         history_end,
+        cancellation_event=cancellation_event,
     )
+    _check_chart_load_cancelled(cancellation_event)
     bars = cache.get_bars(
         cache_namespace,
         symbol,
@@ -696,6 +748,86 @@ def _fetch_series(
     )
 
 
+def _choose_synthesized_base_start(
+    requested_start_ms: int,
+    history_start: datetime,
+    existing_first_timestamp: datetime | None,
+    target_coverage_start_ms: int | None,
+    target_coverage_is_legacy: bool,
+    base_coverage_start: datetime | None,
+    base_coverage_end: datetime | None,
+    target_refresh_start: datetime | None,
+) -> datetime | None:
+    base_history_start = history_start
+    target_covers_head = False
+    if (
+        existing_first_timestamp is not None
+        and target_coverage_start_ms is not None
+    ):
+        target_covers_head = target_coverage_start_ms <= requested_start_ms
+        if (
+            target_covers_head
+            and target_refresh_start is None
+            and (base_coverage_start is None or not target_coverage_is_legacy)
+        ):
+            return None
+        if target_covers_head and target_refresh_start is not None:
+            base_history_start = max(history_start, target_refresh_start)
+
+    preserved_target_covers_head = target_covers_head or (
+        existing_first_timestamp is not None
+        and existing_first_timestamp <= history_start
+    )
+    if (
+        preserved_target_covers_head
+        and base_coverage_start is not None
+        and base_coverage_end is not None
+    ):
+        if target_refresh_start is None:
+            base_history_start = max(history_start, base_coverage_start)
+        elif base_history_start > base_coverage_end:
+            base_history_start = max(history_start, base_coverage_end)
+    return base_history_start
+
+
+def _materialization_range(
+    source_start_ms: int,
+    source_end_ms: int,
+    target_end_ms: int,
+    target_coverage: tuple[int, int] | None,
+    target_coverage_is_legacy: bool,
+    has_existing_target: bool,
+) -> _MaterializationRange:
+    rebuild_start_ms = source_start_ms
+    if target_coverage is not None and not target_coverage_is_legacy:
+        target_start_ms, previous_end_ms = target_coverage
+        if source_start_ms >= target_start_ms:
+            rebuild_start_ms = min(previous_end_ms, target_end_ms)
+    aligned_start_ms = max(
+        source_start_ms,
+        int(
+            _exchange_day_start(
+                datetime.fromtimestamp(rebuild_start_ms / 1000, tz=timezone.utc)
+            ).timestamp()
+            * 1000
+        ),
+    )
+    coverage_start_ms = min(
+        aligned_start_ms,
+        (
+            target_coverage[0]
+            if target_coverage is not None and has_existing_target
+            else aligned_start_ms
+        ),
+    )
+    return _MaterializationRange(
+        aligned_start_ms,
+        source_end_ms,
+        coverage_start_ms,
+        target_end_ms,
+    )
+
+
 def _fetch_synthesized_series(
     aggregator: Aggregator,
     cache: Cache,
@@ -704,7 +836,10 @@ def _fetch_synthesized_series(
     timeframe: Timeframe,
     history_start: datetime,
     history_end: datetime,
+    *,
+    cancellation_event: threading.Event | None = None,
 ) -> OHLCVSeries:
+    _check_chart_load_cancelled(cancellation_event)
     requested_start_ms = int(history_start.timestamp() * 1000)
     requested_end_ms = int(history_end.timestamp() * 1000)
     existing = cache.get_bars(
@@ -725,17 +860,15 @@ def _fetch_synthesized_series(
         symbol,
         base_timeframe,
     )
-    base_history_start = history_start
-    target_covers_head = False
     target_refresh_start: datetime | None = None
     target_coverage_is_legacy = False
-    if existing and target_coverage is not None:
-        target_covers_head = target_coverage[0] <= requested_start_ms
+    if target_coverage is not None:
         target_coverage_is_legacy = _is_legacy_target_coverage(
             aggregator,
             timeframe,
             target_coverage,
         )
+    if existing and target_coverage is not None:
         target_coverage_end = datetime.fromtimestamp(
             target_coverage[1] / 1000,
             tz=timezone.utc,
@@ -749,30 +882,28 @@ def _fetch_synthesized_series(
             existing[-1].timestamp,
             history_end,
         )
-        if (
-            target_covers_head
-            and target_refresh_start is None
-            and (base_coverage is None or not target_coverage_is_legacy)
-        ):
-            return OHLCVSeries(symbol, timeframe, existing)
-        if target_covers_head and target_refresh_start is not None:
-            base_history_start = max(history_start, target_refresh_start)
-    preserved_target_covers_head = target_covers_head or bool(
-        existing and existing[0].timestamp <= history_start
+    base_coverage_start = (
+        datetime.fromtimestamp(base_coverage[0] / 1000, tz=timezone.utc)
+        if base_coverage is not None
+        else None
     )
-    if preserved_target_covers_head and base_coverage is not None:
-        base_coverage_start = datetime.fromtimestamp(
-            base_coverage[0] / 1000,
-            tz=timezone.utc,
-        )
-        base_coverage_end = datetime.fromtimestamp(
-            base_coverage[1] / 1000,
-            tz=timezone.utc,
-        )
-        if target_refresh_start is None:
-            base_history_start = max(history_start, base_coverage_start)
-        elif base_history_start > base_coverage_end:
-            base_history_start = max(history_start, base_coverage_end)
+    base_coverage_end = (
+        datetime.fromtimestamp(base_coverage[1] / 1000, tz=timezone.utc)
+        if base_coverage is not None
+        else None
+    )
+    base_history_start = _choose_synthesized_base_start(
+        requested_start_ms,
+        history_start,
+        existing[0].timestamp if existing else None,
+        target_coverage[0] if target_coverage is not None else None,
+        target_coverage_is_legacy,
+        base_coverage_start,
+        base_coverage_end,
+        target_refresh_start,
+    )
+    if base_history_start is None:
+        return OHLCVSeries(symbol, timeframe, existing)
     try:
         _fetch_and_cache_bars(
             aggregator,
@@ -782,6 +913,7 @@ def _fetch_synthesized_series(
             base_timeframe,
             base_history_start,
             history_end,
+            cancellation_event=cancellation_event,
         )
     except HistoryUnavailableError:
         if base_coverage is None:
@@ -806,52 +938,38 @@ def _fetch_synthesized_series(
         datetime.fromtimestamp(source_end_ms / 1000, tz=timezone.utc),
     )
     target_end_ms = int(completed_target_end.timestamp() * 1000)
-    rebuild_start_ms = _materialization_start_ms(
-        aggregator,
-        timeframe,
-        target_coverage,
+    materialization_range = _materialization_range(
         source_start_ms,
+        source_end_ms,
         target_end_ms,
-    )
-    aligned_start_ms = max(
-        source_start_ms,
-        int(
-            _exchange_day_start(
-                datetime.fromtimestamp(rebuild_start_ms / 1000, tz=timezone.utc)
-            ).timestamp()
-            * 1000
-        ),
+        target_coverage,
+        target_coverage_is_legacy,
+        bool(existing),
     )
     raw_bars = cache.get_raw_bars(
         cache_namespace,
         symbol,
         base_timeframe,
-        aligned_start_ms,
-        source_end_ms,
+        materialization_range.range_start_ms,
+        materialization_range.range_end_ms,
     )
     if _uses_regular_equity_session(symbol):
         raw_bars = [bar for bar in raw_bars if _is_regular_session_bar(bar)]
+    _check_chart_load_cancelled(cancellation_event)
     materialized = aggregator.synthesize_cached_bars(raw_bars, timeframe)
+    _check_chart_load_cancelled(cancellation_event)
     if not materialized:
         return OHLCVSeries(symbol, timeframe, existing)
 
-    coverage_start_ms = min(
-        aligned_start_ms,
-        (
-            target_coverage[0]
-            if target_coverage is not None and existing
-            else aligned_start_ms
-        ),
-    )
     cache.replace_materialized_bars(
         cache_namespace,
         symbol,
         timeframe,
-        aligned_start_ms,
-        source_end_ms,
+        materialization_range.range_start_ms,
+        materialization_range.range_end_ms,
         materialized,
-        coverage_start_ms,
-        target_end_ms,
+        materialization_range.coverage_start_ms,
+        materialization_range.coverage_end_ms,
     )
     bars = cache.get_bars(
         cache_namespace,
@@ -861,23 +979,6 @@ def _fetch_synthesized_series(
         requested_end_ms,
     )
     return OHLCVSeries(symbol, timeframe, bars)
-
-
-def _materialization_start_ms(
-    aggregator: Aggregator,
-    timeframe: Timeframe,
-    target_coverage: tuple[int, int] | None,
-    source_start_ms: int,
-    target_end_ms: int,
-) -> int:
-    if target_coverage is None:
-        return source_start_ms
-    target_start_ms, previous_end_ms = target_coverage
-    if _is_legacy_target_coverage(aggregator, timeframe, target_coverage):
-        return source_start_ms
-    if source_start_ms < target_start_ms:
-        return source_start_ms
-    return min(previous_end_ms, target_end_ms)
 
 
 def _is_legacy_target_coverage(
@@ -893,20 +994,8 @@ def _is_legacy_target_coverage(
     return aligned_previous_end_ms != previous_end_ms
 
 
-def _exchange_day_start(timestamp: datetime) -> datetime:
-    local = timestamp.astimezone(_ET)
-    return local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
-        timestamp.tzinfo
-    )
-
-
 def _is_regular_session_bar(bar: Bar) -> bool:
-    local = bar.timestamp.astimezone(_ET)
-    local_time = local.time().replace(tzinfo=None)
-    return (
-        local.weekday() < 5
-        and _REGULAR_SESSION_OPEN <= local_time < _REGULAR_SESSION_CLOSE
-    )
+    return is_regular_session_timestamp(bar.timestamp)
 
 
 def _fetch_and_cache_bars(
@@ -917,7 +1006,10 @@ def _fetch_and_cache_bars(
     timeframe: Timeframe,
     history_start: datetime,
     now: datetime,
+    *,
+    cancellation_event: threading.Event | None = None,
 ) -> None:
+    _check_chart_load_cancelled(cancellation_event)
     if aggregator.native_timeframe(timeframe) != timeframe:
         raise ValueError(
             f"Synthesized timeframe {timeframe.value} must use the cache path."
@@ -956,6 +1048,7 @@ def _fetch_and_cache_bars(
                 history_start,
                 now,
                 coverage_end=completed_end,
+                cancellation_event=cancellation_event,
             )
             return
         _fetch_bar_range(
@@ -968,6 +1061,7 @@ def _fetch_and_cache_bars(
             now,
             coverage_end=completed_end,
             replace_coverage=True,
+            cancellation_event=cancellation_event,
         )
         return
 
@@ -1004,6 +1098,7 @@ def _fetch_and_cache_bars(
             now,
             coverage_end=completed_end,
             replace_coverage=True,
+            cancellation_event=cancellation_event,
         )
         return
     if requested_start_ms < coverage_start_ms:
@@ -1019,6 +1114,7 @@ def _fetch_and_cache_bars(
                 coverage_start_ms / 1000,
                 tz=timezone.utc,
             ),
+            cancellation_event=cancellation_event,
         )
     if (
         requested_end_ms > coverage_end_ms
@@ -1059,6 +1155,7 @@ def _fetch_and_cache_bars(
                 now,
                 coverage_end=completed_end,
                 require_bars=True,
+                cancellation_event=cancellation_event,
             )
         except HistoryUnavailableError:
             return
@@ -1076,7 +1173,9 @@ def _fetch_bar_range(
     coverage_end: datetime | None = None,
     replace_coverage: bool = False,
     require_bars: bool = False,
+    cancellation_event: threading.Event | None = None,
 ) -> None:
+    _check_chart_load_cancelled(cancellation_event)
     new_bars = aggregator.fetch_bars(symbol, timeframe, start, end)
     if new_bars:
         cache.put_bars(cache_namespace, symbol, timeframe, new_bars)
@@ -1276,8 +1375,23 @@ class MainWindow(QMainWindow):
 
         self._snapshot_thread: QThread | None = None
         self._snapshot_worker: _SnapshotWorker | None = None
+        self._snapshot_request: _SnapshotRequest | None = None
+        self._snapshot_refresh_pending = False
+        self._watchlist_membership_revision = 0
         self._level1_thread: QThread | None = None
         self._level1_worker: _Level1Worker | None = None
+        self._level1_request: _Level1Request | None = None
+        self._level1_refresh_pending = False
+        self._level1_symbol: str | None = None
+        self._level1_symbol_generation = 0
+        self._quote_route_generation = 0
+        self._stopping_data_workers = False
+        self._closing = False
+        self._close_finalized = False
+        self._close_finalize_scheduled = False
+        self._snapshot_cancellation_event: threading.Event | None = None
+        self._level1_cancellation_event: threading.Event | None = None
+        self._validation_cancellation_event: threading.Event | None = None
         self._asset_reference_refresh_attempts: dict[str, datetime] = {}
         self._validation_thread: QThread | None = None
         self._validation_worker: _ProviderValidationWorker | None = None
@@ -1334,12 +1448,14 @@ class MainWindow(QMainWindow):
         Clears the chart immediately so the user sees a clean slate while
         loading, rather than stale data from the previous symbol.
         """
-        if self._state.symbol is None:
+        if self._stopping_data_workers or self._state.symbol is None:
             return
 
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
+        if self._level1_symbol != self._state.symbol:
+            self._refresh_level1()
         route = self._route_for_symbol(self._state.symbol)
         self._symbol_bar.set_data_source(route.display_name, "pending")
 
@@ -1348,6 +1464,8 @@ class MainWindow(QMainWindow):
             self._state.timeframe,
             route.connection,
         )
+        for task in self._chart_load_tasks.values():
+            task.cancellation_event.set()
         self._current_chart_request = request
         self._terminal_chart_generation = None
         self._pending_chart_load = request
@@ -1369,12 +1487,18 @@ class MainWindow(QMainWindow):
 
     def _dispatch_pending_chart_load(self) -> None:
         request = self._pending_chart_load
-        if request is None or len(self._chart_load_tasks) >= _MAX_ACTIVE_CHART_LOADS:
+        if (
+            self._stopping_data_workers
+            or request is None
+            or len(self._chart_load_tasks) >= _MAX_ACTIVE_CHART_LOADS
+        ):
             return
         self._pending_chart_load = None
         self._start_chart_load(request)
 
     def _start_chart_load(self, request: _ChartLoadRequest) -> None:
+        if self._stopping_data_workers:
+            return
         route = self._route_for_symbol(request.symbol)
         if route.connection != request.connection:
             if (
@@ -1389,20 +1513,20 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        cancellation_event = threading.Event()
         worker = _FetchWorker(
             db_path=self._db_path,
             credential_store=self._credential_store,
             request=request,
+            cancellation_event=cancellation_event,
         )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_chart_fetch_done)
         worker.error.connect(self._on_chart_fetch_error)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.error.connect(worker.deleteLater)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
         thread.finished.connect(
             lambda generation=request.generation: self._on_chart_thread_finished(
                 generation
@@ -1413,6 +1537,7 @@ class MainWindow(QMainWindow):
             request,
             thread,
             worker,
+            cancellation_event,
         )
         thread.start()
 
@@ -1421,12 +1546,14 @@ class MainWindow(QMainWindow):
         if task is None:
             return
         task.thread.deleteLater()
-        if not self._chart_load_timer.isActive():
+        if not self._stopping_data_workers and not self._chart_load_timer.isActive():
             self._dispatch_pending_chart_load()
+        self._maybe_finalize_close()
 
     def _is_current_chart_request(self, request: _ChartLoadRequest) -> bool:
         if (
-            self._current_chart_request != request
+            self._stopping_data_workers
+            or self._current_chart_request != request
             or self._terminal_chart_generation == request.generation
             or self._state.symbol != request.symbol
             or self._state.timeframe != request.timeframe
@@ -2138,7 +2265,9 @@ class MainWindow(QMainWindow):
             self._chart.legend.set_extension_visible(key, visible)
 
     def _on_application_settings(self) -> None:
-        if self._validation_thread is not None and self._validation_thread.isRunning():
+        if self._closing or self._stopping_data_workers:
+            return
+        if self._validation_thread is not None:
             show_information(
                 self,
                 "Connection Test In Progress",
@@ -2178,6 +2307,12 @@ class MainWindow(QMainWindow):
             self._request_provider_activation(dialog.selected_connection_id())
 
     def _request_provider_activation(self, connection_id: str) -> None:
+        if (
+            self._closing
+            or self._stopping_data_workers
+            or self._validation_thread is not None
+        ):
+            return
         connection = self._cache.get_provider_connection(connection_id)
         if connection is None:
             raise RuntimeError(f"Unknown provider connection: {connection_id}")
@@ -2212,23 +2347,28 @@ class MainWindow(QMainWindow):
             return
 
         self._pending_route = _DataRoute(Aggregator(provider), connection)
-        worker = _ProviderValidationWorker(provider)
+        cancellation_event = threading.Event()
+        worker = _ProviderValidationWorker(provider, cancellation_event)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_provider_validation_done)
         worker.error.connect(self._on_provider_validation_error)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(self._on_validation_thread_finished)
 
         self._validation_thread = thread
         self._validation_worker = worker
+        self._validation_cancellation_event = cancellation_event
         status_bar = self.statusBar()
         if status_bar is not None:
             status_bar.showMessage(f"Testing {connection.display_name}...")
         thread.start()
 
     def _on_provider_validation_done(self) -> None:
+        if self._closing or self._stopping_data_workers:
+            return
         route = self._pending_route
         self._pending_route = None
         if route is None:
@@ -2236,6 +2376,8 @@ class MainWindow(QMainWindow):
         self._commit_provider_route(route)
 
     def _on_provider_validation_error(self, message: str) -> None:
+        if self._closing or self._stopping_data_workers:
+            return
         route = self._pending_route
         self._pending_route = None
         status_bar = self.statusBar()
@@ -2251,6 +2393,9 @@ class MainWindow(QMainWindow):
         )
 
     def _commit_provider_route(self, route: _DataRoute) -> None:
+        if self._closing or self._stopping_data_workers:
+            return
+        self._quote_route_generation += 1
         self._selected_route = route
         self._cache.set_active_provider_connection_id(route.connection.connection_id)
         status_bar = self.statusBar()
@@ -2266,22 +2411,27 @@ class MainWindow(QMainWindow):
             )
             self._load()
         self._refresh_watchlist_snapshots()
+        self._refresh_level1()
 
     def _stop_data_workers(self) -> None:
+        self._stopping_data_workers = True
+        self._snapshot_refresh_pending = False
+        self._level1_refresh_pending = False
+        if self._snapshot_timer.isActive():
+            self._snapshot_timer.stop()
         if self._chart_load_timer.isActive():
             self._chart_load_timer.stop()
+        if self._drawing_preview_timer.isActive():
+            self._drawing_preview_timer.stop()
         self._pending_chart_load = None
         for task in tuple(self._chart_load_tasks.values()):
-            if task.thread.isRunning():
-                task.thread.quit()
-                task.thread.wait()
-        for thread in (
-            self._snapshot_thread,
-            self._level1_thread,
-        ):
-            if thread is not None and thread.isRunning():
-                thread.quit()
-                thread.wait()
+            task.cancellation_event.set()
+        if self._snapshot_cancellation_event is not None:
+            self._snapshot_cancellation_event.set()
+        if self._level1_cancellation_event is not None:
+            self._level1_cancellation_event.set()
+        if self._validation_cancellation_event is not None:
+            self._validation_cancellation_event.set()
 
     def _on_extension_configure(self, series_key: str) -> None:
         """Open the config dialog for the extension owning series_key."""
@@ -2331,20 +2481,44 @@ class MainWindow(QMainWindow):
         """Persist and display a new watchlist entry."""
         self._cache.add_to_watchlist(symbol)
         self._watchlist.add_symbol(symbol)
+        self._watchlist_membership_revision += 1
         self._refresh_watchlist_snapshots()
 
     def _on_watchlist_remove(self, symbol: str) -> None:
         """Remove a watchlist entry from DB and UI."""
         self._cache.remove_from_watchlist(symbol)
         self._watchlist.remove_symbol(symbol)
+        self._watchlist_membership_revision += 1
+        self._refresh_watchlist_snapshots()
 
     def _on_watchlist_reorder(self, symbols: list[str]) -> None:
         """Persist reordered watchlist symbols."""
         self._cache.reorder_watchlist(symbols)
 
+    def _quote_route_identity(self, symbol: str) -> _QuoteRouteIdentity:
+        return _QuoteRouteIdentity(
+            self._route_for_symbol(symbol).connection,
+            0 if _is_yahoo_futures_symbol(symbol) else self._quote_route_generation,
+        )
+
+    def _make_snapshot_request(self) -> _SnapshotRequest:
+        return _SnapshotRequest(
+            self._watchlist_membership_revision,
+            tuple(
+                (symbol, self._quote_route_identity(symbol))
+                for symbol in sorted(self._watchlist.symbols())
+            ),
+        )
+
     def _refresh_watchlist_snapshots(self) -> None:
-        if self._snapshot_thread is not None and self._snapshot_thread.isRunning():
+        if self._closing or self._stopping_data_workers:
             return
+        request = self._make_snapshot_request()
+        if self._snapshot_thread is not None:
+            if request != self._snapshot_request:
+                self._snapshot_refresh_pending = True
+            return
+        self._snapshot_refresh_pending = False
         symbols = self._watchlist.symbols()
         if not symbols:
             return
@@ -2360,44 +2534,69 @@ class MainWindow(QMainWindow):
                 )
             else:
                 existing[1].append(symbol)
+        cancellation_event = threading.Event()
         worker = _SnapshotWorker(
             [
                 _SnapshotBatch(aggregator, batch_symbols)
                 for aggregator, batch_symbols in symbols_by_namespace.values()
-            ]
+            ],
+            request,
+            cancellation_event,
         )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_watchlist_snapshots)
         worker.error.connect(self._on_watchlist_snapshot_error)
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(self._on_snapshot_thread_finished)
 
+        self._snapshot_request = request
         self._snapshot_thread = thread
         self._snapshot_worker = worker
+        self._snapshot_cancellation_event = cancellation_event
         thread.start()
 
     def _on_watchlist_snapshots(
         self,
+        request: _SnapshotRequest,
         snapshots: dict[str, MarketSnapshot],
     ) -> None:
+        if (
+            self._closing
+            or self._stopping_data_workers
+            or request.membership_revision != self._watchlist_membership_revision
+        ):
+            return
         current_symbols = set(self._watchlist.symbols())
+        routes = dict(request.routes)
         self._watchlist.set_percent_changes(
             {
                 symbol: snapshot.change_percent
                 for symbol, snapshot in snapshots.items()
                 if symbol in current_symbols
+                and routes.get(symbol) == self._quote_route_identity(symbol)
             }
         )
 
     def _refresh_level1(self) -> None:
-        if self._level1_thread is not None and self._level1_thread.isRunning():
+        if self._closing or self._stopping_data_workers:
             return
-        if self._state.symbol is None:
-            return
-
         symbol = self._state.symbol
+        if symbol != self._level1_symbol:
+            self._level1_symbol = symbol
+            self._level1_symbol_generation += 1
+        if symbol is None:
+            return
+        request = _Level1Request(
+            symbol, self._level1_symbol_generation, self._quote_route_identity(symbol),
+        )
+        if self._level1_thread is not None:
+            if request != self._level1_request:
+                self._level1_refresh_pending = True
+            return
+        self._level1_refresh_pending = False
         route = self._route_for_symbol(symbol)
         now = datetime.now(tz=timezone.utc)
         last_attempt = self._asset_reference_refresh_attempts.get(symbol)
@@ -2409,35 +2608,141 @@ class MainWindow(QMainWindow):
         )
         if refresh_reference:
             self._asset_reference_refresh_attempts[symbol] = now
+        cancellation_event = threading.Event()
         worker = _Level1Worker(
             route.aggregator,
             self._yahoo_route.aggregator,
-            self._cache,
-            symbol,
+            self._db_path,
+            request,
             refresh_reference,
             now,
+            cancellation_event,
         )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_level1)
-        worker.finished.connect(thread.quit)
+        worker.error.connect(self._on_level1_error)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(self._on_level1_thread_finished)
 
+        self._level1_request = request
         self._level1_thread = thread
         self._level1_worker = worker
+        self._level1_cancellation_event = cancellation_event
         thread.start()
 
-    def _on_level1(self, quote: Level1Quote | None) -> None:
-        # A quote can arrive after the user has already switched symbols;
-        # only the active symbol's quote may reach the header.
-        if quote is None or quote.symbol != self._state.symbol:
+    def _is_current_level1_request(self, request: _Level1Request) -> bool:
+        return (
+            not self._closing
+            and not self._stopping_data_workers
+            and request.symbol == self._state.symbol
+            and request.symbol_generation == self._level1_symbol_generation
+            and request.route == self._quote_route_identity(request.symbol)
+        )
+
+    def _on_level1(self, request: _Level1Request, quote: Level1Quote | None) -> None:
+        if (
+            not self._is_current_level1_request(request)
+            or quote is None
+            or quote.symbol != request.symbol
+        ):
             return
         self._app_header.set_quote(quote)
 
-    def _on_watchlist_snapshot_error(self, message: str) -> None:
+    def _on_level1_error(self, request: _Level1Request, message: str) -> None:
+        if not self._is_current_level1_request(request):
+            return
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(f"Quote unavailable: {message}", 5000)
+
+    def _on_watchlist_snapshot_error(
+        self, request: _SnapshotRequest, message: str,
+    ) -> None:
+        if (
+            self._closing
+            or self._stopping_data_workers
+            or request != self._make_snapshot_request()
+        ):
+            return
         status_bar = self.statusBar()
         if status_bar is not None:
             status_bar.showMessage(f"Watchlist quotes unavailable: {message}", 5000)
+
+    def _on_snapshot_thread_finished(self) -> None:
+        thread = self._snapshot_thread
+        assert thread is not None
+        thread.deleteLater()
+        self._snapshot_thread = None
+        self._snapshot_worker = None
+        self._snapshot_request = None
+        self._snapshot_cancellation_event = None
+        if (
+            self._snapshot_refresh_pending
+            and not self._closing
+            and not self._stopping_data_workers
+        ):
+            self._refresh_watchlist_snapshots()
+        self._maybe_finalize_close()
+
+    def _on_level1_thread_finished(self) -> None:
+        thread = self._level1_thread
+        assert thread is not None
+        thread.deleteLater()
+        self._level1_thread = None
+        self._level1_worker = None
+        self._level1_request = None
+        self._level1_cancellation_event = None
+        if (
+            self._level1_refresh_pending
+            and not self._closing
+            and not self._stopping_data_workers
+        ):
+            self._refresh_level1()
+        self._maybe_finalize_close()
+
+    def _on_validation_thread_finished(self) -> None:
+        thread = self._validation_thread
+        if thread is None:
+            return
+        thread.deleteLater()
+        self._validation_thread = None
+        self._validation_worker = None
+        self._validation_cancellation_event = None
+        if self._closing or self._stopping_data_workers:
+            self._pending_route = None
+        self._maybe_finalize_close()
+
+    def _maybe_finalize_close(self) -> None:
+        if not self._closing or self._close_finalized or self._close_finalize_scheduled:
+            return
+        if (
+            self._chart_load_tasks
+            or self._snapshot_thread is not None
+            or self._level1_thread is not None
+            or self._validation_thread is not None
+        ):
+            return
+        self._close_finalize_scheduled = True
+        QTimer.singleShot(0, self._finalize_close)
+
+    def _finalize_close(self) -> None:
+        self._close_finalize_scheduled = False
+        if (
+            not self._closing
+            or self._close_finalized
+            or self._chart_load_tasks
+            or self._snapshot_thread is not None
+            or self._level1_thread is not None
+            or self._validation_thread is not None
+        ):
+            return
+        self._pending_route = None
+        self._cache.close()
+        self._close_finalized = True
+        self.close()
 
     def _on_add_extension(self) -> None:
         """
@@ -2513,13 +2818,24 @@ class MainWindow(QMainWindow):
         if self._drawing_preview_timer.isActive():
             self._drawing_preview_timer.stop()
 
-    def closeEvent(self, event: object) -> None:
-        """Clean up on close."""
-        if self._snapshot_timer.isActive():
-            self._snapshot_timer.stop()
+    def closeEvent(self, event: QCloseEvent | None) -> None:
+        if self._close_finalized:
+            super().closeEvent(event)
+            return
+        if event is not None:
+            event.ignore()
+        if self._closing:
+            return
+        self._closing = True
+        for widget in (
+            self._app_header,
+            self._watchlist,
+            self._symbol_bar,
+            self._chart,
+        ):
+            widget.setEnabled(False)
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage("Closing...")
         self._stop_data_workers()
-        if self._validation_thread and self._validation_thread.isRunning():
-            self._validation_thread.quit()
-            self._validation_thread.wait()
-        self._cache.close()
-        super().closeEvent(event)  # type: ignore[arg-type]
+        self._maybe_finalize_close()

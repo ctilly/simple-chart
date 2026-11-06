@@ -32,7 +32,8 @@ Use this checklist for complex work governed by `docs/agentic-workflow.md`.
   gate.
 - Give every delegated node the complete contract required by the workflow.
 - Keep parallel work read-only unless one explicit writer owns the workspace.
-- Give external reviewers only the approved bounded packet.
+- Give Claude a short brief and direct read-only source access through the native
+  CLI; exclude credentials/private data and do not create source packets or wrappers.
 
 ## Before writing
 

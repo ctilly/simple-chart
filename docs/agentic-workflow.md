@@ -1,9 +1,30 @@
 # SimpleChart Agentic Engineering Workflow
 
 Status: Approved
-Version: 1.1
+Version: 1.2
 Authority: Repository workflow supplement
 Applies to: Explicitly approved agentic and multi-agent SimpleChart work
+
+## Current collaboration direction (2026-11-05)
+
+The user explicitly authorized Claude Code to inspect repository source directly
+with read-only tools and asked to remove packet obfuscation and repeated consent
+gates. Codex owns implementation and adjudicates findings. Invoke the installed
+`claude` CLI directly with a short brief, related paths and test results; Claude
+reads source/tests as needed. Do not add a project wrapper, custom response schema,
+code-filled Markdown/JSON copies or per-review digest approval.
+Credentials, private databases, writes and shell access remain excluded.
+
+Routine calls and evidence-backed corrections proceed inside approved scope.
+Keep one concise project ledger and the review result. Re-review only substantive
+new changes or unresolved findings; verify editorial corrections locally.
+Material scope/product/security/dependency decisions and final acceptance retain
+their user gates. Completed reviews stay complete.
+
+The user explicitly authorizes cheaper subagents for suitable bounded work.
+Use narrow contexts and one writer at a time; Codex integrates their work and
+adjudicates Claude's findings. A failed required Claude review blocks advancement
+until the issue is resolved and the review completes; it is never skipped.
 
 ## 1. Purpose
 
@@ -198,7 +219,7 @@ Read-only responsibilities:
 
 Claude is an external, read-only review node.
 
-Claude receives a bounded review packet containing only approved material and:
+Claude receives a short review brief and direct read-only source access, and:
 
 - Reviews the design objective before implementation.
 - Challenges assumptions, non-goals, acceptance criteria, architecture, test
@@ -210,9 +231,11 @@ Claude receives a bounded review packet containing only approved material and:
 - Must not receive credentials, private databases, unrelated source, or
   unapproved sensitive material.
 
-If Claude is required by the approved graph but unavailable, the orchestrator
-must stop at the QC gate and ask the user whether to wait, retry, waive the
-requirement, or substitute another reviewer.
+If required Claude review is unavailable, failed or incomplete, stop before the
+next implementation slice. Diagnose and resolve the actual failure, then obtain
+a completed review before advancing. Never skip the gate or substitute an
+internal reviewer. Ask the user only for specific missing access or information
+that prevents resolution, not for routine permission to bypass the review.
 
 ### Verifier
 
@@ -324,7 +347,7 @@ No production or test code may be edited before the specification is approved.
 
 ## 8. Design QC requirements
 
-Both Codex QC and Claude QC receive the same design packet:
+Both Codex QC and Claude QC review the same specification and source references:
 
 - User objective
 - Relevant `AGENTS.md` constraints
@@ -477,7 +500,7 @@ Agents must use the narrowest tool appropriate to their node.
 - Destructive operations require explicit scope resolution and approval.
 - Dependencies require explicit user approval.
 - Credential values must never enter prompts, logs, source files,
-  configuration files, command arguments, test artifacts, or QC packets.
+  configuration files, command arguments, test artifacts, or review material.
 - Credential-related SimpleChart work must follow
   `docs/credential-security.md`.
 - Git and source-control operations remain the user's responsibility.
@@ -486,26 +509,17 @@ Agents must use the narrowest tool appropriate to their node.
 
 ## 12. Claude integration boundary
 
-Before Claude becomes an active graph node, a separate approved infrastructure
-task must define:
+The installed Claude Code CLI is the connection. Use its native first-party
+sign-in, read-only controls and response metadata as documented in
+`docs/claude-qc-integration.md` and `docs/skills/claude-collaboration.md`.
+Direct invocation and source inspection have been verified. Do not add a project
+launcher, packet protocol, custom output schema or response-validation layer.
 
-- Connection mechanism
-- Authentication mechanism
-- Data sent to Claude
-- Data excluded from Claude
-- Model selection
-- Review prompt and output schema
-- Timeout and retry behavior
-- Failure behavior
-- Logging and retention
-- User consent expectations
-- A harmless validation fixture
-
-Claude integration must not begin by embedding provider credentials in the
-SimpleChart repository.
-
-Until this connection is approved and verified, Claude remains a planned but
-unavailable graph node.
+Routine reviews of approved work have standing authorization. Give Claude a short
+brief and relevant source paths; exclude credentials, private databases and live
+provider data. Codex verifies native completion/model/tool status, adjudicates
+findings, and resolves failures before advancing. Do not blindly retry or retain
+temporary review files after acceptance unless the user requests retention.
 
 ## 13. Progress communication
 

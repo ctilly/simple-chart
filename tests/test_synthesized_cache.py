@@ -180,12 +180,197 @@ def test_partial_base_rebuild_preserves_older_usable_target(tmp_path: Path) -> N
     assert any(bar.timestamp == _SESSION_OPEN for bar in series.bars)
 
 
+def test_empty_materialization_preserves_existing_target_and_coverage(
+    tmp_path: Path,
+) -> None:
+    existing = _bar(_SESSION_OPEN, 50.0)
+    legacy_end = _SETTLED_END + timedelta(seconds=3)
+    legacy_coverage = (
+        int(_HISTORY_START.timestamp() * 1000),
+        int(legacy_end.timestamp() * 1000),
+    )
+    provider = _Provider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(_NAMESPACE, _SYMBOL, Timeframe.MIN65, [existing])
+        cache.extend_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            *legacy_coverage,
+        )
+        cache.extend_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN5,
+            int(_HISTORY_START.timestamp() * 1000),
+            int(_SETTLED_END.timestamp() * 1000),
+        )
+
+        series = _fetch_series(
+            Aggregator(provider),
+            cache,
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            _NOW,
+        )
+        target_bars = cache.get_bars(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            int(_HISTORY_START.timestamp() * 1000),
+            int(_NOW.timestamp() * 1000),
+        )
+        target_coverage = cache.get_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+        )
+
+    assert series.bars == [existing]
+    assert target_bars == [existing]
+    assert target_coverage == legacy_coverage
+
+
+def test_empty_materialization_without_target_keeps_target_absent(
+    tmp_path: Path,
+) -> None:
+    provider = _Provider()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.extend_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN5,
+            int(_HISTORY_START.timestamp() * 1000),
+            int(_SETTLED_END.timestamp() * 1000),
+        )
+
+        series = _fetch_series(
+            Aggregator(provider),
+            cache,
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            _NOW,
+        )
+        target_bars = cache.get_bars(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            int(_HISTORY_START.timestamp() * 1000),
+            int(_NOW.timestamp() * 1000),
+        )
+        target_coverage = cache.get_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+        )
+
+    assert series.bars == []
+    assert target_bars == []
+    assert target_coverage is None
+
+
+def test_materialization_uses_exact_rebuild_and_coverage_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _Provider()
+    replacements: list[tuple[int, int, int, int]] = []
+    original_replace = Cache.replace_materialized_bars
+
+    def record_replace(
+        cache: Cache,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        range_start_ms: int,
+        range_end_ms: int,
+        bars: list[Bar],
+        coverage_start_ms: int,
+        coverage_end_ms: int,
+    ) -> None:
+        replacements.append(
+            (range_start_ms, range_end_ms, coverage_start_ms, coverage_end_ms)
+        )
+        original_replace(
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            range_start_ms,
+            range_end_ms,
+            bars,
+            coverage_start_ms,
+            coverage_end_ms,
+        )
+
+    monkeypatch.setattr(Cache, "replace_materialized_bars", record_replace)
+    aligned_start_ms = int(_HISTORY_START.timestamp() * 1000)
+    expected_end_ms = int(_SETTLED_END.timestamp() * 1000)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        _seed_complete_base(cache)
+        series = _fetch_series(
+            Aggregator(provider),
+            cache,
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+            _NOW,
+        )
+        target_coverage = cache.get_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+        )
+
+    assert series.bars
+    assert replacements == [
+        (aligned_start_ms, expected_end_ms, aligned_start_ms, expected_end_ms),
+    ]
+    assert target_coverage == (aligned_start_ms, expected_end_ms)
+
+
 def test_stale_base_fetches_only_incremental_tail_then_materializes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prior_last = datetime(2026, 11, 3, 20, 55, tzinfo=UTC)
     prior_settled = datetime(2026, 11, 3, 21, 5, tzinfo=UTC)
     provider = _Provider(bars=_base_bars())
+    replacements: list[tuple[int, int, int, int]] = []
+    original_replace = Cache.replace_materialized_bars
+
+    def record_replace(
+        cache: Cache,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        range_start_ms: int,
+        range_end_ms: int,
+        bars: list[Bar],
+        coverage_start_ms: int,
+        coverage_end_ms: int,
+    ) -> None:
+        replacements.append(
+            (range_start_ms, range_end_ms, coverage_start_ms, coverage_end_ms)
+        )
+        original_replace(
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            range_start_ms,
+            range_end_ms,
+            bars,
+            coverage_start_ms,
+            coverage_end_ms,
+        )
+
+    monkeypatch.setattr(Cache, "replace_materialized_bars", record_replace)
 
     with Cache(str(tmp_path / "test.db")) as cache:
         cache.put_bars(
@@ -223,12 +408,29 @@ def test_stale_base_fetches_only_incremental_tail_then_materializes(
             Timeframe.MIN65,
             _NOW,
         )
+        target_coverage = cache.get_bar_fetch_coverage(
+            _NAMESPACE,
+            _SYMBOL,
+            Timeframe.MIN65,
+        )
 
     assert provider.calls == [
         (_SYMBOL, Timeframe.MIN5, prior_last, _NOW),
     ]
     assert series.bars[0].timestamp == prior_last
     assert any(bar.timestamp == _SESSION_OPEN for bar in series.bars)
+    assert replacements == [
+        (
+            int(datetime(2026, 11, 3, 5, 0, tzinfo=UTC).timestamp() * 1000),
+            int(_NOW.timestamp() * 1000),
+            int(_HISTORY_START.timestamp() * 1000),
+            int(_NOW.timestamp() * 1000),
+        ),
+    ]
+    assert target_coverage == (
+        int(_HISTORY_START.timestamp() * 1000),
+        int(_NOW.timestamp() * 1000),
+    )
 
 
 def test_settled_target_with_partial_base_does_not_fetch_unused_head(
