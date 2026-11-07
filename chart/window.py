@@ -43,6 +43,10 @@ from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
 from chart.viewport import install_extension_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
 from simplechart.api import ToolIconSpec
 
+# Bars shown by the initial view of a freshly loaded chart. The controller sizes
+# the recent-first history window from this.
+INITIAL_VISIBLE_BARS = 200
+
 
 class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
     """
@@ -130,7 +134,7 @@ class ChartWidget(QWidget):
         # widgets created after the call, but _master exists already.
         self._master.setBackground(BACKGROUND)
 
-        axes = fplt.create_plot_widget(self._master, rows=5, init_zoom_periods=200)
+        axes = fplt.create_plot_widget(self._master, rows=5, init_zoom_periods=INITIAL_VISIBLE_BARS)
 
         # create_plot_widget returns axes but does NOT add them to the master —
         # that step belongs to the caller (mirroring what create_plot() does).

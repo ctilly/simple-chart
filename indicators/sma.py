@@ -51,6 +51,10 @@ class SMAIndicator(ChartExtension):
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
         }
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # A window SMA is exact once its full window of bars is loaded.
+        return int(params["days"])
+
     def compute(
         self,
         series: OHLCVSeries,

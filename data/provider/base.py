@@ -18,10 +18,45 @@ aggregator layer handles those by requesting a smaller native timeframe
 and resampling. The provider only needs to handle what it can fetch directly.
 """
 
+import threading
 from abc import ABC, abstractmethod
-from datetime import datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
+
+# Set while the current context makes background (history backfill) requests;
+# holds that work's cancellation event. Unset means foreground.
+_BACKGROUND_CANCELLATION: ContextVar[threading.Event | None] = ContextVar(
+    "background_request_cancellation",
+    default=None,
+)
+
+
+class RequestCancelledError(Exception):
+    """A background request was cancelled before it was sent."""
+
+
+@contextmanager
+def background_requests(cancellation_event: threading.Event) -> Iterator[None]:
+    """
+    Mark provider requests made in this context as background work.
+
+    Providers that pace requests may admit foreground requests first and drop
+    a background request whose cancellation_event is set before it is sent.
+    """
+    token = _BACKGROUND_CANCELLATION.set(cancellation_event)
+    try:
+        yield
+    finally:
+        _BACKGROUND_CANCELLATION.reset(token)
+
+
+def background_request_cancellation() -> threading.Event | None:
+    """Cancellation event of the current background context; None if foreground."""
+    return _BACKGROUND_CANCELLATION.get()
 
 
 class UnsupportedTimeframeError(Exception):
@@ -115,6 +150,14 @@ class DataProvider(ABC):
     ) -> datetime:
         """Return the latest provider-safe endpoint for a history request."""
         return end
+
+    def history_page_span(self, timeframe: Timeframe) -> timedelta | None:
+        """
+        Return the date span one history request covers, when the provider
+        pages history by date. None means one request returns the whole range.
+        Callers fetch longer ranges as concurrent chunks of this span.
+        """
+        return None
 
     @abstractmethod
     def native_timeframes(self) -> list[Timeframe]:

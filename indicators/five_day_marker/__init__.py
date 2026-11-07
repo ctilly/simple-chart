@@ -33,6 +33,10 @@ class FiveDayMarkerIndicator(ChartExtension):
     def name(self) -> str:
         return MARKER_KEY
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Needs only the last five sessions, always inside the recent window.
+        return 0
+
     def label(self) -> str:
         return _LABEL
 

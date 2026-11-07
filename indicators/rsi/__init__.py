@@ -18,6 +18,8 @@ import numpy as np
 from indicators.rsi._kernel import rsi as _rsi_kernel
 from simplechart.api import ChartExtension, OHLCVSeries, bars_for_n_days, register_extension
 
+_CONVERGENCE_PERIODS = 8
+
 
 class RSIIndicator(ChartExtension):
 
@@ -37,6 +39,13 @@ class RSIIndicator(ChartExtension):
 
     def render_target(self) -> str:
         return "rsi"
+
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Wilder smoothing forgets its seed half as fast as an EMA (alpha = 1/p
+        # instead of 2/(p+1)); after this many periods the seed's weight is
+        # (1 - 1/p) ** (8p) ~= e**-8, so values on the visible bars match
+        # full-history values.
+        return int(params["days"]) * _CONVERGENCE_PERIODS
 
     def compute(
         self,

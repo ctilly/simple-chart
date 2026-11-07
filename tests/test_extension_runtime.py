@@ -20,6 +20,7 @@ from simplechart.api import (
     ChartExtensionAddMode,
     ChartExtensionMutation,
     ChartExtensionRender,
+    HitTestResult,
     VerticalLineRender,
     register_extension,
 )
@@ -640,3 +641,235 @@ def _anchor_payload(anchor: AnchorRecord) -> dict[str, object]:
         "line_style": anchor.line_style,
         "show_anchor": anchor.show_anchor,
     }
+
+
+class FullHistoryTool(ChartExtension):
+    """Toolbar drawing that always hits; requires full history by default."""
+
+    def name(self) -> str:
+        return "test_full_history_tool"
+
+    def label(self) -> str:
+        return "Test Full History Tool"
+
+    def default_params(self) -> dict[str, Any]:
+        return {}
+
+    def add_mode(self) -> ChartExtensionAddMode:
+        return ChartExtensionAddMode.TOOLBAR
+
+    def compute(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+    ) -> dict[str, np.ndarray]:
+        return {}
+
+    def render(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+    ) -> ChartExtensionRender:
+        return ChartExtensionRender(
+            vertical_lines=[
+                VerticalLineRender(
+                    key="test_full_history_line",
+                    x_index=0.0,
+                    label="Test",
+                    color="#ffffff",
+                    line_width=1.0,
+                )
+            ]
+        )
+
+    def hit_test(
+        self,
+        series: OHLCVSeries,
+        params: dict[str, Any],
+        event: ChartEvent,
+        visible_keys: set[str],
+    ) -> HitTestResult | None:
+        if "test_full_history_line" not in visible_keys:
+            return None
+        return HitTestResult(self.name(), "test_full_history_line")
+
+
+register_extension(FullHistoryTool)
+
+
+class InterimSegmentIndicator(SegmentOnlyIndicator):
+    """Opts out of full history, so it renders while history loads."""
+
+    def name(self) -> str:
+        return "test_interim_segment"
+
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        return 0
+
+
+register_extension(InterimSegmentIndicator)
+
+
+def test_interim_render_skips_full_history_extensions_without_pruning_state(
+    tmp_path: Path,
+) -> None:
+    state = State(symbol="SPY")
+    state.extensions = [
+        ChartExtensionState(
+            name="sma",
+            params={"days": 2, "color": "#ffffff"},
+            series_keys=["sma_2"],
+            series_visibility={"sma_2": False},
+        ),
+        ChartExtensionState(name="test_segment_only", params={}),
+        ChartExtensionState(name="test_interim_segment", params={}),
+    ]
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        runtime = _runtime(state, cache)
+        interim = runtime.render_all(_series(), history_complete=False)
+        interim_sma = state.extensions[0]
+        # Default (unknown plugin): deferred. Explicit opt-out: shown.
+        assert [render_pass.state.name for render_pass in interim] == [
+            "test_interim_segment"
+        ]
+        assert interim_sma.series_keys == ["sma_2"]
+        assert interim_sma.series_visibility == {"sma_2": False}
+
+        complete = runtime.render_all(_series())
+
+    assert [render_pass.state.name for render_pass in complete] == [
+        "sma",
+        "test_segment_only",
+        "test_interim_segment",
+    ]
+    assert state.extensions[0].series_visibility == {"sma_2": False}
+
+
+def test_deferred_drawing_is_not_hit_by_drag_or_context_menu(
+    tmp_path: Path,
+) -> None:
+    state = State(symbol="SPY")
+    state.extensions = [ChartExtensionState(name="test_full_history_tool", params={})]
+    series = _series()
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        runtime = _runtime(state, cache)
+        runtime.render_all(series)
+        event = runtime.chart_event(series, 0.0, 100.0)
+        assert runtime.drawing_hit_test(series, event) is not None
+
+        runtime.render_all(series, history_complete=False)
+        assert runtime.drawing_hit_test(series, event) is None
+        assert not runtime.begin_drag(series, event)
+
+        runtime.render_all(series)
+        assert runtime.drawing_hit_test(series, event) is not None
+        assert runtime.begin_drag(series, event)
+
+
+def test_builtin_extensions_declare_interim_history_needs() -> None:
+    import indicators.avwap  # noqa: F401
+    import indicators.ema  # noqa: F401
+    import indicators.five_day_marker  # noqa: F401
+    import indicators.pivot_points  # noqa: F401
+    import indicators.rsi  # noqa: F401
+    import tools.erase  # noqa: F401
+    import tools.fib_retracement  # noqa: F401
+    import tools.horizontal_line  # noqa: F401
+    import tools.poly_line  # noqa: F401
+    import tools.trend_line  # noqa: F401
+    import tools.vertical_line  # noqa: F401
+    from simplechart.api import get_extension
+
+    days = {"days": 20}
+    expected: dict[str, int | None] = {
+        "pivot_points": 0, "five_day_marker": 0, "horizontal_line": 0,
+        "fib_retracement": 0, "erase": 0, "avwap": 0,
+        "sma": 20, "ema": 80, "rsi": 160,
+        "trend_line": None, "poly_line": None, "vertical_line": None,
+    }
+
+    for name, lookback in expected.items():
+        assert get_extension(name).history_lookback_days(days) == lookback, name
+
+
+def _intraday_series(count: int) -> OHLCVSeries:
+    start = datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc)
+    bars = [
+        Bar(
+            timestamp=start + timedelta(minutes=5 * i),
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.0 + (i % 7),
+            volume=1_000,
+        )
+        for i in range(count)
+    ]
+    return OHLCVSeries(symbol="SPY", timeframe=Timeframe.MIN5, bars=bars)
+
+
+def test_interim_render_shows_extensions_whose_lookback_is_loaded(
+    tmp_path: Path,
+) -> None:
+    # One 5m session is 78 bars; the initial view is 200 bars. 300 bars cover
+    # a 1-day lookback (278) but not a 2-day lookback (356).
+    series = _intraday_series(300)
+    state = State(symbol="SPY")
+    state.extensions = [
+        ChartExtensionState(name="sma", params={"days": 1, "color": "#ffffff"}),
+        ChartExtensionState(name="sma", params={"days": 2, "color": "#ffffff"}),
+    ]
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        runtime = _runtime(state, cache)
+        interim = runtime.render_all(series, history_complete=False)
+
+        assert [p.state.params["days"] for p in interim] == [1]
+        pending = runtime.pending_history_start_ms
+        first_ms = int(series.bars[0].timestamp.timestamp() * 1000)
+        assert pending is not None and pending < first_ms
+
+        runtime.render_all(series)
+        assert runtime.pending_history_start_ms is None
+
+
+def test_interim_avwap_omits_unloaded_anchors_and_keeps_their_visibility(
+    tmp_path: Path,
+) -> None:
+    series = _intraday_series(300)
+    first_ms = int(series.bars[0].timestamp.timestamp() * 1000)
+    hour_ms = 3_600_000
+    anchors = [
+        AnchorRecord("SPY", first_ms + hour_ms, "loaded", "#ffffff", anchor_id=1),
+        AnchorRecord("SPY", first_ms - 2 * hour_ms, "older", "#ffffff", anchor_id=2),
+        AnchorRecord("SPY", first_ms - 9 * hour_ms, "oldest", "#ffffff", anchor_id=3),
+    ]
+    state = State(symbol="SPY")
+    state.extensions = [
+        ChartExtensionState(
+            name="avwap",
+            params={},
+            series_visibility={"avwap_anchor_2": False},
+        )
+    ]
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
+        store.restore_anchors(anchors)
+        runtime = _runtime(state, cache, store)
+        runtime.render_all(series, history_complete=False)
+        avwap = state.extensions[0]
+
+        assert avwap.series_keys == ["avwap_anchor_1"]
+        assert avwap.series_visibility == {"avwap_anchor_2": False}
+        # The newest omitted anchor is the next one history must reach.
+        assert runtime.pending_history_start_ms == first_ms - 2 * hour_ms
+
+        runtime.render_all(series)
+        assert avwap.series_keys == [
+            "avwap_anchor_1", "avwap_anchor_2", "avwap_anchor_3",
+        ]
+        assert avwap.series_visibility == {"avwap_anchor_2": False}
+        assert runtime.pending_history_start_ms is None

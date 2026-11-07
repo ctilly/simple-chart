@@ -26,7 +26,7 @@ Grouping strategy:
     volume = sum of all volumes
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, UnsupportedTimeframeError
@@ -122,6 +122,9 @@ class Aggregator:
             self.native_timeframe(timeframe),
             end,
         )
+
+    def history_page_span(self, timeframe: Timeframe) -> timedelta | None:
+        return self._provider.history_page_span(self.native_timeframe(timeframe))
 
     def native_timeframe(self, timeframe: Timeframe) -> Timeframe:
         available = self._provider.native_timeframes()

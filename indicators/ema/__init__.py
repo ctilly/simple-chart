@@ -30,6 +30,7 @@ from simplechart.api import (
 )
 
 _ET = ZoneInfo("America/New_York")
+_CONVERGENCE_PERIODS = 4
 
 
 class EMAIndicator(ChartExtension):
@@ -47,6 +48,12 @@ class EMAIndicator(ChartExtension):
             "line_width": 1.0,
             "line_style": ChoiceParam("solid", LINE_STYLE_OPTIONS),
         }
+
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # The recurrence never fully forgets its seed; after this many periods
+        # the seed's weight is (1 - 2 / (p + 1)) ** (4p) ~= e**-8, so values on
+        # the visible bars match full-history values.
+        return int(params["days"]) * _CONVERGENCE_PERIODS
 
     def compute(
         self,

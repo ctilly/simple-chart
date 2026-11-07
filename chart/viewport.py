@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import types
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Protocol, cast
 from weakref import WeakKeyDictionary
@@ -180,6 +180,22 @@ def snapshot_viewports(axes: list[object]) -> ViewportSnapshot:
             )
         )
     return ViewportSnapshot(states=states)
+
+
+def shift_viewports(snapshot: ViewportSnapshot, x_shift: float) -> ViewportSnapshot:
+    """Move a snapshot right by x_shift bars, e.g. after older bars are prepended."""
+    return ViewportSnapshot(
+        states=[
+            replace(
+                state,
+                left=state.left + x_shift,
+                right=state.right + x_shift,
+                init_x0=None if state.init_x0 is None else state.init_x0 + x_shift,
+                init_x1=None if state.init_x1 is None else state.init_x1 + x_shift,
+            )
+            for state in snapshot.states
+        ]
+    )
 
 
 def restore_viewports(snapshot: ViewportSnapshot) -> None:

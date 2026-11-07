@@ -32,11 +32,18 @@ Initial workspace extension set:
   a session. In a future version this will be persisted to the config.
 """
 
+import bisect
+import contextvars
 import copy
+import math
+import os
 import re
 import threading
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+import time
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -59,6 +66,7 @@ from app.dialogs import show_information, show_warning
 from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
 from app.extension_store import ChartExtensionStore
 from app.header_bar import AppHeader
+from app.load_timing import LoadTimingLog
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
 from app.watchlist import WatchlistWidget
@@ -67,9 +75,10 @@ from app.window_chrome import (
     WindowResizeController,
     is_wayland_platform,
 )
-from chart.window import ChartWidget
+from chart.window import INITIAL_VISIBLE_BARS, ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
+from data.calendar import bars_for_n_days
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.session import (
     exchange_day_start as _exchange_day_start,
@@ -85,7 +94,12 @@ from data.provider import (
     create_provider,
     provider_availability,
 )
-from data.provider.base import DataProvider, HistoryUnavailableError
+from data.provider.base import (
+    DataProvider,
+    HistoryUnavailableError,
+    RequestCancelledError,
+    background_requests,
+)
 from data.provider.config import ProviderConnection, YFINANCE_CONNECTION_ID
 from data.provider.credentials import (
     CredentialStore,
@@ -134,6 +148,18 @@ _SNAPSHOT_REFRESH_MS = 60_000
 _DRAWING_PREVIEW_FRAME_MS = 16
 _CHART_LOAD_DEBOUNCE_MS = 100
 _MAX_ACTIVE_CHART_LOADS = 2
+# Concurrent history chunk requests per range fetch. Also the bound on chunks
+# dispatched ahead of the committed run, so at most this many minus one
+# completed chunks can be lost to a cancellation or failure.
+_HISTORY_FETCH_WORKERS = 4
+# Upper bound on the first fetch of a two-phase load when it is widened to
+# cover indicator lookbacks; longer lookbacks render as backfill reaches them.
+# 125 days covers a 50-day SMA on every intraday timeframe: 65m needs 34
+# sessions for the 200-bar initial view plus 50 for the SMA (~125 calendar
+# days with holiday margin), fetched as concurrent foreground requests.
+_MAX_RECENT_WINDOW_DAYS = 125
+# Minimum spacing between interim re-renders while backfill unlocks content.
+_HISTORY_REFRESH_INTERVAL_MS = 1000
 _ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
 _ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
 _REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
@@ -161,6 +187,78 @@ def _history_end(
     end: datetime,
 ) -> datetime:
     return aggregator.latest_history_end(timeframe, end)
+
+
+def _recent_history_start(
+    timeframe: Timeframe,
+    history_start: datetime,
+    end: datetime,
+    lookback_days: int = 0,
+) -> datetime:
+    """
+    Start of the recent window that fills the chart's initial view.
+
+    Enough calendar days for INITIAL_VISIBLE_BARS bars of the timeframe plus
+    lookback_days trading days before them (so indicators with that lookback
+    are exact on the initial view), plus a week of holiday margin. Widening
+    for the lookback stops at _MAX_RECENT_WINDOW_DAYS. Aligned to a session
+    boundary so synthesized bars never start mid-session.
+    """
+    view_days = math.ceil(INITIAL_VISIBLE_BARS / bars_for_n_days(1, timeframe))
+    view_calendar_days = math.ceil(view_days * 7 / 5) + 7
+    calendar_days = max(
+        view_calendar_days,
+        min(
+            math.ceil((view_days + lookback_days) * 7 / 5) + 7,
+            _MAX_RECENT_WINDOW_DAYS,
+        ),
+    )
+    return max(
+        history_start,
+        _exchange_day_start(end - timedelta(days=calendar_days)),
+    )
+
+
+def _needs_history_backfill(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    history_start: datetime,
+    recent_start: datetime,
+) -> bool:
+    """
+    True when a load should render its recent window before fetching older
+    history: the provider pages history by date and the fetched timeframe's
+    cache does not reach the history start. Legacy or already-complete
+    synthesized targets stay single-phase; their remaining work is local.
+    """
+    if not timeframe.is_intraday or recent_start <= history_start:
+        return False
+    if aggregator.history_page_span(timeframe) is None:
+        return False
+    history_start_ms = int(history_start.timestamp() * 1000)
+    fetched_timeframe = aggregator.native_timeframe(timeframe)
+    coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        fetched_timeframe,
+    )
+    if coverage is not None and coverage[0] <= history_start_ms:
+        return False
+    if fetched_timeframe != timeframe:
+        target_coverage = cache.get_bar_fetch_coverage(
+            cache_namespace,
+            symbol,
+            timeframe,
+        )
+        if target_coverage is not None and (
+            target_coverage[0] <= history_start_ms
+            or _is_legacy_target_coverage(aggregator, timeframe, target_coverage)
+        ):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -226,6 +324,11 @@ class _ChartLoadRequest:
     symbol: str
     timeframe: Timeframe
     connection: ProviderConnection
+    # time.monotonic() at the user action; only for the opt-in timing log.
+    requested_at: float = field(default=0.0, compare=False)
+    # Longest history lookback (trading days) among the chart's extensions;
+    # widens the first fetch of a two-phase load.
+    lookback_days: int = field(default=0, compare=False)
 
     @property
     def cache_namespace(self) -> str:
@@ -405,6 +508,10 @@ class _FetchWorker(QObject):
     path so the controller can stop the thread and release task ownership.
     """
 
+    recent_ready: pyqtSignal = pyqtSignal(object, object)
+    # (request, earliest contiguous cached bar timestamp in UTC ms) after each
+    # committed backfill chunk; carries no bars.
+    history_progress: pyqtSignal = pyqtSignal(object, int)
     finished: pyqtSignal = pyqtSignal(object, object)
     error: pyqtSignal = pyqtSignal(object, str)
     completed: pyqtSignal = pyqtSignal()
@@ -415,12 +522,30 @@ class _FetchWorker(QObject):
         credential_store: CredentialStore,
         request: _ChartLoadRequest,
         cancellation_event: threading.Event | None = None,
+        load_timing: LoadTimingLog | None = None,
     ) -> None:
         super().__init__()
         self._db_path = db_path
         self._credential_store = credential_store
         self._request = request
         self._cancellation_event = cancellation_event or threading.Event()
+        self._load_timing = load_timing or LoadTimingLog(None)
+
+    def _record_daily_done(self) -> None:
+        self._record_step("daily refs done")
+
+    def _emit_history_progress(self, earliest_ms: int) -> None:
+        if not self._cancellation_event.is_set():
+            self.history_progress.emit(self._request, earliest_ms)
+
+    def _record_step(self, step: str) -> None:
+        self._load_timing.record(
+            self._request.generation,
+            self._request.symbol,
+            self._request.timeframe.value,
+            step,
+            self._request.requested_at,
+        )
 
     def run(self) -> None:
         """
@@ -428,26 +553,88 @@ class _FetchWorker(QObject):
 
         Intraday loads also refresh daily bars so day-based indicators have
         reference data without requiring the user to visit the daily chart.
+
+        When older history is missing from a date-paged provider, the recent
+        window that fills the initial view (widened for the chart's indicator
+        lookbacks) is fetched and emitted through recent_ready first;
+        history_progress reports each committed older chunk, and the full
+        history window is emitted through finished.
         """
         try:
+            self._record_step("worker started")
             _check_chart_load_cancelled(self._cancellation_event)
             provider = create_provider(
                 self._request.connection,
                 self._credential_store,
             )
+            self._record_step("provider ready")
             aggregator = Aggregator(provider)
             now = datetime.now(tz=timezone.utc)
+            symbol = self._request.symbol
+            timeframe = self._request.timeframe
+            cache_namespace = self._request.cache_namespace
             with Cache(self._db_path) as cache:
-                series = _fetch_series_with_references(
+                history_end = _history_end(timeframe, aggregator, now)
+                history_start = _history_start(timeframe, aggregator, history_end)
+                recent_start = _recent_history_start(
+                    timeframe,
+                    history_start,
+                    history_end,
+                    self._request.lookback_days,
+                )
+                if _needs_history_backfill(
                     aggregator,
                     cache,
-                    self._request.cache_namespace,
-                    self._request.symbol,
-                    self._request.timeframe,
-                    now,
-                    cancellation_event=self._cancellation_event,
-                )
+                    cache_namespace,
+                    symbol,
+                    timeframe,
+                    history_start,
+                    recent_start,
+                ):
+                    recent = _fetch_series_with_concurrent_references(
+                        aggregator,
+                        self._db_path,
+                        cache,
+                        cache_namespace,
+                        symbol,
+                        timeframe,
+                        now,
+                        history_start=recent_start,
+                        cancellation_event=self._cancellation_event,
+                        on_references_done=self._record_daily_done,
+                    )
+                    _check_chart_load_cancelled(self._cancellation_event)
+                    self._record_step("recent fetched")
+                    if recent.bars:
+                        self.recent_ready.emit(self._request, recent)
+                    # Older history yields to foreground requests (other chart
+                    # loads, quotes) and stops sending once cancelled.
+                    with background_requests(self._cancellation_event):
+                        series = _fetch_series(
+                            aggregator,
+                            cache,
+                            cache_namespace,
+                            symbol,
+                            timeframe,
+                            now,
+                            history_start=history_start,
+                            cancellation_event=self._cancellation_event,
+                            on_history_progress=self._emit_history_progress,
+                        )
+                else:
+                    series = _fetch_series_with_concurrent_references(
+                        aggregator,
+                        self._db_path,
+                        cache,
+                        cache_namespace,
+                        symbol,
+                        timeframe,
+                        now,
+                        cancellation_event=self._cancellation_event,
+                        on_references_done=self._record_daily_done,
+                    )
             _check_chart_load_cancelled(self._cancellation_event)
+            self._record_step("history fetched")
             self.finished.emit(self._request, series)
         except _ChartLoadCancelled:
             pass
@@ -671,21 +858,18 @@ def _fetch_series_with_references(
     timeframe: Timeframe,
     now: datetime,
     *,
+    history_start: datetime | None = None,
     cancellation_event: threading.Event | None = None,
 ) -> OHLCVSeries:
     _check_chart_load_cancelled(cancellation_event)
     if timeframe.is_intraday:
-        daily_end = _history_end(Timeframe.DAILY, aggregator, now)
-        daily_start = _history_start(Timeframe.DAILY, aggregator, daily_end)
-        _fetch_and_cache_bars(
+        _refresh_daily_references(
             aggregator,
             cache,
             cache_namespace,
             symbol,
-            Timeframe.DAILY,
-            daily_start,
-            daily_end,
-            cancellation_event=cancellation_event,
+            now,
+            cancellation_event,
         )
         _check_chart_load_cancelled(cancellation_event)
     return _fetch_series(
@@ -695,8 +879,101 @@ def _fetch_series_with_references(
         symbol,
         timeframe,
         now,
+        history_start=history_start,
         cancellation_event=cancellation_event,
     )
+
+
+def _refresh_daily_references(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    now: datetime,
+    cancellation_event: threading.Event | None,
+) -> None:
+    daily_end = _history_end(Timeframe.DAILY, aggregator, now)
+    daily_start = _history_start(Timeframe.DAILY, aggregator, daily_end)
+    _fetch_and_cache_bars(
+        aggregator,
+        cache,
+        cache_namespace,
+        symbol,
+        Timeframe.DAILY,
+        daily_start,
+        daily_end,
+        cancellation_event=cancellation_event,
+    )
+
+
+def _fetch_series_with_concurrent_references(
+    aggregator: Aggregator,
+    db_path: str,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    now: datetime,
+    *,
+    history_start: datetime | None = None,
+    cancellation_event: threading.Event | None = None,
+    on_references_done: Callable[[], None] | None = None,
+) -> OHLCVSeries:
+    """
+    Like _fetch_series_with_references, but the daily reference refresh runs
+    concurrently with the intraday fetch so the chart waits for the slower of
+    the two instead of their sum.
+
+    The reference thread owns its own Cache connection. Both branches finish
+    before this returns or raises, so daily references are committed before
+    any series is delivered. When both fail, the intraday error is raised;
+    only one error ever leaves this function.
+    """
+    _check_chart_load_cancelled(cancellation_event)
+    if not timeframe.is_intraday:
+        return _fetch_series(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            now,
+            history_start=history_start,
+            cancellation_event=cancellation_event,
+        )
+
+    def refresh_references() -> None:
+        with Cache(db_path) as reference_cache:
+            _refresh_daily_references(
+                aggregator,
+                reference_cache,
+                cache_namespace,
+                symbol,
+                now,
+                cancellation_event,
+            )
+        if on_references_done is not None:
+            on_references_done()
+
+    # Leaving the with-block waits for the reference thread on every path.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        references = executor.submit(
+            contextvars.copy_context().run,
+            refresh_references,
+        )
+        series = _fetch_series(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            now,
+            history_start=history_start,
+            cancellation_event=cancellation_event,
+        )
+    references.result()
+    _check_chart_load_cancelled(cancellation_event)
+    return series
 
 
 def _fetch_series(
@@ -707,11 +984,14 @@ def _fetch_series(
     timeframe: Timeframe,
     now: datetime,
     *,
+    history_start: datetime | None = None,
     cancellation_event: threading.Event | None = None,
+    on_history_progress: Callable[[int], None] | None = None,
 ) -> OHLCVSeries:
     _check_chart_load_cancelled(cancellation_event)
     history_end = _history_end(timeframe, aggregator, now)
-    history_start = _history_start(timeframe, aggregator, history_end)
+    if history_start is None:
+        history_start = _history_start(timeframe, aggregator, history_end)
     if aggregator.native_timeframe(timeframe) != timeframe:
         return _fetch_synthesized_series(
             aggregator,
@@ -732,6 +1012,7 @@ def _fetch_series(
         history_start,
         history_end,
         cancellation_event=cancellation_event,
+        on_history_progress=on_history_progress,
     )
     _check_chart_load_cancelled(cancellation_event)
     bars = cache.get_bars(
@@ -1008,6 +1289,7 @@ def _fetch_and_cache_bars(
     now: datetime,
     *,
     cancellation_event: threading.Event | None = None,
+    on_history_progress: Callable[[int], None] | None = None,
 ) -> None:
     _check_chart_load_cancelled(cancellation_event)
     if aggregator.native_timeframe(timeframe) != timeframe:
@@ -1049,6 +1331,7 @@ def _fetch_and_cache_bars(
                 now,
                 coverage_end=completed_end,
                 cancellation_event=cancellation_event,
+                on_history_progress=on_history_progress,
             )
             return
         _fetch_bar_range(
@@ -1062,6 +1345,7 @@ def _fetch_and_cache_bars(
             coverage_end=completed_end,
             replace_coverage=True,
             cancellation_event=cancellation_event,
+            on_history_progress=on_history_progress,
         )
         return
 
@@ -1099,6 +1383,7 @@ def _fetch_and_cache_bars(
             coverage_end=completed_end,
             replace_coverage=True,
             cancellation_event=cancellation_event,
+            on_history_progress=on_history_progress,
         )
         return
     if requested_start_ms < coverage_start_ms:
@@ -1115,6 +1400,7 @@ def _fetch_and_cache_bars(
                 tz=timezone.utc,
             ),
             cancellation_event=cancellation_event,
+            on_history_progress=on_history_progress,
         )
     if (
         requested_end_ms > coverage_end_ms
@@ -1174,8 +1460,24 @@ def _fetch_bar_range(
     replace_coverage: bool = False,
     require_bars: bool = False,
     cancellation_event: threading.Event | None = None,
+    on_history_progress: Callable[[int], None] | None = None,
 ) -> None:
     _check_chart_load_cancelled(cancellation_event)
+    page_span = aggregator.history_page_span(timeframe)
+    if not require_bars and page_span is not None and end - start > page_span:
+        _fetch_bar_range_chunked(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            _history_chunks(start, end, page_span),
+            int((end if coverage_end is None else coverage_end).timestamp() * 1000),
+            replace_coverage,
+            cancellation_event,
+            on_history_progress,
+        )
+        return
     new_bars = aggregator.fetch_bars(symbol, timeframe, start, end)
     if new_bars:
         cache.put_bars(cache_namespace, symbol, timeframe, new_bars)
@@ -1193,6 +1495,120 @@ def _fetch_bar_range(
         int(start.timestamp() * 1000),
         int((end if coverage_end is None else coverage_end).timestamp() * 1000),
     )
+
+
+def _history_chunks(
+    start: datetime,
+    end: datetime,
+    span: timedelta,
+) -> list[tuple[datetime, datetime]]:
+    """Split [start, end] into page-span chunks, newest first."""
+    chunks: list[tuple[datetime, datetime]] = []
+    chunk_end = end
+    while chunk_end > start:
+        chunk_start = max(start, chunk_end - span)
+        chunks.append((chunk_start, chunk_end))
+        chunk_end = chunk_start
+    return chunks
+
+
+def _fetch_bar_range_chunked(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    chunks: list[tuple[datetime, datetime]],
+    coverage_end_ms: int,
+    replace_coverage: bool,
+    cancellation_event: threading.Event | None,
+    on_progress: Callable[[int], None] | None = None,
+) -> None:
+    """
+    Fetch newest-first chunks concurrently and commit them in order.
+
+    Pool threads only call the provider; this thread owns the cache. Coverage
+    grows only over the contiguous run of completed chunks that ends at the
+    range end, so it never claims an unfetched gap. On failure or cancellation
+    the run completed so far stays committed and the next load resumes from it.
+    on_progress, when given, receives the start (UTC ms) of the contiguous
+    committed run after each commit that extends it.
+    """
+    results: dict[int, list[Bar]] = {}
+    in_flight: dict[Future[list[Bar]], int] = {}
+    committed = 0
+    next_chunk = 0
+    replace_next = replace_coverage
+    failure: Exception | None = None
+
+    def commit_contiguous() -> None:
+        nonlocal committed, replace_next
+        while committed in results:
+            bars = results.pop(committed)
+            if bars:
+                cache.put_bars(cache_namespace, symbol, timeframe, bars)
+            coverage_writer = (
+                cache.replace_bar_fetch_coverage
+                if replace_next
+                else cache.extend_bar_fetch_coverage
+            )
+            chunk_start_ms = int(chunks[committed][0].timestamp() * 1000)
+            coverage_writer(
+                cache_namespace,
+                symbol,
+                timeframe,
+                chunk_start_ms,
+                coverage_end_ms,
+            )
+            replace_next = False
+            committed += 1
+            if on_progress is not None:
+                on_progress(chunk_start_ms)
+
+    def is_cancelled() -> bool:
+        return cancellation_event is not None and cancellation_event.is_set()
+
+    executor = ThreadPoolExecutor(max_workers=_HISTORY_FETCH_WORKERS)
+    try:
+        while committed < len(chunks) and not is_cancelled():
+            while (
+                next_chunk < len(chunks)
+                and next_chunk - committed < _HISTORY_FETCH_WORKERS
+            ):
+                chunk_start, chunk_end = chunks[next_chunk]
+                # Each task runs in a copy of this context so the caller's
+                # request priority (foreground or background) applies to it.
+                future = executor.submit(
+                    contextvars.copy_context().run,
+                    aggregator.fetch_bars,
+                    symbol,
+                    timeframe,
+                    chunk_start,
+                    chunk_end,
+                )
+                in_flight[future] = next_chunk
+                next_chunk += 1
+            done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for future in done:
+                index = in_flight.pop(future)
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    failure = exc
+            if failure is not None:
+                break
+            commit_contiguous()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    for future, index in in_flight.items():
+        if not future.cancelled() and future.exception() is None:
+            results[index] = future.result()
+    commit_contiguous()
+    if failure is not None and not (
+        isinstance(failure, RequestCancelledError) and is_cancelled()
+    ):
+        raise failure
+    _check_chart_load_cancelled(cancellation_event)
 
 
 class MainWindow(QMainWindow):
@@ -1228,6 +1644,10 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         self._db_path = db_path
         self._cache = Cache(db_path)
+        self._load_timing = LoadTimingLog.from_environment(
+            Path(db_path).parent / "diagnostics",
+            os.environ,
+        )
         connection_id = (
             provider_connection_id
             if provider_connection_id is not None
@@ -1368,6 +1788,25 @@ class MainWindow(QMainWindow):
         self._terminal_chart_generation: int | None = None
         self._pending_chart_load: _ChartLoadRequest | None = None
         self._chart_load_tasks: dict[int, _ChartLoadTask] = {}
+        # Request whose recent window is displayed while its older history
+        # loads; None once the displayed series covers the full window.
+        self._partial_history_request: _ChartLoadRequest | None = None
+        # Whether the series on screen covers the full history window. Changes
+        # only when new bars are drawn, so a pending replacement load cannot
+        # make a displayed recent window look complete.
+        self._displayed_history_complete = True
+        # Full-history result that arrived during a drag or drawing session.
+        self._held_history_merge: tuple[_ChartLoadRequest, OHLCVSeries] | None = None
+        # Interim re-render while backfill unlocks deferred extension content:
+        # the start (UTC ms) of the latest committed contiguous history, a
+        # timer spacing re-renders, and whether one waits for an interaction.
+        self._history_progress_ms: int | None = None
+        self._last_history_refresh = 0.0
+        self._history_refresh_deferred = False
+        self._history_refresh_timer = QTimer(self)
+        self._history_refresh_timer.setSingleShot(True)
+        self._history_refresh_timer.timeout.connect(self._refresh_partial_history)
+        self._quote_refreshed_generation: int | None = None
         self._chart_load_timer = QTimer(self)
         self._chart_load_timer.setSingleShot(True)
         self._chart_load_timer.setInterval(_CHART_LOAD_DEBOUNCE_MS)
@@ -1405,6 +1844,7 @@ class MainWindow(QMainWindow):
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
         self._current_series: OHLCVSeries | None = None
         self._bar_correction_notice: str | None = None
+        self._history_status_message: str | None = None
 
         # The symbol for which self._state.extensions currently holds state.
         # Used to save/restore per-symbol extension state on symbol switch.
@@ -1450,11 +1890,13 @@ class MainWindow(QMainWindow):
         """
         if self._stopping_data_workers or self._state.symbol is None:
             return
+        requested_at = time.monotonic()
 
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
-        if self._level1_symbol != self._state.symbol:
+        quote_refreshed = self._level1_symbol != self._state.symbol
+        if quote_refreshed:
             self._refresh_level1()
         route = self._route_for_symbol(self._state.symbol)
         self._symbol_bar.set_data_source(route.display_name, "pending")
@@ -1463,11 +1905,22 @@ class MainWindow(QMainWindow):
             self._state.symbol,
             self._state.timeframe,
             route.connection,
+            requested_at,
         )
         for task in self._chart_load_tasks.values():
             task.cancellation_event.set()
+        self._record_load_step(request, "load requested")
+        # A symbol change already requested a fresh quote; the chart render
+        # need not request another one for this load.
+        self._quote_refreshed_generation = (
+            request.generation if quote_refreshed else None
+        )
         self._current_chart_request = request
         self._terminal_chart_generation = None
+        self._partial_history_request = None
+        self._held_history_merge = None
+        self._reset_history_refresh()
+        self._clear_history_status_message()
         self._pending_chart_load = request
         self._chart_load_timer.start()
 
@@ -1476,6 +1929,7 @@ class MainWindow(QMainWindow):
         symbol: str,
         timeframe: Timeframe,
         connection: ProviderConnection,
+        requested_at: float = 0.0,
     ) -> _ChartLoadRequest:
         self._chart_load_generation += 1
         return _ChartLoadRequest(
@@ -1483,6 +1937,30 @@ class MainWindow(QMainWindow):
             symbol=symbol,
             timeframe=timeframe,
             connection=connection,
+            requested_at=requested_at or time.monotonic(),
+            lookback_days=self._extension_lookback_days(symbol),
+        )
+
+    def _extension_lookback_days(self, symbol: str) -> int:
+        """
+        Longest history lookback among the extensions the symbol's chart will
+        show, mirroring the extension set _on_fetch_done restores for it.
+        """
+        if symbol == self._loaded_symbol:
+            entries = [(s.name, s.params) for s in self._state.extensions]
+        elif symbol in self._per_symbol_state:
+            entries = [(s.name, s.params) for s in self._per_symbol_state[symbol]]
+        else:
+            entries = list(INITIAL_EXTENSIONS)
+        registry = all_extensions()
+        lookbacks = [
+            registry[name]().history_lookback_days(params)
+            for name, params in entries
+            if name in registry
+        ]
+        return max(
+            (days for days in lookbacks if days is not None),
+            default=0,
         )
 
     def _dispatch_pending_chart_load(self) -> None:
@@ -1513,16 +1991,20 @@ class MainWindow(QMainWindow):
                 )
             return
 
+        self._record_load_step(request, "dispatched")
         cancellation_event = threading.Event()
         worker = _FetchWorker(
             db_path=self._db_path,
             credential_store=self._credential_store,
             request=request,
             cancellation_event=cancellation_event,
+            load_timing=self._load_timing,
         )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+        worker.recent_ready.connect(self._on_chart_recent_ready)
+        worker.history_progress.connect(self._on_chart_history_progress)
         worker.finished.connect(self._on_chart_fetch_done)
         worker.error.connect(self._on_chart_fetch_error)
         worker.completed.connect(thread.quit)
@@ -1561,6 +2043,94 @@ class MainWindow(QMainWindow):
             return False
         return self._route_for_symbol(request.symbol).connection == request.connection
 
+    def _on_chart_recent_ready(
+        self,
+        request: _ChartLoadRequest,
+        series: OHLCVSeries,
+    ) -> None:
+        """
+        Render the recent window while older history loads. Not terminal:
+        the same request later delivers the full window or an error.
+        """
+        if not self._is_current_chart_request(request):
+            return
+        self._record_load_step(request, "recent delivered")
+        self._partial_history_request = request
+        self._on_fetch_done(series, history_complete=False)
+        self._record_render_steps(request)
+
+    def _on_chart_history_progress(
+        self,
+        request: _ChartLoadRequest,
+        earliest_ms: int,
+    ) -> None:
+        """
+        Older history committed back to earliest_ms. Re-render the displayed
+        interim window only when that reaches content still waiting on it.
+        """
+        if (
+            request != self._partial_history_request
+            or not self._is_current_chart_request(request)
+        ):
+            return
+        self._history_progress_ms = earliest_ms
+        pending_ms = self._extension_runtime.pending_history_start_ms
+        if pending_ms is not None and earliest_ms <= pending_ms:
+            self._schedule_history_refresh()
+
+    def _schedule_history_refresh(self) -> None:
+        """Run one interim re-render, at most once per refresh interval."""
+        if self._history_refresh_timer.isActive():
+            return
+        elapsed_ms = (time.monotonic() - self._last_history_refresh) * 1000
+        self._history_refresh_timer.start(
+            max(0, int(_HISTORY_REFRESH_INTERVAL_MS - elapsed_ms))
+        )
+
+    def _reset_history_refresh(self) -> None:
+        self._history_refresh_timer.stop()
+        self._history_progress_ms = None
+        self._history_refresh_deferred = False
+
+    def _refresh_partial_history(self) -> None:
+        """
+        Redraw the displayed interim window extended back to the committed
+        history, so extensions whose history has arrived appear before the
+        full window completes.
+        """
+        request = self._partial_history_request
+        start_ms = self._history_progress_ms
+        displayed = self._current_series
+        if (
+            request is None
+            or start_ms is None
+            or displayed is None
+            or not displayed.bars
+            or self._stopping_data_workers
+            or not self._is_current_chart_request(request)
+        ):
+            return
+        if self._drawing_session is not None or self._extension_runtime.drag_active:
+            # Drag and drawing sessions resolve bar indexes against the
+            # displayed series; retry when the interaction ends.
+            self._history_refresh_deferred = True
+            return
+        bars = self._cache.get_bars(
+            request.cache_namespace,
+            request.symbol,
+            request.timeframe,
+            start_ms,
+            int(displayed.bars[-1].timestamp.timestamp() * 1000),
+        )
+        if len(bars) <= len(displayed.bars):
+            return
+        self._last_history_refresh = time.monotonic()
+        self._apply_history_merge(
+            OHLCVSeries(request.symbol, request.timeframe, bars),
+            history_complete=False,
+        )
+        self._record_load_step(request, "interim history merged")
+
     def _on_chart_fetch_done(
         self,
         request: _ChartLoadRequest,
@@ -1568,8 +2138,14 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not self._is_current_chart_request(request):
             return
+        self._record_load_step(request, "history delivered")
         self._terminal_chart_generation = request.generation
-        self._on_fetch_done(series)
+        if self._partial_history_request != request:
+            self._on_fetch_done(series)
+            self._record_render_steps(request)
+            return
+        self._held_history_merge = (request, series)
+        self._flush_held_history_merge()
 
     def _on_chart_fetch_error(
         self,
@@ -1578,11 +2154,138 @@ class MainWindow(QMainWindow):
     ) -> None:
         if not self._is_current_chart_request(request):
             return
+        self._record_load_step(request, "error delivered")
         self._terminal_chart_generation = request.generation
-        self._on_fetch_error(message)
+        if self._partial_history_request != request:
+            self._on_fetch_error(message)
+            return
+        # The recent chart stays usable, so report without a dialog. Indicators
+        # that need full history stay hidden; the next load resumes the fetch.
+        route = self._route_for_symbol(request.symbol)
+        self._symbol_bar.set_data_source(route.display_name, "error")
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            self._history_status_message = (
+                f"Older history could not be loaded ({message}). "
+                "It will be retried on the next load."
+            )
+            status_bar.showMessage(self._history_status_message)
 
-    def _on_fetch_done(self, series: OHLCVSeries) -> None:
-        """Called on the main thread when the background fetch completes."""
+    def _flush_held_history_merge(self) -> None:
+        """
+        Apply a held full-history result once no drag or drawing session is
+        active, if its request is still the displayed one. Drag and drawing
+        sessions resolve bar indexes against the current series, so the series
+        must not change under them.
+        """
+        interacting = (
+            self._drawing_session is not None
+            or self._extension_runtime.drag_active
+        )
+        # An interim re-render skipped during the interaction runs now.
+        if self._history_refresh_deferred and not interacting:
+            self._history_refresh_deferred = False
+            self._schedule_history_refresh()
+        held = self._held_history_merge
+        if held is None or interacting:
+            return
+        self._held_history_merge = None
+        request, series = held
+        if (
+            self._stopping_data_workers
+            or request != self._current_chart_request
+            or request != self._partial_history_request
+            or self._state.symbol != request.symbol
+            or self._state.timeframe != request.timeframe
+            or self._route_for_symbol(request.symbol).connection != request.connection
+        ):
+            return
+        self._apply_history_merge(series)
+        self._record_load_step(request, "merge done")
+
+    def _record_load_step(self, request: _ChartLoadRequest, step: str) -> None:
+        self._load_timing.record(
+            request.generation,
+            request.symbol,
+            request.timeframe.value,
+            step,
+            request.requested_at,
+        )
+
+    def _record_render_steps(self, request: _ChartLoadRequest) -> None:
+        """Record render completion and the next event-loop turn after it."""
+        if not self._load_timing.enabled:
+            return
+        self._record_load_step(request, "render done")
+        QTimer.singleShot(
+            0,
+            lambda: self._record_load_step(request, "event loop resumed"),
+        )
+
+    def _apply_history_merge(
+        self,
+        series: OHLCVSeries,
+        history_complete: bool = True,
+    ) -> None:
+        """
+        Replace the displayed series with one that reaches further back (the
+        full history window, or while it loads a longer interim window),
+        keeping the view on the same bars (finplot x is bar-index based, so
+        the view shifts right by the number of prepended bars).
+        """
+        previous = self._current_series
+        prepended = 0
+        if previous is not None and previous.bars:
+            prepended = bisect.bisect_left(
+                [bar.timestamp for bar in series.bars],
+                previous.bars[0].timestamp,
+            )
+        if history_complete:
+            self._partial_history_request = None
+            self._reset_history_refresh()
+        self._displayed_history_complete = history_complete
+        self._current_series = series
+        pm = self._chart.plot_manager
+        with pm.preserving_viewport(x_shift=float(prepended)):
+            pm.draw_candles(series)
+            pm.draw_volume(series)
+            render_passes = self._extension_runtime.render_all(
+                series,
+                history_complete,
+            )
+            for render_pass in render_passes:
+                self._draw_extension_render(render_pass)
+            self._remove_stale_extension_renders(render_passes)
+        pm.refresh(preserve_view=True)
+        self._update_bar_correction_notice(series)
+        if history_complete:
+            route = self._route_for_symbol(series.symbol)
+            self._symbol_bar.set_data_source(route.display_name, "connected")
+            self._clear_history_status_message()
+
+    def _clear_history_status_message(self) -> None:
+        status_bar = self.statusBar()
+        if (
+            status_bar is not None
+            and self._history_status_message is not None
+            and status_bar.currentMessage() == self._history_status_message
+        ):
+            status_bar.clearMessage()
+        self._history_status_message = None
+
+    def _on_fetch_done(
+        self,
+        series: OHLCVSeries,
+        history_complete: bool = True,
+    ) -> None:
+        """
+        Called on the main thread with a freshly loaded series: the full
+        window, or the recent window while older history loads
+        (history_complete=False).
+        """
+        self._displayed_history_complete = history_complete
+        if history_complete:
+            self._partial_history_request = None
         # Save extension state for the symbol we're leaving.
         if self._loaded_symbol is not None and self._loaded_symbol != series.symbol:
             registry = all_extensions()
@@ -1618,14 +2321,29 @@ class MainWindow(QMainWindow):
         self._loaded_symbol = series.symbol
         self._current_series = series
         route = self._route_for_symbol(series.symbol)
-        self._symbol_bar.set_data_source(route.display_name, "connected")
+        self._symbol_bar.set_data_source(
+            route.display_name,
+            "connected" if history_complete else "history",
+        )
         self._extension_runtime.set_cache_namespace(route.cache_namespace)
         self._extension_store.load_for_symbol(series.symbol)
-        self._render(series)
+        self._render(series, history_complete)
         self._update_bar_correction_notice(series)
+        if history_complete:
+            self._clear_history_status_message()
+        else:
+            status_bar = self.statusBar()
+            if status_bar is not None:
+                self._history_status_message = "Loading indicators..."
+                status_bar.showMessage(self._history_status_message)
         self._symbol_bar.set_symbol(series.symbol)
         self._watchlist.set_active_symbol(series.symbol)
-        self._refresh_level1()
+        request = self._current_chart_request
+        if (
+            request is None
+            or self._quote_refreshed_generation != request.generation
+        ):
+            self._refresh_level1()
 
     def _on_fetch_error(self, message: str) -> None:
         if self._state.symbol is not None:
@@ -1637,7 +2355,7 @@ class MainWindow(QMainWindow):
     # Rendering
     # ------------------------------------------------------------------
 
-    def _render(self, series: OHLCVSeries) -> None:
+    def _render(self, series: OHLCVSeries, history_complete: bool = True) -> None:
         """
         Draw candles, volume, and all active extensions for the series.
         Called after a successful fetch, and after a timeframe switch.
@@ -1656,7 +2374,7 @@ class MainWindow(QMainWindow):
         pm.draw_candles(series)
         pm.draw_volume(series)
 
-        render_passes = self._extension_runtime.render_all(series)
+        render_passes = self._extension_runtime.render_all(series, history_complete)
         for render_pass in render_passes:
             self._draw_extension_render(render_pass)
         self._remove_stale_extension_renders(render_passes)
@@ -1967,6 +2685,7 @@ class MainWindow(QMainWindow):
                 self._set_active_drawing_tool(None)
             if result.mutation is not None or result.clear_transient:
                 self._reload_extensions(draw_bars=False, preserve_view=True)
+            self._flush_held_history_merge()
             return
         self._drawing_session = result.session
 
@@ -1990,6 +2709,7 @@ class MainWindow(QMainWindow):
         self._set_active_drawing_tool(None)
         if mutation is not None:
             self._reload_extensions(draw_bars=False, preserve_view=True)
+        self._flush_held_history_merge()
 
     def _on_drag_start(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> bool:
         if self._current_series is None:
@@ -2026,10 +2746,12 @@ class MainWindow(QMainWindow):
             self._draw_drag_render(render_pass)
         self._extension_runtime.finish_drag(self._current_series, event)
         self._reload_extensions(draw_bars=False, preserve_view=True)
+        self._flush_held_history_merge()
 
     def _on_drag_cancel(self) -> None:
         self._extension_runtime.cancel_drag()
         self._reload_extensions(draw_bars=False, preserve_view=True)
+        self._flush_held_history_merge()
 
     def _on_bar_right_clicked(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         """Right-click on a bar: show context menu."""
@@ -2114,6 +2836,14 @@ class MainWindow(QMainWindow):
                 route.aggregator,
                 history_end,
             )
+            if (
+                not self._displayed_history_complete
+                and self._current_series is not None
+                and self._current_series.bars
+            ):
+                # Keep the displayed recent window: older bars already stored
+                # by the running backfill would shift every bar index.
+                history_start = self._current_series.bars[0].timestamp
             bars = self._cache.get_bars(
                 route.cache_namespace,
                 self._state.symbol,
@@ -2154,7 +2884,10 @@ class MainWindow(QMainWindow):
                 pm.draw_candles(series)
                 pm.draw_volume(series)
 
-        render_passes = self._extension_runtime.render_all(series)
+        render_passes = self._extension_runtime.render_all(
+            series,
+            self._displayed_history_complete,
+        )
 
         if preserve_view:
             with pm.preserving_viewport():
@@ -2424,6 +3157,8 @@ class MainWindow(QMainWindow):
         if self._drawing_preview_timer.isActive():
             self._drawing_preview_timer.stop()
         self._pending_chart_load = None
+        self._held_history_merge = None
+        self._reset_history_refresh()
         for task in tuple(self._chart_load_tasks.values()):
             task.cancellation_event.set()
         if self._snapshot_cancellation_event is not None:
@@ -2741,6 +3476,7 @@ class MainWindow(QMainWindow):
             return
         self._pending_route = None
         self._cache.close()
+        self._load_timing.close()
         self._close_finalized = True
         self.close()
 
@@ -2808,6 +3544,7 @@ class MainWindow(QMainWindow):
             self._drawing_session = None
             self._clear_preview_render()
         self._set_active_drawing_tool(extension_name)
+        self._flush_held_history_merge()
 
     def _set_active_drawing_tool(self, extension_name: str | None) -> None:
         self._active_drawing_tool = extension_name

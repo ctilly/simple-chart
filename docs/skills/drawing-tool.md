@@ -155,7 +155,12 @@ explicit user approval before continuing.
 2. **Tool behavior** — `tools/<tool>/__init__.py`, a `ChartExtension`:
    - `name` / `label` / `default_params` / `add_mode` (TOOLBAR or CONTEXT) /
      `preserve_ui_state_per_symbol` (usually `False` — the store is the source of
-     truth).
+     truth) / `history_lookback_days` (default `None`: hidden and not
+     hit-testable while older history is loading; return `0` only when a
+     drawing whose anchors precede the first loaded bar still renders exactly,
+     e.g. price-only lines or exact-timestamp anchors that are skipped when
+     unloaded; set `ChartExtensionRender.pending_history_start_ms` to the
+     newest skipped anchor so it appears as history arrives).
    - `compute()` returns `{}`; tools render, they do not compute arrays.
    - `render()` builds primitives from the injected records
      (`params[params_key]`). Use stable per-drawing render keys.

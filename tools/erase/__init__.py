@@ -29,6 +29,10 @@ class EraseTool(ChartExtension):
     def name(self) -> str:
         return "erase"
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Draws nothing itself.
+        return 0
+
     def label(self) -> str:
         return "Erase"
 

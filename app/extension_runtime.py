@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import bisect
+import math
 from typing import Any
 
 from app.extension_store import ChartExtensionStore
 from app.state import ChartExtensionState, State
+from chart.window import INITIAL_VISIBLE_BARS
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 from simplechart.api import (
@@ -19,8 +21,11 @@ from simplechart.api import (
     ChartExtensionMutation,
     ChartExtensionRender,
     all_extensions,
+    bars_for_n_days,
     get_extension,
 )
+
+_DAY_MS = 86_400_000
 
 
 @dataclass
@@ -52,22 +57,63 @@ class ChartExtensionRuntime:
         self._extension_store = extension_store
         self._lookback_days = lookback_days
         self._cache_namespace = cache_namespace
+        self._deferred_names: set[str] = set()
+        self._history_complete = True
+        self._pending_history_ms: dict[str, int] = {}
         self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
+
+    @property
+    def drag_active(self) -> bool:
+        return self._drag_session is not None
 
     def set_cache_namespace(self, cache_namespace: str) -> None:
         self._cache_namespace = cache_namespace
 
-    def render_all(self, series: OHLCVSeries) -> list[ChartExtensionRenderPass]:
+    @property
+    def pending_history_start_ms(self) -> int | None:
+        """
+        While older history loads, the newest timestamp loaded history must
+        reach for another extension (or omitted extension content) to render.
+        None when nothing is waiting on history.
+        """
+        return max(self._pending_history_ms.values(), default=None)
+
+    def render_all(
+        self,
+        series: OHLCVSeries,
+        history_complete: bool = True,
+    ) -> list[ChartExtensionRenderPass]:
+        """
+        Render every active extension. While older history is still loading
+        (history_complete=False), an extension whose history lookback the
+        loaded bars do not yet cover is skipped and excluded from hit tests;
+        its state is left untouched so saved visibility survives until it
+        renders.
+        """
         self._extension_store.prepare_active_extensions()
         daily_bars = self._daily_bars_for(series)
 
         passes: list[ChartExtensionRenderPass] = []
+        self._deferred_names = set()
+        self._history_complete = history_complete
+        self._pending_history_ms = {}
         for ext_state in self._state.extensions:
             ext_state.params = self._extension_store.params_for(
                 ext_state.name,
                 ext_state.params,
             )
+            if not history_complete:
+                lookback_days = get_extension(
+                    ext_state.name
+                ).history_lookback_days(ext_state.params)
+                if not _lookback_loaded(series, lookback_days):
+                    self._deferred_names.add(ext_state.name)
+                    if lookback_days is not None and series.bars:
+                        self._pending_history_ms[ext_state.name] = (
+                            _lookback_start_ms(series, lookback_days)
+                        )
+                    continue
             passes.append(self.render_one(ext_state, series, daily_bars))
         return passes
 
@@ -82,8 +128,20 @@ class ChartExtensionRuntime:
         # MA warmup). Merge it into a throwaway params dict for this render only,
         # never into the persisted ext_state.params — otherwise the full bar list
         # rides into per-symbol saved state and gets deep-copied on every switch.
-        params = {**ext_state.params, "_daily_bars": daily_bars}
+        # _history_complete tells anchored extensions whether bars older than
+        # the loaded series may still arrive.
+        params = {
+            **ext_state.params,
+            "_daily_bars": daily_bars,
+            "_history_complete": self._history_complete,
+        }
         render = extension.render(series, params)
+        if render.pending_history_start_ms is None:
+            self._pending_history_ms.pop(ext_state.name, None)
+        else:
+            self._pending_history_ms[ext_state.name] = (
+                render.pending_history_start_ms
+            )
         ext_state.series_keys = [
             series_render.key for series_render in render.series
         ] + [
@@ -97,11 +155,13 @@ class ChartExtensionRuntime:
         ] + [
             label.key for label in render.axis_price_labels
         ]
-        ext_state.series_visibility = {
-            key: ext_state.series_visibility[key]
-            for key in ext_state.series_keys
-            if key in ext_state.series_visibility
-        }
+        # Content omitted while history loads keeps its saved visibility.
+        if self._history_complete:
+            ext_state.series_visibility = {
+                key: ext_state.series_visibility[key]
+                for key in ext_state.series_keys
+                if key in ext_state.series_visibility
+            }
         return ChartExtensionRenderPass(
             state=ext_state,
             render=render,
@@ -167,6 +227,8 @@ class ChartExtensionRuntime:
         best_state: ChartExtensionState | None = None
         best_hit = None
         for ext_state in self._state.extensions:
+            if ext_state.name in self._deferred_names:
+                continue
             extension = get_extension(ext_state.name)
             params = self._params_for_state(ext_state)
             visible_keys = {
@@ -258,6 +320,8 @@ class ChartExtensionRuntime:
     ) -> HitTestResult | None:
         best_hit = None
         for ext_state in self._state.extensions:
+            if ext_state.name in self._deferred_names:
+                continue
             extension = get_extension(ext_state.name)
             if extension.add_mode() != ChartExtensionAddMode.TOOLBAR:
                 continue
@@ -478,3 +542,30 @@ class ChartExtensionRuntime:
         if not candidates:
             return None
         return min(candidates, key=lambda candidate: abs(timestamps[candidate] - x_ms))
+
+
+def _lookback_loaded(series: OHLCVSeries, lookback_days: int | None) -> bool:
+    """
+    Whether the loaded bars cover lookback_days trading days before the first
+    bar of the initial view.
+    """
+    if lookback_days is None:
+        return False
+    if lookback_days == 0:
+        return True
+    needed = bars_for_n_days(lookback_days, series.timeframe) + INITIAL_VISIBLE_BARS
+    return len(series.bars) >= needed
+
+
+def _lookback_start_ms(series: OHLCVSeries, lookback_days: int) -> int:
+    """
+    Estimate the timestamp loaded history must reach for lookback_days to be
+    covered. Weekdays approximate sessions, so the estimate may be early by a
+    holiday or two; render_all re-checks against the actual bars.
+    """
+    needed = bars_for_n_days(lookback_days, series.timeframe) + INITIAL_VISIBLE_BARS
+    missing_bars = needed - len(series.bars)
+    missing_sessions = math.ceil(missing_bars / bars_for_n_days(1, series.timeframe))
+    calendar_days = math.ceil(missing_sessions * 7 / 5)
+    first_ts_ms = int(series.bars[0].timestamp.timestamp() * 1000)
+    return first_ts_ms - calendar_days * _DAY_MS

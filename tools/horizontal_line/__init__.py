@@ -25,6 +25,10 @@ class HorizontalLineIndicator(HorizontalLineShape, LineTool[HorizontalLineRecord
     def label(self) -> str:
         return "Horizontal Line"
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Price-only: a horizontal line is exact on any bar window.
+        return 0
+
     def toolbar_icon(self) -> ToolIconSpec:
         return ToolIconSpec(lines=(
             ToolIconLine(4, 12, 20, 12),

@@ -48,9 +48,10 @@ _SETTINGS_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "setti
 _SOURCE_STATUS_COLORS: dict[str, str] = {
     "pending": "#8a8e96",
     "connected": "#198754",
+    "history": "#d39e00",
     "error": "#c43d3d",
 }
-SourceStatus = Literal["pending", "connected", "error"]
+SourceStatus = Literal["pending", "connected", "history", "error"]
 
 # MIN1 is intentionally excluded — it is an internal base timeframe
 # used by the aggregator, not a user-chartable timeframe.
@@ -175,6 +176,7 @@ class SymbolBar(QWidget):
         status_text = {
             "pending": "Waiting for a data response",
             "connected": "Last data request succeeded",
+            "history": "Loading indicators...",
             "error": "Last data request failed",
         }[status]
         tooltip = f"{label}: {status_text}"

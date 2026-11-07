@@ -47,6 +47,7 @@ from chart.styles import (
 from chart.viewport import (
     apply_interaction_modes,
     restore_viewports,
+    shift_viewports,
     snapshot_viewports,
     unlock_x_pan,
 )
@@ -366,12 +367,12 @@ class PlotManager:
         )
 
     @contextmanager
-    def preserving_viewport(self) -> Iterator[None]:
+    def preserving_viewport(self, x_shift: float = 0.0) -> Iterator[None]:
         snapshot = snapshot_viewports(self._viewport_axes())
         try:
             yield
         finally:
-            restore_viewports(snapshot)
+            restore_viewports(shift_viewports(snapshot, x_shift))
 
     def refresh(self, *, preserve_view: bool = False) -> None:
         if not preserve_view:

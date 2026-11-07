@@ -258,6 +258,9 @@ class ChartExtensionRender:
     polylines: list[PolylineRender] = field(default_factory=list)
     axis_price_labels: list[AxisPriceLabelRender] = field(default_factory=list)
     markers: list[MarkerRender] = field(default_factory=list)
+    # Newest timestamp (UTC ms) of content omitted because older history is
+    # still loading; the chart re-renders once loaded history reaches it.
+    pending_history_start_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -580,6 +583,24 @@ class ChartExtension(ABC):
 
     def preserve_ui_state_per_symbol(self) -> bool:
         return True
+
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        """
+        Trading days of bars this extension needs before the first visible bar
+        for its output there to be exact.
+
+        While older history is still loading, an extension is rendered once the
+        loaded bars cover this lookback, and the first chart fetch is sized to
+        cover the longest lookback on the chart (within a cap). None (the
+        default) means the output may depend on any older bar: the extension is
+        not rendered or hit-tested until the full history window arrives.
+        Return 0 when output on a truncated series is exact (price-only lines,
+        values computed from daily reference bars). Extensions with
+        timestamp-anchored content can return 0, omit anchors older than the
+        first loaded bar while params["_history_complete"] is False, and report
+        them through ChartExtensionRender.pending_history_start_ms.
+        """
+        return None
 
     def toggles_series_independently(
         self,

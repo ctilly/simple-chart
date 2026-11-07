@@ -150,19 +150,29 @@ or what decision was made, and wait for explicit user approval before continuing
    - Drag preview returns render primitives only.
    - Finish/cancel returns mutations only.
 
-5. Add per-series behavior if needed.
+5. Decide `history_lookback_days(params)` (default `None`: neither rendered
+   nor hit-tested until the full history window arrives). Return the trading
+   days needed before the first visible bar, or `0` when output is exact on a
+   truncated series. Timestamp-anchored content (AVWAP) returns `0`, omits
+   anchors older than the first loaded bar while
+   `params["_history_complete"]` is `False` (an older anchor would resolve to
+   bar 0 and draw wrongly), and sets
+   `ChartExtensionRender.pending_history_start_ms` to the newest omitted anchor
+   timestamp so the chart re-renders when history reaches it.
+
+6. Add per-series behavior if needed.
    - `toggles_series_independently(...)`
    - `config_for_series(...)`
    - `apply_config_to_series(...)`
    - `remove_series(...)`
 
-6. Add a store handler only if state must persist or be injected at runtime.
+7. Add a store handler only if state must persist or be injected at runtime.
    - Put it under the indicator package.
    - Register it from the indicator package.
    - It handles mutations, active-state creation, cleanup, and param injection.
    - Runtime and controller must not know the handler exists.
 
-7. Decide whether a compiled kernel is needed.
+8. Decide whether a compiled kernel is needed.
    - Use a kernel for recurrence relations where `result[i]` depends on
      `result[i-1]`.
    - Use a kernel for long numeric per-bar loops that cannot be expressed clearly

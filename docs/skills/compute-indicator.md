@@ -263,6 +263,19 @@ def render_target(self) -> str:
 
 Chart indicators do not override this method.
 
+**History while a chart loads** — a first load renders recent bars first and
+adds older history in the background. Override
+`history_lookback_days(params) -> int | None`: the trading days of bars needed
+before the first visible bar for exact values. The first fetch is sized to the
+longest lookback on the chart (up to a cap), and the indicator renders as soon
+as the loaded bars cover its lookback. A window average returns its window
+(`days`). Recursive smoothing never fully forgets its seed, so return enough
+periods for the seed's weight to fall below display precision and verify it
+against full history: EMA uses `days * 4` (weight about e**-8); Wilder
+smoothing (RSI) decays half as fast and uses `days * 8`. Return `0` when values
+on a truncated series are exact (e.g. computed solely from `_daily_bars`). The
+default `None` hides the indicator until the full window arrives.
+
 End the file with: `register_extension(YourIndicator)`
 
 `simplechart.plugins` loads every `.py` file and sub-package in the project

@@ -1,8 +1,12 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+import logging
 import math
+import threading
+import time
 from typing import Never, Protocol, cast
 
+from alpaca.common.constants import DEFAULT_RETRY_EXCEPTION_CODES
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
@@ -16,7 +20,9 @@ from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import (
     DataProvider,
     MarketDataEntitlementError,
+    RequestCancelledError,
     UnsupportedTimeframeError,
+    background_request_cancellation,
 )
 from data.provider.config import MarketDataFeed
 from data.session import is_regular_session_timestamp as _is_regular_session
@@ -25,6 +31,24 @@ from data.session import is_regular_session_timestamp as _is_regular_session
 _DELAYED_SIP_SAFE_LAG = timedelta(minutes=16)
 _SIP_ENTITLEMENT_ERROR_CODE = 40310000
 _ALPACA_REQUEST_TIMEOUT = (5.0, 15.0)
+# Every Alpaca HTTP attempt from this process (bars, pages, snapshots, Level 1,
+# SDK retries) takes a token: 2 per second on average (120/min) with bursts of up
+# to 10, so the 3-5 requests of a new chart (quote, daily, history chunks) go out
+# together, even for two quick clicks. Any 60 s window admits at most
+# 10 + 120 = 130 requests, well under Alpaca's 200/minute account limit.
+# Background history keeps 7 tokens in reserve for the next user action(s).
+_REQUEST_RATE_PER_SECOND = 2.0
+_REQUEST_BURST = 10
+_BACKGROUND_RESERVE = 7
+# One history request returns about 40 calendar days of intraday bars; 30-day
+# chunks keep each chunk to a single page.
+_INTRADAY_HISTORY_PAGE_SPAN = timedelta(days=30)
+_RETRY_STATUS_CODES = frozenset(DEFAULT_RETRY_EXCEPTION_CODES)
+# Longest a background caller sleeps before re-checking cancellation and
+# waiting foreground callers.
+_BACKGROUND_POLL_SECONDS = 0.05
+
+_LOGGER = logging.getLogger(__name__)
 
 _TIMEFRAME_MAP: dict[Timeframe, AlpacaTimeFrame] = {
     Timeframe.MIN1: AlpacaTimeFrame.Minute,
@@ -98,6 +122,93 @@ class _MarketDataClient(Protocol):
     ) -> Mapping[str, _AlpacaSnapshot]: ...
 
 
+class _RequestRateLimiter:
+    """
+    Process-wide token bucket admitting each Alpaca HTTP attempt.
+
+    Foreground callers need one token. A background caller (one passing its
+    cancellation event) is admitted only while no foreground caller is waiting
+    and more than background_reserve tokens remain, so history backfill never
+    spends the burst a user action needs; it raises RequestCancelledError
+    instead of being admitted once cancelled. Refill, eligibility, and
+    deduction happen under one lock at the actual admission time.
+    """
+
+    def __init__(
+        self,
+        rate_per_second: float,
+        capacity: int,
+        background_reserve: int,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._rate_per_second = rate_per_second
+        self._capacity = float(capacity)
+        self._background_reserve = background_reserve
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._tokens = float(capacity)
+        self._refilled_at = clock()
+        self._foreground_waiting = 0
+
+    def wait(self, cancellation: threading.Event | None = None) -> None:
+        background = cancellation is not None
+        needed = 1.0 + (self._background_reserve if background else 0)
+        if not background:
+            with self._lock:
+                self._foreground_waiting += 1
+        try:
+            while True:
+                with self._lock:
+                    if cancellation is not None and cancellation.is_set():
+                        raise RequestCancelledError
+                    now = self._clock()
+                    self._tokens = min(
+                        self._capacity,
+                        self._tokens
+                        + (now - self._refilled_at) * self._rate_per_second,
+                    )
+                    self._refilled_at = now
+                    if self._tokens >= needed and (
+                        not background or self._foreground_waiting == 0
+                    ):
+                        self._tokens -= 1.0
+                        return
+                    delay = max(
+                        (needed - self._tokens) / self._rate_per_second,
+                        0.0,
+                    )
+                if background:
+                    delay = min(delay, _BACKGROUND_POLL_SECONDS) or (
+                        _BACKGROUND_POLL_SECONDS
+                    )
+                self._sleep(delay)
+        finally:
+            if not background:
+                with self._lock:
+                    self._foreground_waiting -= 1
+
+
+class _RetryStatusCounter:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._count = 0
+
+    def record(self) -> int:
+        with self._lock:
+            self._count += 1
+            return self._count
+
+
+_REQUEST_LIMITER = _RequestRateLimiter(
+    _REQUEST_RATE_PER_SECOND,
+    _REQUEST_BURST,
+    _BACKGROUND_RESERVE,
+)
+_RETRY_STATUS_COUNTER = _RetryStatusCounter()
+
+
 class _DefaultTimeoutHTTPAdapter(HTTPAdapter):  # type: ignore[misc]
     def send(
         self,
@@ -108,14 +219,27 @@ class _DefaultTimeoutHTTPAdapter(HTTPAdapter):  # type: ignore[misc]
         cert: str | tuple[str, str] | None = None,
         proxies: Mapping[str, str] | None = None,
     ) -> Response:
-        return super().send(
-            request,
-            stream=stream,
-            timeout=_ALPACA_REQUEST_TIMEOUT if timeout is None else timeout,
-            verify=verify,
-            cert=cert,
-            proxies=proxies,
+        _REQUEST_LIMITER.wait(background_request_cancellation())
+        response = cast(
+            Response,
+            super().send(
+                request,
+                stream=stream,
+                timeout=_ALPACA_REQUEST_TIMEOUT if timeout is None else timeout,
+                verify=verify,
+                cert=cert,
+                proxies=proxies,
+            ),
         )
+        if response.status_code in _RETRY_STATUS_CODES:
+            count = _RETRY_STATUS_COUNTER.record()
+            _LOGGER.warning(
+                "Alpaca returned HTTP %d; alpaca-py waits and retries unless its "
+                "retry limit is exhausted (%d retryable responses this session).",
+                response.status_code,
+                count,
+            )
+        return response
 
 
 def _create_stock_historical_data_client(
@@ -140,14 +264,31 @@ class AlpacaProvider(DataProvider):
         self._configured_feed = feed
         self._bar_feed = _BAR_FEED_MAP[feed]
         self._snapshot_feed = _SNAPSHOT_FEED_MAP[feed]
-        self._client = (
-            client
+        # requests.Session is not thread-safe, so each thread that uses this
+        # provider gets its own SDK client. The factory closure keeps the
+        # credentials out of instance attributes.
+        self._create_client: Callable[[], _MarketDataClient] = (
+            (lambda: client)
             if client is not None
-            else _create_stock_historical_data_client(
-                api_key_id,
-                api_secret,
+            else (
+                lambda: _create_stock_historical_data_client(
+                    api_key_id,
+                    api_secret,
+                )
             )
         )
+        self._thread_clients = threading.local()
+        self._client()
+
+    def _client(self) -> _MarketDataClient:
+        client = cast(
+            _MarketDataClient | None,
+            getattr(self._thread_clients, "client", None),
+        )
+        if client is None:
+            client = self._create_client()
+            self._thread_clients.client = client
+        return client
 
     def fetch_bars(
         self,
@@ -173,7 +314,7 @@ class AlpacaProvider(DataProvider):
             feed=self._bar_feed,
         )
         try:
-            response = self._client.get_stock_bars(request)
+            response = self._client().get_stock_bars(request)
         except APIError as exc:
             _raise_market_data_error(exc, self._configured_feed)
         alpaca_bars = response.data.get(normalized, [])
@@ -216,6 +357,9 @@ class AlpacaProvider(DataProvider):
             return end - _DELAYED_SIP_SAFE_LAG
         return end
 
+    def history_page_span(self, timeframe: Timeframe) -> timedelta | None:
+        return _INTRADAY_HISTORY_PAGE_SPAN if timeframe.is_intraday else None
+
     def native_timeframes(self) -> list[Timeframe]:
         return [
             Timeframe.MIN1,
@@ -235,7 +379,7 @@ class AlpacaProvider(DataProvider):
             feed=self._snapshot_feed,
         )
         try:
-            return self._client.get_stock_snapshot(request)
+            return self._client().get_stock_snapshot(request)
         except APIError as exc:
             _raise_market_data_error(exc, self._configured_feed)
 

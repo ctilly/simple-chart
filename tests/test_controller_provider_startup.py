@@ -250,7 +250,7 @@ def test_extension_only_reload_reuses_existing_correction_notice(
     monkeypatch.setattr(
         window._extension_runtime,
         "render_all",
-        lambda current: [],
+        lambda current, history_complete=True: [],
     )
     monkeypatch.setattr(
         window,
@@ -280,7 +280,7 @@ def test_fetch_completion_surfaces_conflicted_bar_correction_notice(
         lambda window: None,
     )
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    monkeypatch.setattr(MainWindow, "_render", lambda window, series: None)
+    monkeypatch.setattr(MainWindow, "_render", lambda window, series, history_complete=True: None)
 
     window = MainWindow(str(tmp_path / "test.db"))
     qtbot.addWidget(window)

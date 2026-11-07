@@ -30,6 +30,10 @@ class PivotPointsIndicator(ChartExtension):
     def name(self) -> str:
         return "pivot_points"
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Levels come from daily reference bars, which are complete.
+        return 0
+
     def label(self) -> str:
         return "Pivot Points"
 

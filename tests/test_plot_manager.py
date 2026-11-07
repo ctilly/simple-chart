@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -183,3 +183,57 @@ def test_update_marker_removes_same_key_orphan_items(qtbot: object) -> None:
         if getattr(item, "_simplechart_marker_key", None) == "avwap_anchor_1"
     ]
     assert len(marker_items) == 1
+
+
+def _minute_series(count: int, first: datetime) -> OHLCVSeries:
+    bars = [
+        Bar(
+            timestamp=first + timedelta(minutes=5 * index),
+            open=100.0 + index % 7,
+            high=102.0 + index % 7,
+            low=99.0 + index % 7,
+            close=101.0 + index % 7,
+            volume=1_000 + index,
+        )
+        for index in range(count)
+    ]
+    return OHLCVSeries(symbol="XBI", timeframe=Timeframe.MIN5, bars=bars)
+
+
+def test_preserving_viewport_shift_keeps_view_on_same_bars_after_prepend(
+    qtbot: object,
+) -> None:
+    widget = ChartWidget(
+        on_toggle=lambda _key: None,
+        on_configure=lambda _key: None,
+        on_remove=lambda _key: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _name: None,
+        drawing_tools=[],
+    )
+    qtbot.addWidget(widget)  # type: ignore[attr-defined]
+    plot_manager = widget.plot_manager
+    first = datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc)
+    recent = _minute_series(300, first)
+    plot_manager.draw_candles(recent)
+    plot_manager.draw_volume(recent)
+    plot_manager.refresh()
+    for axis in plot_manager._viewport_axes():
+        axis.vb.set_range(250.0, 90.0, 290.0, 120.0)  # type: ignore[attr-defined]
+    before = [
+        axis.vb.targetRect()  # type: ignore[attr-defined]
+        for axis in plot_manager._viewport_axes()
+    ]
+
+    full = _minute_series(400, first - timedelta(minutes=5 * 100))
+    with plot_manager.preserving_viewport(x_shift=100.0):
+        plot_manager.draw_candles(full)
+        plot_manager.draw_volume(full)
+
+    after = [
+        axis.vb.targetRect()  # type: ignore[attr-defined]
+        for axis in plot_manager._viewport_axes()
+    ]
+    for old, new in zip(before, after):
+        assert new.left() == old.left() + 100.0
+        assert new.right() == old.right() + 100.0

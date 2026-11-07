@@ -173,3 +173,26 @@ def test_synthesize_cached_bars_uses_existing_grouping_rules() -> None:
     assert result[0].open == 100.0
     assert result[0].close == 161.0
     assert result[0].volume == 1_300
+
+
+class _PagedProvider(_FiveMinuteProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.page_span_timeframes: list[Timeframe] = []
+
+    def history_page_span(self, timeframe: Timeframe) -> timedelta | None:
+        self.page_span_timeframes.append(timeframe)
+        return timedelta(days=30)
+
+
+def test_history_page_span_uses_fetched_native_timeframe() -> None:
+    provider = _PagedProvider()
+    aggregator = Aggregator(provider)
+
+    assert aggregator.history_page_span(Timeframe.MIN65) == timedelta(days=30)
+    assert aggregator.history_page_span(Timeframe.DAILY) == timedelta(days=30)
+    assert provider.page_span_timeframes == [Timeframe.MIN5, Timeframe.DAILY]
+
+
+def test_history_page_span_defaults_to_single_request() -> None:
+    assert Aggregator(_FiveMinuteProvider()).history_page_span(Timeframe.MIN5) is None

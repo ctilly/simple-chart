@@ -83,6 +83,27 @@ For a panel extension (e.g. RSI), add one override:
 Drop the file into ~/.simplechart/plugins/ — no other steps needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+HISTORY WHILE A CHART IS LOADING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+A first load renders recent bars, then adds the rest of the history window
+in the background. history_lookback_days(params) says how many trading days
+of bars an extension needs before the first visible bar for exact output.
+The first fetch is sized to cover the longest lookback on the chart (up to
+a cap), and while history loads an extension renders as soon as the loaded
+bars cover its lookback. None (the default) means "any older bar may
+matter": not rendered or hit-tested until the full window arrives.
+
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        return int(params["days"])   # a window average needs its window
+        # return 0 for price-only lines or values from daily reference bars
+
+Timestamp-anchored extensions can return 0 instead, skip anchors older than
+the first loaded bar while params["_history_complete"] is False, and set
+ChartExtensionRender.pending_history_start_ms to the newest skipped anchor
+timestamp (UTC ms) so the chart re-renders once history reaches it.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXPORTS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

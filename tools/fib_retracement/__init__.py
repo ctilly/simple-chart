@@ -44,6 +44,10 @@ class FibonacciRetracementIndicator(ChartExtension):
     def name(self) -> str:
         return "fib_retracement"
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Anchors resolve by exact timestamp; an unloaded anchor is not drawn.
+        return 0
+
     def label(self) -> str:
         return "Fibonacci Retracement"
 

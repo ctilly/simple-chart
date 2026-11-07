@@ -472,7 +472,9 @@ def test_cancel_during_provider_call_persists_range_then_skips_next_call(
         window._selected_route.connection,
     )
     cancelled = threading.Event()
-    provider_started = threading.Event()
+    # Daily references and the intraday window are fetched concurrently, so
+    # both provider calls are in flight when the user cancels.
+    both_started = threading.Barrier(3)
     release_provider = threading.Event()
     calls: list[Timeframe] = []
     start = datetime(2026, 11, 4, 15, 0, tzinfo=UTC)
@@ -487,7 +489,7 @@ def test_cancel_during_provider_call_persists_range_then_skips_next_call(
             end: datetime,
         ) -> list[Bar]:
             calls.append(timeframe)
-            provider_started.set()
+            both_started.wait(timeout=2)
             if not release_provider.wait(timeout=2):
                 raise RuntimeError("test provider was not released")
             if provider_fails:
@@ -525,31 +527,33 @@ def test_cancel_during_provider_call_persists_range_then_skips_next_call(
     worker.completed.connect(lambda: completed.append(True))
     thread = threading.Thread(target=worker.run)
     thread.start()
-    assert provider_started.wait(timeout=2)
+    both_started.wait(timeout=2)
     cancelled.set()
     release_provider.set()
     thread.join(timeout=3)
     qtbot.waitUntil(lambda: len(completed) == 1)
 
     assert not thread.is_alive()
-    assert calls == [Timeframe.DAILY]
+    # Both already-started calls finish; nothing further is requested.
+    assert sorted(calls) == sorted([Timeframe.DAILY, Timeframe.MIN5])
     assert finished == []
     assert errors == []
     assert completed == [True]
     with Cache(window._db_path) as cache:
-        assert cache.get_bars(
-            request.cache_namespace,
-            request.symbol,
-            Timeframe.DAILY,
-            int(start.timestamp() * 1000),
-            int(start.timestamp() * 1000),
-        ) == ([] if provider_fails else [returned_bar])
-        coverage = cache.get_bar_fetch_coverage(
-            request.cache_namespace,
-            request.symbol,
-            Timeframe.DAILY,
-        )
-        assert (coverage is None) is provider_fails
+        for timeframe in (Timeframe.DAILY, Timeframe.MIN5):
+            assert cache.get_bars(
+                request.cache_namespace,
+                request.symbol,
+                timeframe,
+                int(start.timestamp() * 1000),
+                int(start.timestamp() * 1000),
+            ) == ([] if provider_fails else [returned_bar])
+            coverage = cache.get_bar_fetch_coverage(
+                request.cache_namespace,
+                request.symbol,
+                timeframe,
+            )
+            assert (coverage is None) is provider_fails
 
 
 def test_cancel_before_synthesized_materialization_keeps_native_cache_only(
@@ -881,16 +885,20 @@ def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
     assert errors == []
     assert len(results) == 2
     assert len(calls) == 4
-    assert calls[2] == (
-        Timeframe.DAILY,
-        datetime(2026, 11, 4, 5, 0, tzinfo=UTC),
-        second_now,
-    )
-    assert calls[3] == (
-        Timeframe.MIN5,
-        datetime(2026, 11, 4, 15, 0, tzinfo=UTC),
-        second_now,
-    )
+    # Daily references and the intraday window run concurrently: assert the
+    # repeat load's exact ranges, not their order.
+    assert set(calls[2:]) == {
+        (
+            Timeframe.DAILY,
+            datetime(2026, 11, 4, 5, 0, tzinfo=UTC),
+            second_now,
+        ),
+        (
+            Timeframe.MIN5,
+            datetime(2026, 11, 4, 15, 0, tzinfo=UTC),
+            second_now,
+        ),
+    }
 
 
 def test_fetch_worker_uses_complete_premarket_equity_cache(
@@ -1092,10 +1100,12 @@ def test_fetch_worker_repairs_stale_premarket_equity_cache(
     worker.run()
 
     assert errors == []
-    assert calls == [
+    # Concurrent daily and intraday repair: exact ranges, order not asserted.
+    assert len(calls) == 2
+    assert set(calls) == {
         (Timeframe.DAILY, stale_daily, now),
         (Timeframe.MIN5, stale_last_5m, now),
-    ]
+    }
     assert len(results) == 1
     assert results[0].bars[-1] == _bar(prior_last_5m)
 

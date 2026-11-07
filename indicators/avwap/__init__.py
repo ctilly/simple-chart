@@ -98,6 +98,11 @@ class AVWAPIndicator(ChartExtension):
     def preserve_ui_state_per_symbol(self) -> bool:
         return False
 
+    def history_lookback_days(self, params: dict[str, Any]) -> int | None:
+        # Each anchor needs bars back to its own timestamp; anchors older than
+        # the loaded bars are omitted until history reaches them (render()).
+        return 0
+
     def compute(
         self,
         series: OHLCVSeries,
@@ -115,7 +120,7 @@ class AVWAPIndicator(ChartExtension):
           4. Call avwap_multi() with all anchor indexes at once
           5. Return one named array per anchor
         """
-        anchors: list[AnchorRecord] = params.get("anchors", [])
+        anchors, _ = _split_loaded_anchors(series, params)
         if not anchors:
             return {}
 
@@ -154,6 +159,11 @@ class AVWAPIndicator(ChartExtension):
         anchors: list[AnchorRecord] = params.get("anchors", [])
         result = self.compute(series, params)
         render = ChartExtensionRender()
+        _, unloaded = _split_loaded_anchors(series, params)
+        if unloaded:
+            render.pending_history_start_ms = max(
+                anchor.anchor_ts for anchor in unloaded
+            )
         anchors_by_key: dict[str, AnchorRecord] = {
             avwap_anchor_key(anchor): anchor
             for anchor in anchors
@@ -393,6 +403,25 @@ class AVWAPIndicator(ChartExtension):
 
 
 register_extension(AVWAPIndicator)
+
+
+def _split_loaded_anchors(
+    series: OHLCVSeries,
+    params: dict[str, Any],
+) -> tuple[list[AnchorRecord], list[AnchorRecord]]:
+    """
+    Split anchors into those computable on the loaded bars and those older
+    than the first loaded bar while older history is still loading. Once
+    history is complete every anchor is computable (an anchor older than the
+    whole window starts at bar 0, as before).
+    """
+    anchors: list[AnchorRecord] = params.get("anchors", [])
+    if params.get("_history_complete", True) or not series.bars:
+        return anchors, []
+    first_ts_ms = int(series.bars[0].timestamp.timestamp() * 1000)
+    loaded = [anchor for anchor in anchors if anchor.anchor_ts >= first_ts_ms]
+    unloaded = [anchor for anchor in anchors if anchor.anchor_ts < first_ts_ms]
+    return loaded, unloaded
 
 
 def avwap_anchor_key(anchor: AnchorRecord) -> str:
