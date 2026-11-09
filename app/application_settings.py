@@ -23,7 +23,11 @@ from PyQt6.QtWidgets import (
 )
 
 from app.dialogs import build_dialog_content, show_information, show_warning
-from app.data_quality import BarComparisonServiceLike, DataQualityTab
+from app.data_quality import (
+    BarComparisonServiceLike,
+    DataQualityTab,
+    SymbolRefresher,
+)
 from data.cache import Cache
 from data.models import Timeframe
 from data.provider import ProviderAvailability
@@ -149,6 +153,7 @@ class ApplicationSettingsDialog(QDialog):
         current_symbol: str | None = None,
         current_timeframe: Timeframe | None = None,
         comparison_service: BarComparisonServiceLike | None = None,
+        symbol_refresh: SymbolRefresher | None = None,
     ) -> None:
         super().__init__(parent)
         self._cache = cache
@@ -194,6 +199,7 @@ class ApplicationSettingsDialog(QDialog):
             initial_cache_namespace=initial_namespace,
             initial_symbol=current_symbol,
             initial_timeframe=current_timeframe,
+            symbol_refresh=symbol_refresh,
         )
         self._data_quality.bars_changed.connect(self._on_bars_changed)
         self._tabs.addTab(self._data_quality, "Data Quality")

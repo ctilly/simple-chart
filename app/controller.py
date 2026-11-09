@@ -38,6 +38,7 @@ import copy
 import math
 import os
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -62,6 +63,11 @@ from PyQt6.QtWidgets import (
 from app.extension_config import ExtensionConfigDialog
 from app.application_settings import ApplicationSettingsDialog
 from app.bar_comparison import BarComparisonService
+from app.data_quality import (
+    SymbolRefreshPlan,
+    SymbolRefreshState,
+    SymbolRefreshStatus,
+)
 from app.dialogs import show_information, show_warning
 from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
 from app.extension_store import ChartExtensionStore
@@ -81,6 +87,9 @@ from data.cache import Cache
 from data.calendar import bars_for_n_days
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.session import (
+    MARKET_TIMEZONE,
+    REGULAR_SESSION_OPEN,
+    completed_week_start,
     exchange_day_start as _exchange_day_start,
     daily_session_is_settled,
     expected_last_session_bar_start as _expected_last_session_bar_start,
@@ -98,6 +107,7 @@ from data.provider.base import (
     DataProvider,
     HistoryUnavailableError,
     RequestCancelledError,
+    UnsupportedTimeframeError,
     background_requests,
 )
 from data.provider.config import ProviderConnection, YFINANCE_CONNECTION_ID
@@ -163,6 +173,9 @@ _HISTORY_REFRESH_INTERVAL_MS = 1000
 _ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
 _ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
 _REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
+_CHART_TIMEFRAMES = tuple(
+    timeframe for timeframe in Timeframe if timeframe != Timeframe.MIN1
+)
 
 
 def _history_start(
@@ -170,15 +183,39 @@ def _history_start(
     aggregator: Aggregator,
     end: datetime,
 ) -> datetime:
+    """
+    Start of the history window ending at end. Intraday windows start at the
+    first session open at or after the lookback cutoff, so a window never
+    begins inside a session and splits a synthesized period.
+    """
     desired = (
         end - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
         if timeframe.is_intraday
         else _DAILY_HISTORY_START
     )
     provider_limit = aggregator.earliest_history_start(timeframe, end)
-    if provider_limit is None:
-        return desired
-    return max(desired, provider_limit)
+    cutoff = desired if provider_limit is None else max(desired, provider_limit)
+    if not timeframe.is_intraday:
+        return cutoff
+    return _first_session_open_at_or_after(cutoff)
+
+
+def _first_session_open_at_or_after(cutoff: datetime) -> datetime:
+    """
+    The first weekday 09:30 ET at or after cutoff. Weekday holidays are not
+    known, so a cutoff on one stays on that day.
+    """
+    local = cutoff.astimezone(MARKET_TIMEZONE)
+    day = local.date()
+    if local.time() > REGULAR_SESSION_OPEN:
+        day += timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return datetime.combine(
+        day,
+        REGULAR_SESSION_OPEN,
+        tzinfo=MARKET_TIMEZONE,
+    ).astimezone(cutoff.tzinfo)
 
 
 def _history_end(
@@ -187,6 +224,52 @@ def _history_end(
     end: datetime,
 ) -> datetime:
     return aggregator.latest_history_end(timeframe, end)
+
+
+def _refresh_history_starts(
+    aggregator: Aggregator,
+    now: datetime,
+) -> dict[Timeframe, datetime]:
+    """
+    _history_start of every chart timeframe the route serves and of each base
+    timeframe it synthesizes from.
+    """
+    starts: dict[Timeframe, datetime] = {}
+    for timeframe in _CHART_TIMEFRAMES:
+        try:
+            native = aggregator.native_timeframe(timeframe)
+        except UnsupportedTimeframeError:
+            continue
+        for fetched in (timeframe, native):
+            starts[fetched] = _history_start(
+                fetched,
+                aggregator,
+                _history_end(fetched, aggregator, now),
+            )
+    return starts
+
+
+def _rewind_boundaries(
+    history_starts: Mapping[Timeframe, datetime],
+) -> dict[Timeframe, int]:
+    """
+    UTC ms from which a symbol refresh replaces each timeframe's cached bars:
+    its history start, or for weekly bars the first week start at or after
+    it, so the week bar the refill does not request is kept.
+    """
+    boundaries: dict[Timeframe, int] = {}
+    for timeframe, start in history_starts.items():
+        boundary = start
+        if timeframe == Timeframe.WEEKLY:
+            boundary = completed_week_start(start)
+            if boundary != start:
+                # Wall-clock arithmetic in the exchange time zone keeps the
+                # next week start at local midnight across daylight saving.
+                boundary = (
+                    boundary.astimezone(MARKET_TIMEZONE) + timedelta(weeks=1)
+                ).astimezone(start.tzinfo)
+        boundaries[timeframe] = int(boundary.timestamp() * 1000)
+    return boundaries
 
 
 def _recent_history_start(
@@ -329,10 +412,29 @@ class _ChartLoadRequest:
     # Longest history lookback (trading days) among the chart's extensions;
     # widens the first fetch of a two-phase load.
     lookback_days: int = field(default=0, compare=False)
+    # History start a symbol refresh rewound this chart's timeframe to; the
+    # reload fetches from it instead of reading the clock again. None reads
+    # the clock.
+    history_start: datetime | None = None
 
     @property
     def cache_namespace(self) -> str:
         return self.connection.cache_namespace
+
+
+@dataclass(frozen=True)
+class _SymbolRefresh:
+    cache_namespace: str
+    symbol: str
+    aggregator: Aggregator
+
+
+@dataclass(frozen=True)
+class _RefreshReload:
+    """The on-screen reload of a refreshed symbol, until it ends."""
+
+    request: _ChartLoadRequest
+    rewound_at: datetime
 
 
 @dataclass
@@ -341,6 +443,20 @@ class _ChartLoadTask:
     thread: QThread
     worker: "_FetchWorker"
     cancellation_event: threading.Event
+
+
+def _clock_text(moment: datetime) -> str:
+    """Local wall-clock time like "2:04 AM"."""
+    local = moment.astimezone()
+    meridiem = "AM" if local.hour < 12 else "PM"
+    return f"{local.hour % 12 or 12}:{local.minute:02d} {meridiem}"
+
+
+def _refreshed_off_screen_text(symbol: str, rewound_at: datetime) -> str:
+    return (
+        f"{symbol} refreshed at {_clock_text(rewound_at)}. "
+        "It downloads when you open it."
+    )
 
 
 def _is_yahoo_futures_symbol(symbol: str) -> bool:
@@ -575,7 +691,11 @@ class _FetchWorker(QObject):
             cache_namespace = self._request.cache_namespace
             with Cache(self._db_path) as cache:
                 history_end = _history_end(timeframe, aggregator, now)
-                history_start = _history_start(timeframe, aggregator, history_end)
+                history_start = (
+                    self._request.history_start
+                    if self._request.history_start is not None
+                    else _history_start(timeframe, aggregator, history_end)
+                )
                 recent_start = _recent_history_start(
                     timeframe,
                     history_start,
@@ -630,6 +750,7 @@ class _FetchWorker(QObject):
                         symbol,
                         timeframe,
                         now,
+                        history_start=history_start,
                         cancellation_event=self._cancellation_event,
                         on_references_done=self._record_daily_done,
                     )
@@ -1625,6 +1746,11 @@ class MainWindow(QMainWindow):
         └─────────────────────────────────┘
     """
 
+    # (cache namespace, symbol) after a symbol refresh rewinds its cache.
+    symbol_rewound: pyqtSignal = pyqtSignal(str, str)
+    # (cache namespace, symbol) each time its refresh status changes.
+    symbol_refresh_status_changed: pyqtSignal = pyqtSignal(str, str)
+
     def __init__(
         self,
         db_path: str,
@@ -1788,6 +1914,15 @@ class MainWindow(QMainWindow):
         self._terminal_chart_generation: int | None = None
         self._pending_chart_load: _ChartLoadRequest | None = None
         self._chart_load_tasks: dict[int, _ChartLoadTask] = {}
+        # Refreshes waiting for their symbol's chart loads to finish, by
+        # (cache namespace, symbol). No load for that symbol dispatches
+        # until its cache is rewound.
+        self._symbol_refreshes: dict[tuple[str, str], _SymbolRefresh] = {}
+        # Latest refresh status line by (cache namespace, symbol).
+        self._symbol_refresh_statuses: dict[
+            tuple[str, str], SymbolRefreshStatus
+        ] = {}
+        self._refresh_reload: _RefreshReload | None = None
         # Request whose recent window is displayed while its older history
         # loads; None once the displayed series covers the full window.
         self._partial_history_request: _ChartLoadRequest | None = None
@@ -1882,11 +2017,13 @@ class MainWindow(QMainWindow):
     def _route_for_symbol(self, symbol: str) -> _DataRoute:
         return _route_for_symbol(symbol, self._selected_route, self._yahoo_route)
 
-    def _load(self) -> None:
+    def _load(self, history_start: datetime | None = None) -> None:
         """
         Kick off a background fetch for the current symbol and timeframe.
         Clears the chart immediately so the user sees a clean slate while
         loading, rather than stale data from the previous symbol.
+        history_start pins the reload after a symbol refresh to the start
+        the refresh rewound to.
         """
         if self._stopping_data_workers or self._state.symbol is None:
             return
@@ -1906,6 +2043,7 @@ class MainWindow(QMainWindow):
             self._state.timeframe,
             route.connection,
             requested_at,
+            history_start,
         )
         for task in self._chart_load_tasks.values():
             task.cancellation_event.set()
@@ -1915,6 +2053,8 @@ class MainWindow(QMainWindow):
         self._quote_refreshed_generation = (
             request.generation if quote_refreshed else None
         )
+        # A newer load replaced the refresh reload.
+        self._drop_refresh_reload()
         self._current_chart_request = request
         self._terminal_chart_generation = None
         self._partial_history_request = None
@@ -1930,6 +2070,7 @@ class MainWindow(QMainWindow):
         timeframe: Timeframe,
         connection: ProviderConnection,
         requested_at: float = 0.0,
+        history_start: datetime | None = None,
     ) -> _ChartLoadRequest:
         self._chart_load_generation += 1
         return _ChartLoadRequest(
@@ -1939,6 +2080,7 @@ class MainWindow(QMainWindow):
             connection=connection,
             requested_at=requested_at or time.monotonic(),
             lookback_days=self._extension_lookback_days(symbol),
+            history_start=history_start,
         )
 
     def _extension_lookback_days(self, symbol: str) -> int:
@@ -1969,6 +2111,7 @@ class MainWindow(QMainWindow):
             self._stopping_data_workers
             or request is None
             or len(self._chart_load_tasks) >= _MAX_ACTIVE_CHART_LOADS
+            or (request.cache_namespace, request.symbol) in self._symbol_refreshes
         ):
             return
         self._pending_chart_load = None
@@ -1986,6 +2129,7 @@ class MainWindow(QMainWindow):
                 and self._state.timeframe == request.timeframe
             ):
                 self._terminal_chart_generation = request.generation
+                self._end_refresh_reload(request, True)
                 self._on_fetch_error(
                     "The data source changed before the chart load started."
                 )
@@ -2028,9 +2172,200 @@ class MainWindow(QMainWindow):
         if task is None:
             return
         task.thread.deleteLater()
+        self._rewind_drained_symbols()
         if not self._stopping_data_workers and not self._chart_load_timer.isActive():
             self._dispatch_pending_chart_load()
         self._maybe_finalize_close()
+
+    def connect_symbol_rewound(self, slot: Callable[[str, str], None]) -> None:
+        self.symbol_rewound.connect(slot)
+
+    def symbol_refresh_status(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> SymbolRefreshStatus | None:
+        return self._symbol_refresh_statuses.get((cache_namespace, symbol))
+
+    def connect_symbol_refresh_status(
+        self,
+        slot: Callable[[str, str], None],
+    ) -> None:
+        self.symbol_refresh_status_changed.connect(slot)
+
+    def _set_symbol_refresh_status(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        text: str,
+        state: SymbolRefreshState = "done",
+    ) -> None:
+        self._symbol_refresh_statuses[(cache_namespace, symbol)] = (
+            SymbolRefreshStatus(state, text)
+        )
+        self.symbol_refresh_status_changed.emit(cache_namespace, symbol)
+
+    def _end_refresh_reload(
+        self,
+        request: _ChartLoadRequest,
+        failed: bool,
+    ) -> None:
+        """
+        Report the end of a terminal request if it is the refresh reload.
+        A failure never shows the error text, which can echo credentials.
+        """
+        reload = self._refresh_reload
+        if reload is None or reload.request.generation != request.generation:
+            return
+        self._refresh_reload = None
+        if failed:
+            text = (
+                f"{request.symbol} refresh stopped: the download failed. "
+                "The missing data downloads on the next load."
+            )
+        else:
+            text = (
+                f"{request.symbol} refreshed at "
+                f"{_clock_text(datetime.now(tz=timezone.utc))}. "
+                "Other timeframes update when you view them."
+            )
+        self._set_symbol_refresh_status(
+            request.cache_namespace,
+            request.symbol,
+            text,
+            "failed" if failed else "done",
+        )
+
+    def _drop_refresh_reload(self) -> None:
+        """
+        End an unfinished refresh reload that will not complete; the
+        rewound data downloads when the symbol is next shown.
+        """
+        reload = self._refresh_reload
+        if reload is None:
+            return
+        self._refresh_reload = None
+        self._set_symbol_refresh_status(
+            reload.request.cache_namespace,
+            reload.request.symbol,
+            _refreshed_off_screen_text(reload.request.symbol, reload.rewound_at),
+        )
+
+    def plan_symbol_refresh(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> SymbolRefreshPlan | None:
+        """
+        What refreshing the symbol's cached data from cache_namespace's
+        source would replace, as of now. None when no route in this session
+        serves that namespace. The rewind computes its own boundaries when it
+        runs.
+        """
+        route = next(
+            (
+                route
+                for route in (self._selected_route, self._yahoo_route)
+                if route.cache_namespace == cache_namespace
+            ),
+            None,
+        )
+        if route is None:
+            return None
+        now = datetime.now(tz=timezone.utc)
+        history_starts = _refresh_history_starts(route.aggregator, now)
+        intraday_days = max(
+            (now - start).days
+            for timeframe, start in history_starts.items()
+            if timeframe.is_intraday
+        )
+
+        def refresh() -> None:
+            self._refresh_symbol(
+                _SymbolRefresh(cache_namespace, symbol, route.aggregator)
+            )
+
+        return SymbolRefreshPlan(
+            intraday_days,
+            history_starts[Timeframe.DAILY].date(),
+            refresh,
+        )
+
+    def _refresh_symbol(self, refresh: _SymbolRefresh) -> None:
+        """
+        Hold new chart loads for the symbol, cancel its running ones, and
+        rewind its cache once their threads have finished.
+        """
+        key = (refresh.cache_namespace, refresh.symbol)
+        self._symbol_refreshes[key] = refresh
+        for task in self._chart_load_tasks.values():
+            if (task.request.cache_namespace, task.request.symbol) == key:
+                task.cancellation_event.set()
+        self._rewind_drained_symbols()
+        if key in self._symbol_refreshes:
+            self._set_symbol_refresh_status(
+                *key,
+                "Waiting for the current chart load to finish…",
+                state="running",
+            )
+
+    def _rewind_drained_symbols(self) -> None:
+        """
+        Rewind each refreshing symbol that no chart load is still writing,
+        then reload it if it is on screen. The reload fetches from the
+        history start the rewind used, so a session the rewind deleted is
+        never skipped because the clock moved on.
+        """
+        loading = {
+            (task.request.cache_namespace, task.request.symbol)
+            for task in self._chart_load_tasks.values()
+        }
+        for key, refresh in tuple(self._symbol_refreshes.items()):
+            if key in loading:
+                continue
+            del self._symbol_refreshes[key]
+            now = datetime.now(tz=timezone.utc)
+            history_starts = _refresh_history_starts(refresh.aggregator, now)
+            # Coverage of every rewound timeframe, native and synthesized, is
+            # removed: the reload is a cold load from a session start.
+            try:
+                self._cache.rewind_symbol_history(
+                    refresh.cache_namespace,
+                    refresh.symbol,
+                    _rewind_boundaries(history_starts),
+                    (),
+                )
+            except sqlite3.Error:
+                # The rewind is one transaction, so the cache is unchanged
+                # and loads for the symbol may continue.
+                self._set_symbol_refresh_status(
+                    *key,
+                    f"{refresh.symbol} refresh stopped: the cached data could "
+                    "not be cleared. Try again.",
+                    state="failed",
+                )
+                continue
+            self.symbol_rewound.emit(refresh.cache_namespace, refresh.symbol)
+            if (
+                not self._stopping_data_workers
+                and self._state.symbol == refresh.symbol
+                and self._route_for_symbol(refresh.symbol).cache_namespace
+                == refresh.cache_namespace
+            ):
+                self._load(history_starts[self._state.timeframe])
+                request = self._current_chart_request
+                assert request is not None
+                self._refresh_reload = _RefreshReload(request, now)
+                self._set_symbol_refresh_status(
+                    *key,
+                    f"Refreshing {refresh.symbol}…",
+                    state="running",
+                )
+            else:
+                self._set_symbol_refresh_status(
+                    *key,
+                    _refreshed_off_screen_text(refresh.symbol, now),
+                )
 
     def _is_current_chart_request(self, request: _ChartLoadRequest) -> bool:
         if (
@@ -2140,6 +2475,7 @@ class MainWindow(QMainWindow):
             return
         self._record_load_step(request, "history delivered")
         self._terminal_chart_generation = request.generation
+        self._end_refresh_reload(request, False)
         if self._partial_history_request != request:
             self._on_fetch_done(series)
             self._record_render_steps(request)
@@ -2156,6 +2492,7 @@ class MainWindow(QMainWindow):
             return
         self._record_load_step(request, "error delivered")
         self._terminal_chart_generation = request.generation
+        self._end_refresh_reload(request, True)
         if self._partial_history_request != request:
             self._on_fetch_error(message)
             return
@@ -3032,6 +3369,7 @@ class MainWindow(QMainWindow):
             current_symbol=self._state.symbol,
             current_timeframe=self._state.timeframe,
             comparison_service=comparison_service,
+            symbol_refresh=self,
         )
         result = dialog.exec()
         if dialog.bars_changed():
@@ -3159,6 +3497,7 @@ class MainWindow(QMainWindow):
         self._pending_chart_load = None
         self._held_history_merge = None
         self._reset_history_refresh()
+        self._drop_refresh_reload()
         for task in tuple(self._chart_load_tasks.values()):
             task.cancellation_event.set()
         if self._snapshot_cancellation_event is not None:

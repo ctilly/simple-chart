@@ -20,6 +20,7 @@ to populate the cache for next time.
 import json
 import math
 import sqlite3
+from collections.abc import Collection, Mapping
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -404,6 +405,68 @@ class Cache:
                     coverage_end_ts_ms,
                 ),
             )
+
+    def rewind_symbol_history(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        boundaries: Mapping[Timeframe, int],
+        synthesized_timeframes: Collection[Timeframe],
+    ) -> None:
+        """Delete one symbol's bars at or after each timeframe's boundary.
+
+        ``boundaries`` maps each timeframe to rewind to its boundary in UTC
+        ms; timeframes not in it are untouched. Coverage of a native
+        timeframe is removed so the next load refetches from scratch.
+        Coverage of a synthesized timeframe is cut back to the part before
+        its boundary, or removed when nothing before the boundary was
+        covered. Corrections and extension records are kept. All changes
+        happen in one transaction.
+        """
+        with self._conn:
+            for timeframe, boundary_ms in boundaries.items():
+                key = (cache_namespace, symbol, timeframe.value)
+                self._conn.execute(
+                    """
+                    DELETE FROM bars
+                    WHERE cache_namespace = ?
+                      AND symbol = ?
+                      AND timeframe = ?
+                      AND timestamp >= ?
+                    """,
+                    (*key, boundary_ms),
+                )
+                if timeframe not in synthesized_timeframes:
+                    self._conn.execute(
+                        """
+                        DELETE FROM bar_fetch_coverage
+                        WHERE cache_namespace = ?
+                          AND symbol = ?
+                          AND timeframe = ?
+                        """,
+                        key,
+                    )
+                    continue
+                self._conn.execute(
+                    """
+                    DELETE FROM bar_fetch_coverage
+                    WHERE cache_namespace = ?
+                      AND symbol = ?
+                      AND timeframe = ?
+                      AND start_timestamp >= ?
+                    """,
+                    (*key, boundary_ms),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE bar_fetch_coverage
+                    SET end_timestamp = MIN(end_timestamp, ?)
+                    WHERE cache_namespace = ?
+                      AND symbol = ?
+                      AND timeframe = ?
+                    """,
+                    (boundary_ms, *key),
+                )
 
     def refresh_provider_bar(
         self,

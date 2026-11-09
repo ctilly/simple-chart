@@ -14,7 +14,9 @@ from data.provider.base import DataProvider, HistoryUnavailableError
 _NAMESPACE = "alpaca:iex"
 _SYMBOL = "AAPL"
 _NOW = datetime(2026, 11, 5, 14, 0, tzinfo=UTC)
-_HISTORY_START = _NOW - timedelta(days=600)
+# The first session open at or after _NOW minus 600 days (Saturday
+# 2025-03-15 14:00 UTC): Monday 09:30 EDT.
+_HISTORY_START = datetime(2025, 3, 17, 13, 30, tzinfo=UTC)
 _SETTLED_END = datetime(2026, 11, 4, 21, 5, tzinfo=UTC)
 _SESSION_OPEN = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
 

@@ -309,11 +309,13 @@ def test_history_start_requests_deep_daily_data() -> None:
     assert _history_start(Timeframe.WEEKLY, Aggregator(FakeProvider()), now) == datetime(
         2016, 1, 1, tzinfo=timezone.utc
     )
+    # 55 days before now is Monday 2026-07-06 08:00 EDT; the window opens at
+    # that session's 09:30 open.
     assert _history_start(
         Timeframe.MIN5,
         Aggregator(LimitedHistoryProvider()),
         now,
-    ) == now - timedelta(days=55)
+    ) == datetime(2026, 7, 6, 13, 30, tzinfo=timezone.utc)
 
 
 def test_history_end_honors_provider_delay() -> None:

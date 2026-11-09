@@ -1,14 +1,15 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Protocol
+from datetime import UTC, date, datetime
+from typing import Literal, Protocol
 
 from PyQt6.QtCore import QDate, QObject, QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
     QDateEdit,
+    QDialog,
     QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
@@ -30,7 +31,7 @@ from app.bar_comparison import (
     BarComparisonRowKind,
     BarField,
 )
-from app.dialogs import show_information, show_warning
+from app.dialogs import build_dialog_content, show_information, show_warning
 from data.cache import Cache
 from data.calendar import MARKET_TIMEZONE
 from data.models import Bar, BarCorrection, BarInspection, Timeframe
@@ -63,6 +64,29 @@ _COMPARISON_FIELDS: dict[int, BarField] = {
 _SYNTHESIZED_TIMEFRAMES = (Timeframe.MIN39, Timeframe.MIN65)
 _PROVIDER_REVISION_COLOR = QColor("#fff3cd")
 _CORROBORATION_COLOR = QColor("#d9ead3")
+_REFRESH_STATUS_STYLE = """
+QLabel#symbolRefreshStatus {
+    padding: 6px 10px;
+    border-left: 4px solid;
+    border-radius: 3px;
+    font-weight: 600;
+}
+QLabel#symbolRefreshStatus[refreshState="running"] {
+    background: #eef2f4;
+    color: #33414d;
+    border-left-color: #8a8e96;
+}
+QLabel#symbolRefreshStatus[refreshState="done"] {
+    background: #e7f1fb;
+    color: #0b5cad;
+    border-left-color: #0b5cad;
+}
+QLabel#symbolRefreshStatus[refreshState="failed"] {
+    background: #fbeaea;
+    color: #a12e2e;
+    border-left-color: #c43d3d;
+}
+"""
 
 
 class BarComparisonServiceLike(Protocol):
@@ -74,6 +98,62 @@ class BarComparisonServiceLike(Protocol):
         cached_bar: Bar,
         should_cancel: Callable[[], bool] = ...,
     ) -> BarComparisonResult: ...
+
+
+@dataclass(frozen=True)
+class SymbolRefreshPlan:
+    """
+    What refreshing one symbol from its source replaces, as of planning.
+    ``refresh`` starts the refresh.
+    """
+
+    intraday_days: int
+    daily_since: date
+    refresh: Callable[[], None]
+
+
+SymbolRefreshState = Literal["running", "done", "failed"]
+
+
+@dataclass(frozen=True)
+class SymbolRefreshStatus:
+    """The status line of one symbol's latest refresh."""
+
+    state: SymbolRefreshState
+    text: str
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
+
+
+class SymbolRefresher(Protocol):
+    def plan_symbol_refresh(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> SymbolRefreshPlan | None:
+        """The plan, or None when the source is not connected."""
+        ...
+
+    def connect_symbol_rewound(self, slot: Callable[[str, str], None]) -> None:
+        """Call slot(cache_namespace, symbol) each time a symbol is rewound."""
+        ...
+
+    def symbol_refresh_status(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> SymbolRefreshStatus | None:
+        """The symbol's latest refresh status, or None if never refreshed."""
+        ...
+
+    def connect_symbol_refresh_status(
+        self,
+        slot: Callable[[str, str], None],
+    ) -> None:
+        """Call slot(cache_namespace, symbol) each time its status changes."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -179,11 +259,13 @@ class DataQualityTab(QWidget):
         initial_cache_namespace: str | None = None,
         initial_symbol: str | None = None,
         initial_timeframe: Timeframe | None = None,
+        symbol_refresh: SymbolRefresher | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("dataQualityTab")
         self._cache = cache
         self._comparison_service = comparison_service
+        self._symbol_refresh = symbol_refresh
         self._selected_inspection: BarInspection | None = None
         self._selected_deviation: float | None = None
         self._displayed_prices: dict[str, float] = {}
@@ -191,28 +273,34 @@ class DataQualityTab(QWidget):
         self._displayed_comparison_result: BarComparisonResult | None = None
         self._comparison_thread: QThread | None = None
         self._comparison_worker: _ComparisonWorker | None = None
+        # The comparison in flight whose result is still wanted.
+        self._comparison_request: _ComparisonRequest | None = None
         self._accept_comparison_results = True
 
         layout = QVBoxLayout(self)
         layout.addLayout(
-            self._build_scope_controls(
-                initial_cache_namespace,
-                initial_symbol,
-                initial_timeframe,
-            )
+            self._build_scope_controls(initial_cache_namespace, initial_symbol)
         )
-        layout.addLayout(self._build_search_controls())
-        self._bars = self._build_results_table()
-        layout.addWidget(self._bars, 1)
-        layout.addWidget(self._build_editor())
-        layout.addWidget(self._build_comparison(), 1)
+        self._refresh_status = QLabel("", self)
+        self._refresh_status.setObjectName("symbolRefreshStatus")
+        self._refresh_status.setWordWrap(True)
+        self._refresh_status.setStyleSheet(_REFRESH_STATUS_STYLE)
+        layout.addWidget(self._refresh_status)
+        layout.addWidget(self._build_inspection(initial_timeframe), 1)
         self._clear_editor()
+        if symbol_refresh is not None:
+            symbol_refresh.connect_symbol_rewound(self.discard_symbol_state)
+            symbol_refresh.connect_symbol_refresh_status(
+                self._symbol_refresh_status_changed
+            )
+        self._source.currentIndexChanged.connect(self._show_refresh_status)
+        self._symbol.textChanged.connect(self._show_refresh_status)
+        self._show_refresh_status()
 
     def _build_scope_controls(
         self,
         initial_cache_namespace: str | None,
         initial_symbol: str | None,
-        initial_timeframe: Timeframe | None,
     ) -> QHBoxLayout:
         row = QHBoxLayout()
         row.addWidget(QLabel("Data source", self))
@@ -236,6 +324,27 @@ class DataQualityTab(QWidget):
         self._symbol.setText("" if initial_symbol is None else initial_symbol)
         row.addWidget(self._symbol)
 
+        self._refresh_button = QPushButton("Refresh symbol from source", self)
+        self._refresh_button.setObjectName("refreshSymbolFromSource")
+        self._refresh_button.clicked.connect(self._refresh_symbol)
+        row.addWidget(self._refresh_button)
+        return row
+
+    def _build_inspection(self, initial_timeframe: Timeframe | None) -> QGroupBox:
+        group = QGroupBox("Inspect and correct bars", self)
+        layout = QVBoxLayout(group)
+        layout.addLayout(self._build_search_controls(initial_timeframe))
+        self._bars = self._build_results_table()
+        layout.addWidget(self._bars, 1)
+        layout.addWidget(self._build_editor())
+        layout.addWidget(self._build_comparison(), 1)
+        return group
+
+    def _build_search_controls(
+        self,
+        initial_timeframe: Timeframe | None,
+    ) -> QHBoxLayout:
+        row = QHBoxLayout()
         row.addWidget(QLabel("Timeframe", self))
         self._timeframe = QComboBox(self)
         self._timeframe.setObjectName("dataQualityTimeframe")
@@ -246,10 +355,8 @@ class DataQualityTab(QWidget):
             self._timeframe.findData(selected_timeframe)
         )
         row.addWidget(self._timeframe)
-        return row
+        row.addSpacing(20)
 
-    def _build_search_controls(self) -> QHBoxLayout:
-        row = QHBoxLayout()
         row.addWidget(QLabel("Minimum deviation", self))
         self._deviation = QDoubleSpinBox(self)
         self._deviation.setObjectName("dataQualityDeviation")
@@ -447,6 +554,82 @@ class DataQualityTab(QWidget):
             self._date.date().toPyDate(),
         )
         self._set_results([(inspection, None) for inspection in inspections])
+
+    def _refresh_symbol(self) -> None:
+        scope = self._scope()
+        refresher = self._symbol_refresh
+        if scope is None or refresher is None:
+            return
+        namespace, symbol, _timeframe = scope
+        plan = refresher.plan_symbol_refresh(namespace, symbol)
+        if plan is None:
+            show_information(
+                self,
+                "Refresh Unavailable",
+                f"{_source_label(namespace)} is not connected in this session. "
+                f"Make it the active data source, then refresh {symbol}.",
+            )
+            return
+        dialog = SymbolRefreshDialog(namespace, symbol, plan, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        plan.refresh()
+
+    @pyqtSlot(str, str)
+    def _symbol_refresh_status_changed(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> None:
+        self._show_refresh_status()
+
+    def _show_refresh_status(self) -> None:
+        """
+        Show the selected source and symbol's refresh status; the refresh
+        button is disabled while that refresh runs.
+        """
+        refresher = self._symbol_refresh
+        namespace = self._source.currentData()
+        symbol = self._symbol.text().strip().upper()
+        status = (
+            refresher.symbol_refresh_status(namespace, symbol)
+            if refresher is not None and isinstance(namespace, str) and symbol
+            else None
+        )
+        label = self._refresh_status
+        label.setText("" if status is None else status.text)
+        label.setHidden(status is None)
+        label.setProperty("refreshState", None if status is None else status.state)
+        style = label.style()
+        assert style is not None
+        style.unpolish(label)
+        style.polish(label)
+        self._refresh_button.setEnabled(
+            refresher is not None and (status is None or not status.running)
+        )
+
+    @pyqtSlot(str, str)
+    def discard_symbol_state(self, cache_namespace: str, symbol: str) -> None:
+        """Forget rows and comparisons read before the symbol was rewound."""
+        scope = (cache_namespace, symbol)
+        self._comparison_cache = {
+            key: value
+            for key, value in self._comparison_cache.items()
+            if (key.cache_namespace, key.symbol) != scope
+        }
+        request = self._comparison_request
+        if (
+            request is not None
+            and (request.key.cache_namespace, request.key.symbol) == scope
+        ):
+            self._comparison_request = None
+        item = self._bars.item(0, 0)
+        if item is None:
+            return
+        # Every row comes from one source and symbol search.
+        inspection, _deviation = item.data(_INSPECTION_ROLE)
+        if (inspection.cache_namespace, inspection.symbol) == scope:
+            self._set_results([])
 
     def _scope(self) -> tuple[str, str, Timeframe] | None:
         namespace = self._source.currentData()
@@ -651,6 +834,7 @@ class DataQualityTab(QWidget):
         thread.finished.connect(thread.deleteLater)
         self._comparison_worker = worker
         self._comparison_thread = thread
+        self._comparison_request = request
         self._compare_button.setEnabled(False)
         self._copy_comparison_button.setEnabled(False)
         self._refresh_provider_button.setEnabled(False)
@@ -666,6 +850,7 @@ class DataQualityTab(QWidget):
             not self._accept_comparison_results
             or not isinstance(request_value, _ComparisonRequest)
             or not isinstance(result_value, BarComparisonResult)
+            or request_value is not self._comparison_request
         ):
             return
         self._comparison_cache[request_value.key] = result_value
@@ -693,6 +878,7 @@ class DataQualityTab(QWidget):
     def _comparison_thread_finished(self) -> None:
         self._comparison_thread = None
         self._comparison_worker = None
+        self._comparison_request = None
         if not self._accept_comparison_results:
             return
         inspection = self._selected_inspection
@@ -834,8 +1020,7 @@ class DataQualityTab(QWidget):
         }
 
     def comparison_running(self) -> bool:
-        thread = self._comparison_thread
-        return thread is not None and thread.isRunning()
+        return self._comparison_thread is not None
 
     def shutdown_comparison(self) -> None:
         self._accept_comparison_results = False
@@ -931,6 +1116,47 @@ class DataQualityTab(QWidget):
         self._set_result_row(row, refreshed, self._selected_deviation)
         self._bars.setCurrentCell(row, 0)
         self._load_editor(refreshed)
+
+
+class SymbolRefreshDialog(QDialog):
+    def __init__(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        plan: SymbolRefreshPlan,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        title = f"Refresh {symbol}?"
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        layout = build_dialog_content(self, "symbolRefreshDialog", title)
+
+        message = QLabel(
+            f"{plan.intraday_days} days of intraday data and daily history "
+            f"since {plan.daily_since.year} can safely be refreshed from "
+            f"{_source_label(cache_namespace)}. Proceed?",
+            self,
+        )
+        message.setObjectName("symbolRefreshMessage")
+        message.setTextFormat(Qt.TextFormat.PlainText)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        refresh = QPushButton("Yes", self)
+        refresh.setObjectName("confirmSymbolRefresh")
+        refresh.setAutoDefault(False)
+        refresh.clicked.connect(self.accept)
+        buttons.addWidget(refresh)
+        cancel = QPushButton("No", self)
+        cancel.setObjectName("cancelSymbolRefresh")
+        cancel.setDefault(True)
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
 
 
 def _price_editor(object_name: str, parent: QWidget) -> QDoubleSpinBox:
