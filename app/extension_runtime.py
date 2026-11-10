@@ -9,8 +9,10 @@ from app.state import ChartExtensionState, State
 from chart.window import INITIAL_VISIBLE_BARS
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
+from simplechart.extensions._guard import call_extension, is_disabled
 from simplechart.api import (
     ChartEvent,
+    ChartExtension,
     DrawingSession,
     DrawingToolResult,
     DragSession,
@@ -22,7 +24,6 @@ from simplechart.api import (
     ChartExtensionRender,
     all_extensions,
     bars_for_n_days,
-    get_extension,
 )
 
 _DAY_MS = 86_400_000
@@ -62,6 +63,9 @@ class ChartExtensionRuntime:
         self._pending_history_ms: dict[str, int] = {}
         self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
+        # Render target each extension last rendered to, recorded by the
+        # host so cleanup after a failure never calls plugin code.
+        self._render_targets: dict[str, str] = {}
 
     @property
     def drag_active(self) -> bool:
@@ -89,7 +93,7 @@ class ChartExtensionRuntime:
         (history_complete=False), an extension whose history lookback the
         loaded bars do not yet cover is skipped and excluded from hit tests;
         its state is left untouched so saved visibility survives until it
-        renders.
+        renders. Turned-off extensions are skipped.
         """
         self._extension_store.prepare_active_extensions()
         daily_bars = self._daily_bars_for(series)
@@ -99,14 +103,23 @@ class ChartExtensionRuntime:
         self._history_complete = history_complete
         self._pending_history_ms = {}
         for ext_state in self._state.extensions:
+            if is_disabled(ext_state.name):
+                continue
             ext_state.params = self._extension_store.params_for(
                 ext_state.name,
                 ext_state.params,
             )
             if not history_complete:
-                lookback_days = get_extension(
-                    ext_state.name
-                ).history_lookback_days(ext_state.params)
+                extension = guarded_extension(ext_state.name)
+                if extension is None:
+                    continue
+                lookback_days = call_extension(
+                    ext_state.name,
+                    extension.history_lookback_days,
+                    ext_state.params,
+                )
+                if is_disabled(ext_state.name):
+                    continue
                 if not _lookback_loaded(series, lookback_days):
                     self._deferred_names.add(ext_state.name)
                     if lookback_days is not None and series.bars:
@@ -114,7 +127,9 @@ class ChartExtensionRuntime:
                             _lookback_start_ms(series, lookback_days)
                         )
                     continue
-            passes.append(self.render_one(ext_state, series, daily_bars))
+            render_pass = self.render_one(ext_state, series, daily_bars)
+            if render_pass is not None:
+                passes.append(render_pass)
         return passes
 
     def render_one(
@@ -122,8 +137,10 @@ class ChartExtensionRuntime:
         ext_state: ChartExtensionState,
         series: OHLCVSeries,
         daily_bars: list[Bar],
-    ) -> ChartExtensionRenderPass:
-        extension = get_extension(ext_state.name)
+    ) -> ChartExtensionRenderPass | None:
+        extension = guarded_extension(ext_state.name)
+        if extension is None:
+            return None
         # _daily_bars is a transient compute input (daily history for intraday
         # MA warmup). Merge it into a throwaway params dict for this render only,
         # never into the persisted ext_state.params — otherwise the full bar list
@@ -135,7 +152,12 @@ class ChartExtensionRuntime:
             "_daily_bars": daily_bars,
             "_history_complete": self._history_complete,
         }
-        render = extension.render(series, params)
+        render = call_extension(ext_state.name, extension.render, series, params)
+        if render is None:
+            return None
+        render_target = call_extension(ext_state.name, extension.render_target)
+        if render_target is None:
+            return None
         if render.pending_history_start_ms is None:
             self._pending_history_ms.pop(ext_state.name, None)
         else:
@@ -162,11 +184,22 @@ class ChartExtensionRuntime:
                 for key in ext_state.series_keys
                 if key in ext_state.series_visibility
             }
+        self._render_targets[ext_state.name] = render_target
         return ChartExtensionRenderPass(
             state=ext_state,
             render=render,
-            render_target=extension.render_target(),
+            render_target=render_target,
         )
+
+    def rendered_target(self, extension_name: str) -> str | None:
+        """The render target an extension last rendered to, if it has rendered."""
+        return self._render_targets.get(extension_name)
+
+    def release_turned_off_drag(self) -> None:
+        """Drop the drag session of an extension that was turned off."""
+        if self._drag_state is not None and is_disabled(self._drag_state.name):
+            self._drag_state = None
+            self._drag_session = None
 
     def chart_event(
         self,
@@ -197,12 +230,23 @@ class ChartExtensionRuntime:
         event: ChartEvent,
     ) -> list[ChartExtensionAction]:
         actions: list[ChartExtensionAction] = []
-        for name, cls in all_extensions().items():
-            extension = cls()
-            ext_state = self._state.get_extension(name)
-            params = ext_state.params if ext_state is not None else extension.default_params()
+        for name in all_extensions():
+            extension = guarded_extension(name)
+            if extension is None:
+                continue
+            params = self._base_params(name, extension)
+            if params is None:
+                continue
             params = self._extension_store.params_for(name, params)
-            actions.extend(extension.context_actions(series, params, event))
+            found = call_extension(
+                name,
+                extension.context_actions,
+                series,
+                params,
+                event,
+            )
+            if found is not None:
+                actions.extend(found)
         return actions
 
     def apply_action(
@@ -211,11 +255,22 @@ class ChartExtensionRuntime:
         action: ChartExtensionAction,
         event: ChartEvent,
     ) -> None:
-        extension = get_extension(action.extension_name)
-        ext_state = self._state.get_extension(action.extension_name)
-        params = ext_state.params if ext_state is not None else extension.default_params()
-        params = self._extension_store.params_for(action.extension_name, params)
-        mutation = extension.apply_action(series, params, action.action_key, event)
+        name = action.extension_name
+        extension = guarded_extension(name)
+        if extension is None:
+            return
+        params = self._base_params(name, extension)
+        if params is None:
+            return
+        params = self._extension_store.params_for(name, params)
+        mutation = call_extension(
+            name,
+            extension.apply_action,
+            series,
+            params,
+            action.action_key,
+            event,
+        )
         if mutation is not None:
             self.apply_mutation(mutation)
 
@@ -229,14 +284,23 @@ class ChartExtensionRuntime:
         for ext_state in self._state.extensions:
             if ext_state.name in self._deferred_names:
                 continue
-            extension = get_extension(ext_state.name)
+            extension = guarded_extension(ext_state.name)
+            if extension is None:
+                continue
             params = self._params_for_state(ext_state)
             visible_keys = {
                 key
                 for key in ext_state.series_keys
                 if ext_state.series_visibility.get(key, ext_state.visible)
             }
-            hit = extension.hit_test(series, params, event, visible_keys)
+            hit = call_extension(
+                ext_state.name,
+                extension.hit_test,
+                series,
+                params,
+                event,
+                visible_keys,
+            )
             if hit is None:
                 continue
             if best_hit is None or hit.priority > best_hit.priority:
@@ -244,13 +308,20 @@ class ChartExtensionRuntime:
                 best_hit = hit
         if best_state is None or best_hit is None:
             return False
-        extension = get_extension(best_state.name)
-        self._drag_state = best_state
-        self._drag_session = extension.begin_drag(
+        extension = guarded_extension(best_state.name)
+        if extension is None:
+            return False
+        session = call_extension(
+            best_state.name,
+            extension.begin_drag,
             series,
             self._params_for_state(best_state),
             best_hit,
         )
+        if session is None or is_disabled(best_state.name):
+            return False
+        self._drag_state = best_state
+        self._drag_session = session
         return True
 
     def drag_to(
@@ -260,14 +331,26 @@ class ChartExtensionRuntime:
     ) -> ChartExtensionRenderPass | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        extension = get_extension(self._drag_state.name)
-        render = extension.drag_to(series, self._drag_session, event)
+        drag_state = self._drag_state
+        extension = guarded_extension(drag_state.name)
+        if extension is None:
+            return None
+        render = call_extension(
+            drag_state.name,
+            extension.drag_to,
+            series,
+            self._drag_session,
+            event,
+        )
         if render is None:
             return None
+        render_target = call_extension(drag_state.name, extension.render_target)
+        if render_target is None:
+            return None
         return ChartExtensionRenderPass(
-            state=self._drag_state,
+            state=drag_state,
             render=render,
-            render_target=extension.render_target(),
+            render_target=render_target,
         )
 
     def finish_drag(
@@ -277,8 +360,12 @@ class ChartExtensionRuntime:
     ) -> ChartExtensionMutation | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        extension = get_extension(self._drag_state.name)
-        mutation = extension.finish_drag(series, self._drag_session, event)
+        name = self._drag_state.name
+        session = self._drag_session
+        extension = guarded_extension(name)
+        mutation = None
+        if extension is not None:
+            mutation = call_extension(name, extension.finish_drag, series, session, event)
         self._drag_state = None
         self._drag_session = None
         if mutation is not None:
@@ -288,8 +375,12 @@ class ChartExtensionRuntime:
     def cancel_drag(self) -> ChartExtensionMutation | None:
         if self._drag_state is None or self._drag_session is None:
             return None
-        extension = get_extension(self._drag_state.name)
-        mutation = extension.cancel_drag(self._drag_session)
+        name = self._drag_state.name
+        session = self._drag_session
+        extension = guarded_extension(name)
+        mutation = None
+        if extension is not None:
+            mutation = call_extension(name, extension.cancel_drag, session)
         self._drag_state = None
         self._drag_session = None
         if mutation is not None:
@@ -302,16 +393,27 @@ class ChartExtensionRuntime:
         series: OHLCVSeries,
         event: ChartEvent,
     ) -> DrawingToolResult:
-        extension = get_extension(extension_name)
-        ext_state = self._state.get_extension(extension_name)
-        params = ext_state.params if ext_state is not None else extension.default_params()
+        extension = guarded_extension(extension_name)
+        if extension is None:
+            return _ended_drawing()
+        params = self._base_params(extension_name, extension)
+        if params is None:
+            return _ended_drawing()
         params = self._extension_store.params_for(extension_name, params)
-        result = extension.start_drawing(series, params, event)
+        result = call_extension(
+            extension_name,
+            extension.start_drawing,
+            series,
+            params,
+            event,
+        )
+        if result is None:
+            return _ended_drawing()
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
         if result.clear_transient:
             self._extension_store.clear_transient_drawings()
-        return result
+        return _unless_disabled(extension_name, result)
 
     def drawing_hit_test(
         self,
@@ -322,8 +424,11 @@ class ChartExtensionRuntime:
         for ext_state in self._state.extensions:
             if ext_state.name in self._deferred_names:
                 continue
-            extension = get_extension(ext_state.name)
-            if extension.add_mode() != ChartExtensionAddMode.TOOLBAR:
+            extension = guarded_extension(ext_state.name)
+            if extension is None:
+                continue
+            add_mode = call_extension(ext_state.name, extension.add_mode)
+            if add_mode != ChartExtensionAddMode.TOOLBAR:
                 continue
             params = self._params_for_state(ext_state)
             visible_keys = {
@@ -331,7 +436,14 @@ class ChartExtensionRuntime:
                 for key in ext_state.series_keys
                 if ext_state.series_visibility.get(key, ext_state.visible)
             }
-            hit = extension.hit_test(series, params, event, visible_keys)
+            hit = call_extension(
+                ext_state.name,
+                extension.hit_test,
+                series,
+                params,
+                event,
+                visible_keys,
+            )
             if hit is None:
                 continue
             if best_hit is None or hit.priority > best_hit.priority:
@@ -344,14 +456,20 @@ class ChartExtensionRuntime:
         session: DrawingSession,
         event: ChartEvent,
     ) -> ChartExtensionRenderPass | None:
-        extension = get_extension(session.extension_name)
-        render = extension.preview_drawing(series, session, event)
+        name = session.extension_name
+        extension = guarded_extension(name)
+        if extension is None:
+            return None
+        render = call_extension(name, extension.preview_drawing, series, session, event)
         if render is None:
+            return None
+        render_target = call_extension(name, extension.render_target)
+        if render_target is None:
             return None
         return ChartExtensionRenderPass(
             state=self._drawing_state(session, render),
             render=render,
-            render_target=extension.render_target(),
+            render_target=render_target,
         )
 
     def advance_drawing(
@@ -360,29 +478,42 @@ class ChartExtensionRuntime:
         session: DrawingSession,
         event: ChartEvent,
     ) -> DrawingToolResult:
-        extension = get_extension(session.extension_name)
-        result = extension.advance_drawing(series, session, event)
+        name = session.extension_name
+        extension = guarded_extension(name)
+        if extension is None:
+            return _ended_drawing()
+        result = call_extension(name, extension.advance_drawing, series, session, event)
+        if result is None:
+            return _ended_drawing()
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
-        return result
+        return _unless_disabled(name, result)
 
     def commit_drawing(
         self,
         series: OHLCVSeries,
         session: DrawingSession,
     ) -> DrawingToolResult:
-        extension = get_extension(session.extension_name)
-        result = extension.commit_drawing(series, session)
+        name = session.extension_name
+        extension = guarded_extension(name)
+        if extension is None:
+            return _ended_drawing()
+        result = call_extension(name, extension.commit_drawing, series, session)
+        if result is None:
+            return _ended_drawing()
         if result.mutation is not None:
             self.apply_mutation(result.mutation)
-        return result
+        return _unless_disabled(name, result)
 
     def cancel_drawing(
         self,
         session: DrawingSession,
     ) -> ChartExtensionMutation | None:
-        extension = get_extension(session.extension_name)
-        mutation = extension.cancel_drawing(session)
+        name = session.extension_name
+        extension = guarded_extension(name)
+        if extension is None:
+            return None
+        mutation = call_extension(name, extension.cancel_drawing, session)
         if mutation is not None:
             self.apply_mutation(mutation)
         return mutation
@@ -394,9 +525,19 @@ class ChartExtensionRuntime:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
             return None
-        extension = get_extension(ext_state.name)
+        extension = guarded_extension(ext_state.name)
+        if extension is None:
+            return None
         params = self._params_for_state(ext_state)
-        if extension.toggles_series_independently(series_key, params):
+        independent = call_extension(
+            ext_state.name,
+            extension.toggles_series_independently,
+            series_key,
+            params,
+        )
+        if is_disabled(ext_state.name):
+            return None
+        if independent:
             visible = not ext_state.series_visibility.get(series_key, ext_state.visible)
             ext_state.series_visibility[series_key] = visible
             return [series_key], visible
@@ -408,13 +549,25 @@ class ChartExtensionRuntime:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
             return None
-        extension = get_extension(ext_state.name)
+        extension = guarded_extension(ext_state.name)
+        if extension is None:
+            return None
         params = self._params_for_state(ext_state)
-        request = extension.config_for_series(series_key, params)
+        request = call_extension(
+            ext_state.name,
+            extension.config_for_series,
+            series_key,
+            params,
+        )
+        if is_disabled(ext_state.name):
+            return None
         if request is not None:
             return request
+        label = call_extension(ext_state.name, extension.label)
+        if label is None:
+            return None
         return ChartExtensionConfig(
-            label=extension.label(),
+            label=label,
             params=ext_state.params,
         )
 
@@ -427,13 +580,19 @@ class ChartExtensionRuntime:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
             return
-        extension = get_extension(ext_state.name)
-        mutation = extension.apply_config_to_series(
+        extension = guarded_extension(ext_state.name)
+        if extension is None:
+            return
+        mutation = call_extension(
+            ext_state.name,
+            extension.apply_config_to_series,
             series_key,
             self._params_for_state(ext_state),
             params,
             y_range=y_range,
         )
+        if is_disabled(ext_state.name):
+            return
         if mutation is not None:
             self.apply_mutation(mutation)
             return
@@ -443,19 +602,27 @@ class ChartExtensionRuntime:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
             return None
-        extension = get_extension(ext_state.name)
-        mutation = extension.remove_series(
+        extension = guarded_extension(ext_state.name)
+        if extension is None:
+            return None
+        mutation = call_extension(
+            ext_state.name,
+            extension.remove_series,
             series_key,
             self._params_for_state(ext_state),
         )
+        if is_disabled(ext_state.name):
+            return None
+        render_target = call_extension(ext_state.name, extension.render_target)
+        if render_target is None:
+            return None
         if mutation is not None:
             self.apply_mutation(mutation)
             return ChartExtensionRemoval(
                 series_keys=[series_key],
-                render_target=extension.render_target(),
+                render_target=render_target,
             )
 
-        render_target = extension.render_target()
         series_keys = list(ext_state.series_keys)
         self._state.extensions = [
             state for state in self._state.extensions
@@ -464,7 +631,7 @@ class ChartExtensionRuntime:
         release_panel = False
         if render_target != "chart":
             release_panel = not any(
-                get_extension(state.name).render_target() == render_target
+                _render_target(state.name) == render_target
                 for state in self._state.extensions
             )
         return ChartExtensionRemoval(
@@ -472,6 +639,16 @@ class ChartExtensionRuntime:
             render_target=render_target,
             release_panel=release_panel,
         )
+
+    def _base_params(
+        self,
+        name: str,
+        extension: ChartExtension,
+    ) -> dict[str, Any] | None:
+        ext_state = self._state.get_extension(name)
+        if ext_state is not None:
+            return ext_state.params
+        return call_extension(name, extension.default_params)
 
     def _params_for_state(self, ext_state: ChartExtensionState) -> dict[str, Any]:
         return self._extension_store.params_for(ext_state.name, ext_state.params)
@@ -542,6 +719,34 @@ class ChartExtensionRuntime:
         if not candidates:
             return None
         return min(candidates, key=lambda candidate: abs(timestamps[candidate] - x_ms))
+
+
+def guarded_extension(name: str) -> ChartExtension | None:
+    # A guarded construction: None when the extension is turned off, failed
+    # to construct, or is not registered (its plugin was skipped at load).
+    cls = all_extensions().get(name)
+    if cls is None:
+        return None
+    return call_extension(name, cls)
+
+
+def _render_target(name: str) -> str | None:
+    extension = guarded_extension(name)
+    if extension is None:
+        return None
+    return call_extension(name, extension.render_target)
+
+
+def _ended_drawing() -> DrawingToolResult:
+    # What a drawing call returns when its tool is turned off: the session
+    # ends and the tool is deactivated.
+    return DrawingToolResult(cancel=True, deactivate_tool=True)
+
+
+def _unless_disabled(name: str, result: DrawingToolResult) -> DrawingToolResult:
+    # A store handler of the tool's own plugin can fail while the result's
+    # mutation is applied; the session must not continue for a turned-off tool.
+    return _ended_drawing() if is_disabled(name) else result
 
 
 def _lookback_loaded(series: OHLCVSeries, lookback_days: int | None) -> bool:

@@ -727,8 +727,11 @@ def test_quote_errors_finish_and_allow_current_route_retry(
     assert received == []
     assert window._snapshot_worker is None
     assert window._level1_worker is None
-    assert any("snapshot failed" in message for message in messages)
-    assert any("quote failed" in message for message in messages)
+    assert sorted(messages) == [
+        "Quote unavailable: Loading the SPY quote failed. Details were logged.",
+        "Watchlist quotes unavailable: Loading watchlist quotes failed. "
+        "Details were logged.",
+    ]
     market.snapshot_error = False
     market.quote_error = False
     window._refresh_watchlist_snapshots()

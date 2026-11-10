@@ -8,6 +8,7 @@ from app.controller import (
     _DataRoute,
     _Level1Worker,
     _Level1Request,
+    _ProviderValidationWorker,
     _QuoteRouteIdentity,
     _SnapshotBatch,
     _SnapshotRequest,
@@ -24,6 +25,7 @@ from app.controller import (
 from app.header_bar import _level1_html
 from data.aggregator import Aggregator
 from data.cache import Cache
+from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, HistoryUnavailableError
 from data.provider.config import alpaca_paper_connection, yfinance_connection
@@ -1497,8 +1499,18 @@ def test_provider_validation_exercises_market_data_snapshot() -> None:
 
 
 def test_provider_validation_rejects_missing_market_data() -> None:
-    with pytest.raises(RuntimeError, match="market-data snapshot"):
+    with pytest.raises(UserFacingError, match="market-data snapshot"):
         _validate_provider_connection(FakeProvider())
+
+
+def test_provider_validation_shows_the_missing_snapshot_message() -> None:
+    errors: list[str] = []
+    worker = _ProviderValidationWorker(FakeProvider(), "Alpaca Paper")
+    worker.error.connect(errors.append)
+
+    worker.run()
+
+    assert errors == ["The provider returned no SPY market-data snapshot."]
 
 
 def test_company_name_resolution_uses_fresh_provider_neutral_cache(

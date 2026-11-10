@@ -322,3 +322,13 @@ After all steps are complete:
 - Do not add docstrings, type hints, or comments to existing code you did not change
 - Build only what is needed — no speculative parameters or future-proofing
 - Prefer simple, readable code over clever code
+- Errors are handled by the host. Do not catch exceptions just to keep the
+  app alive: if any extension or store-handler method raises, SimpleChart logs
+  the failure with secrets removed (exception type names and code locations,
+  never the message text) and turns that extension off until restart, along
+  with every extension registered by the same module when its store handler
+  raises. Other extensions keep working. A plugin that raises while loading is
+  rolled back and skipped. The exception's text is never displayed; the user
+  sees only a fixed notice naming the extension's label.
+- Plugins never receive credentials, and must not try to read them. Plugins
+  are trusted code: they run in the app's process with its permissions.

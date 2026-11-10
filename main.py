@@ -21,7 +21,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication
 
-from app.controller import MainWindow
+from simplechart.output_safety import install
 
 
 _DEFAULT_DB = Path.home() / ".simplechart" / "simplechart.db"
@@ -103,6 +103,11 @@ def _build_fallback_icon(size: int = 256) -> QIcon:
 
 
 def main() -> None:
+    # Output safety must be in place before the application, its libraries
+    # and plugins are imported.
+    install()
+    from app.controller import MainWindow
+
     args = _parse_args()
 
     # Ensure the database directory exists before SQLite tries to open the file.

@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,12 @@ from data.provider.config import (
     MarketDataFeed,
     YFINANCE_CONNECTION_ID,
 )
-from data.provider.credentials import ProviderCredentials
+from data.provider.credentials import (
+    ProviderCredentials,
+    initialize_keyring_credential_store,
+)
+from realistic_errors import SECRET, SecretLeakingKeyring, assert_secret_absent
+from ui_text import capture_message_dialogs, widget_text
 
 
 _AVAILABLE_PROVIDERS = {
@@ -291,3 +297,98 @@ def test_alpaca_connection_dialog_keeps_stored_credentials_when_blank(
         dialog.accept()
 
         assert store.get(ALPACA_PAPER_CONNECTION_ID) == stored
+
+
+@pytest.mark.parametrize(
+    ("store_available", "reason"),
+    [
+        (True, "Unable to save provider credentials in the OS keyring."),
+        (False, "The operating-system credential store is unavailable."),
+    ],
+)
+def test_alpaca_connection_dialog_credential_save_error_is_shielded(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    store_available: bool,
+    reason: str,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    access = initialize_keyring_credential_store(
+        SecretLeakingKeyring(SECRET, available=store_available)
+    )
+    credentials = ProviderCredentials(f"AK{SECRET}", SECRET)
+    with pytest.raises(RuntimeError) as raised:
+        access.store.put(ALPACA_PAPER_CONNECTION_ID, credentials)
+    with Cache(str(tmp_path / "test.db")) as cache:
+        connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
+        assert connection is not None
+        dialog = AlpacaConnectionDialog(connection, cache, access.store)
+        qtbot.addWidget(dialog)
+        key_id = dialog.findChild(QLineEdit, "alpacaApiKeyId")
+        secret = dialog.findChild(QLineEdit, "alpacaApiSecret")
+        assert key_id is not None
+        assert secret is not None
+        key_id.setText(credentials.api_key_id)
+        secret.setText(credentials.api_secret)
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        dialog.accept()
+
+        assert dialog.result() != QDialog.DialogCode.Accepted
+
+    assert [(item.title, item.message) for item in shown] == [
+        ("Credential Store Error", reason),
+    ]
+    # The typed fields legitimately hold the secret; the message and log never.
+    for text in (shown[0].all_text, caplog.text):
+        assert_secret_absent(text)
+        if raised.value.__cause__ is not None:
+            assert str(raised.value.__cause__) not in text
+    assert "CredentialStoreUnavailableError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("store_available", "reason"),
+    [
+        (True, "Unable to read provider credentials from the OS keyring."),
+        (False, "The operating-system credential store is unavailable."),
+    ],
+)
+def test_application_settings_credential_read_error_is_shielded(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    store_available: bool,
+    reason: str,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    access = initialize_keyring_credential_store(
+        SecretLeakingKeyring(SECRET, available=store_available)
+    )
+    with pytest.raises(RuntimeError) as raised:
+        access.store.get(ALPACA_PAPER_CONNECTION_ID)
+    with Cache(str(tmp_path / "test.db")) as cache:
+        dialog = ApplicationSettingsDialog(cache, access.store, _AVAILABLE_PROVIDERS)
+        qtbot.addWidget(dialog)
+        active = dialog.findChild(QComboBox, "activeDataSource")
+        assert active is not None
+        active.setCurrentIndex(active.findData(ALPACA_PAPER_CONNECTION_ID))
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        dialog.accept()
+
+        assert dialog.result() != QDialog.DialogCode.Accepted
+        texts = [widget_text(dialog), caplog.text]
+
+    assert [(item.title, item.message) for item in shown] == [
+        ("Credential Store Error", reason),
+    ]
+    for text in (*texts, shown[0].all_text):
+        assert_secret_absent(text)
+        if raised.value.__cause__ is not None:
+            assert str(raised.value.__cause__) not in text

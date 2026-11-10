@@ -4,7 +4,11 @@ from typing import Any
 from app.state import ChartExtensionState
 from app.state import State
 from data.cache import Cache
-from simplechart.extensions._store_registry import all_store_handlers
+from simplechart.extensions._guard import call_store_handler
+from simplechart.extensions._store_registry import (
+    all_store_handlers,
+    store_handler_owner,
+)
 from simplechart.api import (
     ChartExtensionMutation,
     ChartExtensionStoreHandler,
@@ -14,6 +18,8 @@ from simplechart.api import (
 
 
 class ChartExtensionStore:
+    # Every handler call goes through the guard individually: a handler that
+    # raises turns off only its owner's extensions, and the loop goes on.
 
     def __init__(
         self,
@@ -22,32 +28,37 @@ class ChartExtensionStore:
         handlers: Sequence[ChartExtensionStoreHandler] | None = None,
     ) -> None:
         context = AppChartExtensionStoreContext(state, cache)
+        self._handlers: list[tuple[str, ChartExtensionStoreHandler]] = []
         if handlers is not None:
-            self._handlers = list(handlers)
-        else:
-            self._handlers = [
-                factory(context)
-                for factory in all_store_handlers()
-            ]
+            for handler in handlers:
+                owner = store_handler_owner(type(handler))
+                self._handlers.append(
+                    (owner if owner is not None else type(handler).__module__, handler)
+                )
+            return
+        for factory, owner in all_store_handlers():
+            created = call_store_handler(owner, factory, context)
+            if created is not None:
+                self._handlers.append((owner, created))
 
     def load_for_symbol(self, symbol: str) -> None:
-        for handler in self._handlers:
-            handler.load_for_symbol(symbol)
+        for owner, handler in self._handlers:
+            call_store_handler(owner, handler.load_for_symbol, symbol)
 
     def apply(self, mutation: ChartExtensionMutation) -> None:
-        for handler in self._handlers:
-            handler.apply(mutation)
+        for owner, handler in self._handlers:
+            call_store_handler(owner, handler.apply, mutation)
 
     def prepare_active_extensions(self) -> None:
-        for handler in self._handlers:
-            handler.prepare_active_extensions()
+        for owner, handler in self._handlers:
+            call_store_handler(owner, handler.prepare_active_extensions)
 
     def clear_transient_drawings(self) -> None:
         # Only drawing stores own erasable drawings; indicator handlers (e.g.
         # AVWAP anchors) are not drawings and are never touched here.
-        for handler in self._handlers:
+        for owner, handler in self._handlers:
             if isinstance(handler, DrawingStore):
-                handler.clear_transient()
+                call_store_handler(owner, handler.clear_transient)
 
     def params_for(
         self,
@@ -55,8 +66,15 @@ class ChartExtensionStore:
         base_params: dict[str, Any],
     ) -> dict[str, Any]:
         params = base_params
-        for handler in self._handlers:
-            params = handler.params_for(extension_name, params)
+        for owner, handler in self._handlers:
+            resolved = call_store_handler(
+                owner,
+                handler.params_for,
+                extension_name,
+                params,
+            )
+            if resolved is not None:
+                params = resolved
         return params
 
 

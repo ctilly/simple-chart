@@ -23,6 +23,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from io import TextIOWrapper
 
+from simplechart.output_safety import SafeFormatter
+
 LOAD_TIMING_ENV = "SIMPLECHART_LOAD_TIMING"
 _LOG_NAME = "load-timing.log"
 _MAX_BYTES = 1_000_000
@@ -67,7 +69,7 @@ class LoadTimingLog:
             )
         except OSError:
             return
-        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.setFormatter(SafeFormatter("%(message)s"))
         logger = logging.Logger("simplechart.load_timing")
         logger.propagate = False
         logger.addHandler(handler)

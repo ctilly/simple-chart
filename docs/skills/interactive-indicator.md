@@ -94,6 +94,16 @@ Test plan:
   - `register_extension(YourIndicator)`
   - `register_store_handler(YourStoreHandler)` when persistent/runtime state is needed
 - Store handlers live with the indicator package, not in `app/`.
+- Errors are handled by the host. Do not catch exceptions just to keep the
+  app alive: if any extension or store-handler method raises, SimpleChart logs
+  the failure with secrets removed (exception type names and code locations,
+  never the message text) and turns that extension off until restart, along
+  with every extension registered by the same module when its store handler
+  raises. Other extensions keep working. A plugin that raises while loading is
+  rolled back and skipped. The exception's text is never displayed; the user
+  sees only a fixed notice naming the extension's label.
+- Plugins never receive credentials, and must not try to read them. Plugins
+  are trusted code: they run in the app's process with its permissions.
 - Numeric hot paths live in `_kernel.py` and take/return numpy arrays.
 - Project plugins may be `.py` files or packages under `indicators/`. User
   plugins under `~/.simplechart/plugins/` are currently loaded as `.py` files.

@@ -395,8 +395,9 @@ def test_startup_uses_yahoo_when_saved_alpaca_credentials_are_missing(
         )
 
         assert routes.selected.connection.connection_id == YFINANCE_CONNECTION_ID
-        assert routes.fallback_reason is not None
-        assert "credentials are not configured" in routes.fallback_reason
+        assert routes.fallback_reason == (
+            "Alpaca Paper credentials are not configured."
+        )
         assert (
             cache.get_active_provider_connection_id()
             == ALPACA_PAPER_CONNECTION_ID

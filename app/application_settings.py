@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable, Mapping
 
 from PyQt6.QtCore import Qt
@@ -23,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.dialogs import build_dialog_content, show_information, show_warning
+from app.errors import ErrorContext, report_error
 from app.data_quality import (
     BarComparisonServiceLike,
     DataQualityTab,
@@ -37,6 +39,9 @@ from data.provider.config import (
     YFINANCE_CONNECTION_ID,
 )
 from data.provider.credentials import CredentialStore, ProviderCredentials
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AlpacaConnectionDialog(QDialog):
@@ -118,7 +123,14 @@ class AlpacaConnectionDialog(QDialog):
                     ProviderCredentials(api_key_id, api_secret),
                 )
             except RuntimeError as exc:
-                show_warning(self, "Credential Store Error", str(exc))
+                context = ErrorContext(
+                    f"Saving {self._connection.display_name} credentials"
+                )
+                show_warning(
+                    self,
+                    "Credential Store Error",
+                    report_error(_LOGGER, exc, context),
+                )
                 return
 
         feed = self._feed.currentData()
@@ -232,7 +244,14 @@ class ApplicationSettingsDialog(QDialog):
             try:
                 credentials = self._credential_store.get(connection_id)
             except RuntimeError as exc:
-                show_warning(self, "Credential Store Error", str(exc))
+                context = ErrorContext(
+                    f"Reading {connection.display_name} credentials"
+                )
+                show_warning(
+                    self,
+                    "Credential Store Error",
+                    report_error(_LOGGER, exc, context),
+                )
                 return
             if credentials is None:
                 show_warning(

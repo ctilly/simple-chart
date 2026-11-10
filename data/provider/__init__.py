@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from importlib import import_module
 
+from data.errors import UserFacingError
 from data.provider.base import DataProvider
 from data.provider.config import ProviderConnection
 from data.provider.credentials import (
@@ -25,7 +26,7 @@ from data.provider.credentials import (
 )
 
 
-class ProviderConfigurationError(RuntimeError):
+class ProviderConfigurationError(UserFacingError, RuntimeError):
     pass
 
 
@@ -53,7 +54,7 @@ def _create_yfinance_provider(
 ) -> DataProvider:
     from data.provider.yfinance_provider import YFinanceProvider
 
-    return YFinanceProvider()
+    return YFinanceProvider(display_name=connection.display_name)
 
 
 def _create_alpaca_provider(
@@ -74,6 +75,7 @@ def _create_alpaca_provider(
         credentials.api_key_id,
         credentials.api_secret,
         connection.feed,
+        display_name=connection.display_name,
     )
 
 

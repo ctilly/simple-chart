@@ -1,3 +1,4 @@
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -16,9 +17,30 @@ class GuiLauncherTests(unittest.TestCase):
         application = ModuleType("main")
         run = Mock()
         application.main = run  # type: ignore[attr-defined]
-        with patch.dict("sys.modules", {"main": application}):
+        with (
+            patch.dict("sys.modules", {"main": application}),
+            patch.object(gui_launcher, "install"),
+        ):
             gui_launcher.main()
         run.assert_called_once_with()
+
+    def test_output_safety_is_installed_before_the_application_is_imported(self) -> None:
+        events: list[str] = []
+        application = ModuleType("main")
+        application.main = lambda: events.append("run")  # type: ignore[attr-defined]
+
+        def install() -> None:
+            events.append("install")
+            self.assertNotIn("main", sys.modules)
+            sys.modules["main"] = application
+
+        with (
+            patch.dict("sys.modules"),
+            patch.object(gui_launcher, "install", install),
+        ):
+            sys.modules.pop("main", None)
+            gui_launcher.main()
+        self.assertEqual(events, ["install", "run"])
 
     def test_failure_diagnostics_omit_secret(self) -> None:
         application = ModuleType("main")
@@ -26,6 +48,7 @@ class GuiLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with (
                 patch.dict("sys.modules", {"main": application}),
+                patch.object(gui_launcher, "install"),
                 patch.object(Path, "home", return_value=Path(directory)),
                 patch.object(gui_launcher.sys, "platform", "win32"),
                 patch.object(gui_launcher.ctypes, "windll", create=True) as native,
@@ -44,6 +67,7 @@ class GuiLauncherTests(unittest.TestCase):
         application.main = Mock(side_effect=SystemExit(0))  # type: ignore[attr-defined]
         with (
             patch.dict("sys.modules", {"main": application}),
+            patch.object(gui_launcher, "install"),
             patch.object(Path, "home") as home,
             self.assertRaises(SystemExit) as caught,
         ):
@@ -57,6 +81,7 @@ class GuiLauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with (
                 patch.dict("sys.modules", {"main": application}),
+                patch.object(gui_launcher, "install"),
                 patch.object(Path, "home", return_value=Path(directory)),
                 patch.object(gui_launcher.sys, "platform", "darwin"),
                 patch.object(gui_launcher.subprocess, "run") as dialog,

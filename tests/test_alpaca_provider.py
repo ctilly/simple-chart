@@ -993,3 +993,17 @@ def test_saturating_foreground_traffic_never_exceeds_the_minute_bound() -> None:
 
     assert peak <= bound
     assert peak >= bound - 1  # the trace really is saturating
+
+
+def test_timeframe_map_values_are_unchanged() -> None:
+    assert {
+        timeframe: alpaca_timeframe.value
+        for timeframe, alpaca_timeframe in alpaca_provider._TIMEFRAME_MAP.items()
+    } == {
+        Timeframe.MIN1: "1Min",
+        Timeframe.MIN5: "5Min",
+        Timeframe.MIN15: "15Min",
+        Timeframe.MIN30: "30Min",
+        Timeframe.DAILY: "1Day",
+        Timeframe.WEEKLY: "1Week",
+    }

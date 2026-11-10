@@ -800,7 +800,10 @@ def test_refill_that_fails_partway_leaves_a_gap_the_next_load_fills(
     # target, the committed run of pages for the base.
     assert failed and warnings == []
     assert window._history_status_message is not None
-    assert "source unavailable" in window._history_status_message
+    assert window._history_status_message == (
+        f"Older history could not be loaded: Loading XBI {target.value} history "
+        "failed. Details were logged. It will be retried on the next load."
+    )
     assert _coverage(db_path, target) == (_ms(recent_start), _ms(_NOW))
     base_coverage = _coverage(db_path, base)
     assert base_coverage is not None

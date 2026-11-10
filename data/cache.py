@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from data.calendar import MARKET_TIMEZONE, bar_session_key, session_date_anchor
+from data.errors import UserFacingError
 from data.models import (
     AssetReference,
     Bar,
@@ -47,6 +48,10 @@ from data.provider.config import (
 
 # Path to the DDL file, relative to this module.
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+
+class BarCorrectionError(UserFacingError, ValueError):
+    """A bar correction or provider-bar refresh the user must change."""
 
 
 class Cache:
@@ -483,7 +488,7 @@ class Cache:
             refreshed_bar.timestamp,
             timeframe,
         ):
-            raise ValueError(
+            raise BarCorrectionError(
                 "The refreshed provider bar does not match the same bar session."
             )
 
@@ -518,7 +523,7 @@ class Cache:
                 ),
             ).fetchone()
             if row is None:
-                raise ValueError("The provider bar to refresh does not exist.")
+                raise BarCorrectionError("The provider bar to refresh does not exist.")
 
             if refreshed_timestamp_ms != original_timestamp_ms:
                 collision = self._conn.execute(
@@ -538,7 +543,7 @@ class Cache:
                     ),
                 ).fetchone()
                 if collision is not None:
-                    raise ValueError(
+                    raise BarCorrectionError(
                         "The refreshed provider timestamp already has a cached bar."
                     )
 
@@ -873,7 +878,7 @@ class Cache:
             correction.timestamp,
         )
         if inspection is None:
-            raise ValueError("The provider bar to correct does not exist.")
+            raise BarCorrectionError("The provider bar to correct does not exist.")
         if all(
             value is None
             for value in (
@@ -884,7 +889,7 @@ class Cache:
                 correction.volume,
             )
         ):
-            raise ValueError("A bar correction must override at least one field.")
+            raise BarCorrectionError("A bar correction must override at least one field.")
         effective = _apply_bar_correction(inspection.raw_bar, correction)
         _validate_bar(effective)
         raw = inspection.raw_bar
@@ -909,7 +914,7 @@ class Cache:
                 normalized.volume,
             )
         ):
-            raise ValueError("A bar correction must differ from the provider bar.")
+            raise BarCorrectionError("A bar correction must differ from the provider bar.")
         with self._conn:
             self._conn.execute(
                 """
@@ -1370,7 +1375,7 @@ def _row_to_bar_inspection(
     if correction is not None:
         try:
             _validate_bar(effective_bar)
-        except ValueError as exc:
+        except BarCorrectionError as exc:
             correction_error = str(exc)
     return BarInspection(
         cache_namespace=cache_namespace,
@@ -1410,17 +1415,17 @@ def _apply_bar_correction(raw: Bar, correction: BarCorrection) -> Bar:
 def _validate_bar(bar: Bar) -> None:
     prices = (bar.open, bar.high, bar.low, bar.close)
     if not all(math.isfinite(value) and value > 0 for value in prices):
-        raise ValueError("Corrected prices must be positive and finite.")
+        raise BarCorrectionError("Corrected prices must be positive and finite.")
     if bar.high < max(bar.open, bar.close):
-        raise ValueError("Corrected high cannot be below open or close.")
+        raise BarCorrectionError("Corrected high cannot be below open or close.")
     if bar.low > min(bar.open, bar.close):
-        raise ValueError("Corrected low cannot be above open or close.")
+        raise BarCorrectionError("Corrected low cannot be above open or close.")
     if (
         not isinstance(bar.volume, int)
         or isinstance(bar.volume, bool)
         or bar.volume < 0
     ):
-        raise ValueError("Corrected volume must be a nonnegative integer.")
+        raise BarCorrectionError("Corrected volume must be a nonnegative integer.")
 
 
 def _bar_deviation_values(high: float, low: float, close: float) -> float:

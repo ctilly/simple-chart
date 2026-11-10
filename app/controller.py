@@ -35,6 +35,7 @@ Initial workspace extension set:
 import bisect
 import contextvars
 import copy
+import logging
 import math
 import os
 import re
@@ -68,8 +69,18 @@ from app.data_quality import (
     SymbolRefreshState,
     SymbolRefreshStatus,
 )
-from app.dialogs import show_information, show_warning
-from app.extension_runtime import ChartExtensionRenderPass, ChartExtensionRuntime
+from app.dialogs import (
+    ApplicationMessageDialog,
+    MessageKind,
+    show_information,
+    show_warning,
+)
+from app.errors import ErrorContext, report_error
+from app.extension_runtime import (
+    ChartExtensionRenderPass,
+    ChartExtensionRuntime,
+    guarded_extension,
+)
 from app.extension_store import ChartExtensionStore
 from app.header_bar import AppHeader
 from app.load_timing import LoadTimingLog
@@ -85,6 +96,7 @@ from chart.window import INITIAL_VISIBLE_BARS, ChartWidget
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.calendar import bars_for_n_days
+from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.session import (
     MARKET_TIMEZONE,
@@ -116,8 +128,15 @@ from data.provider.credentials import (
     CredentialStoreAccess,
     initialize_keyring_credential_store,
 )
+from simplechart.extensions._guard import (
+    call_extension,
+    is_disabled,
+    set_disable_handler,
+    take_notices,
+)
 from simplechart.api import (
     ChartEvent,
+    ChartExtension,
     ChoiceParam,
     DrawingSession,
     DrawingToolResult,
@@ -137,6 +156,10 @@ from simplechart.api import (
 from simplechart.plugins import load_plugins
 
 load_plugins()
+
+_LOGGER = logging.getLogger(__name__)
+
+_EXTENSION_NOTICE_TITLE = "Extension Problem"
 
 
 # ------------------------------------------------------------------
@@ -445,6 +468,13 @@ class _ChartLoadTask:
     cancellation_event: threading.Event
 
 
+def _preserves_ui_state_per_symbol(extension_name: str) -> bool:
+    extension = guarded_extension(extension_name)
+    if extension is None:
+        return False
+    return bool(call_extension(extension_name, extension.preserve_ui_state_per_symbol))
+
+
 def _clock_text(moment: datetime) -> str:
     """Local wall-clock time like "2:04 AM"."""
     local = moment.astimezone()
@@ -603,10 +633,12 @@ def _build_startup_routes(
     try:
         selected_provider = create_provider(selected_connection, credential_store)
     except ProviderConfigurationError as exc:
+        # The configuration message names the provider itself.
+        context = ErrorContext(f"Connecting to {selected_connection.display_name}")
         return _StartupRoutes(
             yahoo_route,
             yahoo_route,
-            f"{selected_connection.display_name} is unavailable: {exc}",
+            report_error(_LOGGER, exc, context),
         )
     return _StartupRoutes(
         _DataRoute(Aggregator(selected_provider), selected_connection),
@@ -762,7 +794,11 @@ class _FetchWorker(QObject):
 
         except Exception as exc:
             if not self._cancellation_event.is_set():
-                self.error.emit(self._request, str(exc))
+                request = self._request
+                context = ErrorContext(
+                    f"Loading {request.symbol} {request.timeframe.value} history",
+                )
+                self.error.emit(request, report_error(_LOGGER, exc, context))
         finally:
             self.completed.emit()
 
@@ -806,7 +842,8 @@ class _SnapshotWorker(QObject):
             pass
         except Exception as exc:
             if not self._cancellation_event.is_set():
-                self.error.emit(self._request, str(exc))
+                context = ErrorContext("Loading watchlist quotes")
+                self.error.emit(self._request, report_error(_LOGGER, exc, context))
         finally:
             self.completed.emit()
 
@@ -864,7 +901,9 @@ class _Level1Worker(QObject):
             pass
         except Exception as exc:
             if not self._cancellation_event.is_set():
-                self.error.emit(self._request, str(exc))
+                request = self._request
+                context = ErrorContext(f"Loading the {request.symbol} quote")
+                self.error.emit(request, report_error(_LOGGER, exc, context))
         finally:
             self.completed.emit()
 
@@ -877,10 +916,12 @@ class _ProviderValidationWorker(QObject):
     def __init__(
         self,
         provider: DataProvider,
+        provider_name: str,
         cancellation_event: threading.Event | None = None,
     ) -> None:
         super().__init__()
         self._provider = provider
+        self._provider_name = provider_name
         self._cancellation_event = cancellation_event or threading.Event()
 
     def run(self) -> None:
@@ -893,7 +934,8 @@ class _ProviderValidationWorker(QObject):
             pass
         except Exception as exc:
             if not self._cancellation_event.is_set():
-                self.error.emit(str(exc))
+                context = ErrorContext(f"Testing {self._provider_name}")
+                self.error.emit(report_error(_LOGGER, exc, context))
         finally:
             self.completed.emit()
 
@@ -909,9 +951,15 @@ def _check_data_worker_cancelled(
         raise _DataWorkerCancelled
 
 
+class _MissingSnapshotError(UserFacingError, RuntimeError):
+    pass
+
+
 def _validate_provider_connection(provider: DataProvider) -> None:
     if provider.fetch_level1("SPY") is None:
-        raise RuntimeError("The provider returned no SPY market-data snapshot.")
+        raise _MissingSnapshotError(
+            "The provider returned no SPY market-data snapshot."
+        )
 
 
 def _resolve_company_name(
@@ -1813,6 +1861,9 @@ class MainWindow(QMainWindow):
         self._active_drawing_tool: str | None = None
         self._drawing_session: DrawingSession | None = None
         self._preview_keys: set[str] = set()
+        # Extensions turned off since the last cleanup pass.
+        self._turned_off_extensions: set[str] = set()
+        self._extension_cleanup_scheduled = False
         self._pending_drawing_preview_event: ChartEvent | None = None
         self._drawing_preview_timer = QTimer(self)
         self._drawing_preview_timer.setSingleShot(True)
@@ -1986,6 +2037,11 @@ class MainWindow(QMainWindow):
         self._loaded_symbol: str | None = None
         self._per_symbol_state: dict[str, list[ChartExtensionState]] = {}
 
+        # Extension failures are cleaned up here and announced once the
+        # window is up, along with plugins skipped at load.
+        set_disable_handler(self._on_extensions_turned_off)
+        self._schedule_extension_cleanup()
+
         # Load the initial symbol on startup: first watchlist entry, or SPY.
         watchlist = self._cache.get_watchlist()
         initial_symbol = watchlist[0] if watchlist else "SPY"
@@ -2094,12 +2150,13 @@ class MainWindow(QMainWindow):
             entries = [(s.name, s.params) for s in self._per_symbol_state[symbol]]
         else:
             entries = list(INITIAL_EXTENSIONS)
-        registry = all_extensions()
-        lookbacks = [
-            registry[name]().history_lookback_days(params)
-            for name, params in entries
-            if name in registry
-        ]
+        lookbacks: list[int | None] = []
+        for name, params in entries:
+            extension = guarded_extension(name)
+            if extension is not None:
+                lookbacks.append(
+                    call_extension(name, extension.history_lookback_days, params)
+                )
         return max(
             (days for days in lookbacks if days is not None),
             default=0,
@@ -2503,7 +2560,7 @@ class MainWindow(QMainWindow):
         status_bar = self.statusBar()
         if status_bar is not None:
             self._history_status_message = (
-                f"Older history could not be loaded ({message}). "
+                f"Older history could not be loaded: {message} "
                 "It will be retried on the next load."
             )
             status_bar.showMessage(self._history_status_message)
@@ -2625,7 +2682,6 @@ class MainWindow(QMainWindow):
             self._partial_history_request = None
         # Save extension state for the symbol we're leaving.
         if self._loaded_symbol is not None and self._loaded_symbol != series.symbol:
-            registry = all_extensions()
             self._per_symbol_state[self._loaded_symbol] = [
                 ChartExtensionState(
                     name=s.name,
@@ -2634,7 +2690,7 @@ class MainWindow(QMainWindow):
                     series_visibility=copy.deepcopy(s.series_visibility),
                 )
                 for s in self._state.extensions
-                if registry[s.name]().preserve_ui_state_per_symbol()
+                if _preserves_ui_state_per_symbol(s.name)
             ]
 
         # Restore or initialize extension state for the arriving symbol.
@@ -2731,7 +2787,12 @@ class MainWindow(QMainWindow):
             try:
                 self._chart.ensure_extension_panel(render_pass.render_target)
             except RuntimeError as exc:
-                show_warning(self, "Panel Limit Reached", str(exc))
+                context = ErrorContext("Adding the indicator panel")
+                show_warning(
+                    self,
+                    "Panel Limit Reached",
+                    report_error(_LOGGER, exc, context),
+                )
                 return
 
         ind_state = render_pass.state
@@ -3410,16 +3471,22 @@ class MainWindow(QMainWindow):
         try:
             provider = create_provider(connection, self._credential_store)
         except Exception as exc:
+            context = ErrorContext(f"Configuring {connection.display_name}")
+            message = report_error(_LOGGER, exc, context)
             show_warning(
                 self,
                 "Connection Failed",
-                f"Could not configure {connection.display_name}.\n\n{exc}",
+                f"Could not configure {connection.display_name}.\n\n{message}",
             )
             return
 
         self._pending_route = _DataRoute(Aggregator(provider), connection)
         cancellation_event = threading.Event()
-        worker = _ProviderValidationWorker(provider, cancellation_event)
+        worker = _ProviderValidationWorker(
+            provider,
+            connection.display_name,
+            cancellation_event,
+        )
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -3814,10 +3881,76 @@ class MainWindow(QMainWindow):
         ):
             return
         self._pending_route = None
+        set_disable_handler(None)
         self._cache.close()
         self._load_timing.close()
         self._close_finalized = True
         self.close()
+
+    def _on_extensions_turned_off(self, names: frozenset[str]) -> None:
+        """
+        Runs inside the failing extension call: clear the host's interaction
+        state for the turned-off extensions now, without calling plugin
+        code, and redraw and announce once the call has unwound.
+        """
+        session = self._drawing_session
+        if (
+            session is not None and session.extension_name in names
+        ) or self._active_drawing_tool in names:
+            self._clear_pending_drawing_preview()
+            self._drawing_session = None
+            self._clear_preview_render()
+            self._set_active_drawing_tool(None)
+        self._extension_runtime.release_turned_off_drag()
+        self._turned_off_extensions.update(names)
+        self._schedule_extension_cleanup()
+
+    def _schedule_extension_cleanup(self) -> None:
+        if self._extension_cleanup_scheduled:
+            return
+        self._extension_cleanup_scheduled = True
+        QTimer.singleShot(0, self._finish_extension_cleanup)
+
+    def _finish_extension_cleanup(self) -> None:
+        self._extension_cleanup_scheduled = False
+        names = self._turned_off_extensions
+        self._turned_off_extensions = set()
+        if self._closing or self._stopping_data_workers:
+            return
+        if names and self._current_series is not None and self._state.symbol is not None:
+            # Re-rendering without the turned-off extensions removes their
+            # series, markers and legend entries.
+            self._reload_extensions(draw_bars=False, preserve_view=True)
+            self._release_unused_panels(names)
+            self._flush_held_history_merge()
+        self._show_extension_notices()
+
+    def _release_unused_panels(self, names: set[str]) -> None:
+        runtime = self._extension_runtime
+        in_use = {
+            runtime.rendered_target(state.name)
+            for state in self._state.extensions
+            if not is_disabled(state.name)
+        }
+        for name in names:
+            target = runtime.rendered_target(name)
+            if target is not None and target != RENDER_CHART and target not in in_use:
+                self._chart.release_extension_panel(target)
+
+    def _show_extension_notices(self) -> None:
+        notices = take_notices()
+        if not notices:
+            return
+        # Non-blocking: the chart stays usable while the notice is open.
+        dialog = ApplicationMessageDialog(
+            _EXTENSION_NOTICE_TITLE,
+            "\n".join(notices),
+            MessageKind.WARNING,
+            self,
+        )
+        dialog.setModal(False)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
 
     def _on_add_extension(self) -> None:
         """
@@ -3825,44 +3958,57 @@ class MainWindow(QMainWindow):
         for the selected type, then add the new extension to state and
         redraw.
         """
-        extensions = {name: cls() for name, cls in sorted(all_extensions().items())}
-        entries = {
-            name: extension
-            for name, extension in extensions.items()
-            if extension.add_mode() == ChartExtensionAddMode.DIALOG
-        }
+        entries: dict[str, tuple[ChartExtension, str]] = {}
+        for name in sorted(all_extensions()):
+            extension = guarded_extension(name)
+            if extension is None:
+                continue
+            add_mode = call_extension(name, extension.add_mode)
+            if add_mode != ChartExtensionAddMode.DIALOG:
+                continue
+            label = call_extension(name, extension.label)
+            if label is not None:
+                entries[name] = (extension, label)
         if not entries:
             return
 
         menu = QMenu(self)
         # Map action -> (name, instance) so we can look up the selection.
         actions = {
-            menu.addAction(extension.label()): (name, extension)
-            for name, extension in entries.items()
+            menu.addAction(label): (name, extension)
+            for name, (extension, label) in entries.items()
         }
         action = menu.exec(QCursor.pos())
         if action not in actions:
             return
 
         name, extension = actions[action]
+        extension_label = call_extension(name, extension.label)
+        params = call_extension(name, extension.default_params)
+        if extension_label is None or params is None:
+            return
         dialog = ExtensionConfigDialog(
-            extension_label=extension.label(),
-            params=extension.default_params(),
+            extension_label=extension_label,
+            params=params,
             parent=self,
         )
-        if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted:
+        if (
+            dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted
+            and not is_disabled(name)
+        ):
             self._state.extensions.append(
                 ChartExtensionState(name=name, params=dialog.result_params())
             )
             self._reload_extensions()
 
     def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:
-        tools = {name: cls() for name, cls in all_extensions().items()}
-        toolbar = {
-            name: tool
-            for name, tool in tools.items()
-            if tool.add_mode() == ChartExtensionAddMode.TOOLBAR
-        }
+        toolbar: dict[str, ChartExtension] = {}
+        for name in all_extensions():
+            tool = guarded_extension(name)
+            if tool is None:
+                continue
+            if call_extension(name, tool.add_mode) == ChartExtensionAddMode.TOOLBAR:
+                toolbar[name] = tool
         # Fixed toolbox order; any tool not listed falls in afterwards, sorted.
         order = [
             "horizontal_line",
@@ -3874,15 +4020,30 @@ class MainWindow(QMainWindow):
         ]
         ordered = [name for name in order if name in toolbar]
         ordered += sorted(name for name in toolbar if name not in order)
-        return [(name, toolbar[name].label(), toolbar[name].toolbar_icon()) for name in ordered]
+        entries: list[tuple[str, str, ToolIconSpec | None]] = []
+        for name in ordered:
+            label = call_extension(name, toolbar[name].label)
+            icon = call_extension(name, toolbar[name].toolbar_icon)
+            if label is not None and not is_disabled(name):
+                entries.append((name, label, icon))
+        return entries
 
     def _on_drawing_tool_selected(self, extension_name: str) -> None:
+        if is_disabled(extension_name):
+            # A turned-off tool stays off until restart; keep the palette on
+            # the current tool.
+            self._chart.set_active_drawing_tool(self._active_drawing_tool)
+            return
         if self._drawing_session is not None:
             self._extension_runtime.cancel_drawing(self._drawing_session)
             self._clear_pending_drawing_preview()
             self._drawing_session = None
             self._clear_preview_render()
-        self._set_active_drawing_tool(extension_name)
+        if is_disabled(extension_name):
+            # Cancelling the session turned this tool off.
+            self._chart.set_active_drawing_tool(self._active_drawing_tool)
+        else:
+            self._set_active_drawing_tool(extension_name)
         self._flush_held_history_merge()
 
     def _set_active_drawing_tool(self, extension_name: str | None) -> None:

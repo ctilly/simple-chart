@@ -41,11 +41,16 @@ from chart.panel import ExtensionPanelSlot, Panel, PanelType
 from chart.plot_manager import PlotManager
 from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
 from chart.viewport import install_extension_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
+from data.errors import UserFacingError
 from simplechart.api import ToolIconSpec
 
 # Bars shown by the initial view of a freshly loaded chart. The controller sizes
 # the recent-first history window from this.
 INITIAL_VISIBLE_BARS = 200
+
+
+class ExtensionPanelLimitError(UserFacingError, RuntimeError):
+    """Every extension panel slot is taken; the user must remove one."""
 
 
 class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
@@ -280,7 +285,7 @@ class ChartWidget(QWidget):
                 sync_x_axis_labels(self._all_axes())
                 return slot.panel
 
-        raise RuntimeError(
+        raise ExtensionPanelLimitError(
             "All 3 extension panel slots are in use. "
             "Remove an existing panel extension before adding another."
         )

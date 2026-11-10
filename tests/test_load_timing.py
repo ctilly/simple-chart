@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from app.load_timing import LOAD_TIMING_ENV, LoadTimingLog
+from realistic_errors import SECRET, assert_secret_absent, unknown_error
+from simplechart.output_safety import SafeFormatter
 
 
 def _mode(path: Path) -> int:
@@ -144,3 +146,19 @@ def test_write_failure_on_one_thread_is_never_followed_by_a_write(
 
     assert written == ["first"]
     assert not log.enabled
+
+
+def test_log_lines_go_through_the_safe_formatter(tmp_path: Path) -> None:
+    directory = tmp_path / "diagnostics"
+    log = LoadTimingLog.from_environment(directory, {LOAD_TIMING_ENV: "1"})
+    assert log._handler is not None and log._logger is not None
+    assert type(log._handler.formatter) is SafeFormatter
+
+    log._logger.error("failed with %s", SECRET, exc_info=unknown_error())
+    log.record(1, "XBI", "5m", "load requested", 0.0)
+    log.close()
+
+    text = (directory / "load-timing.log").read_text()
+    assert_secret_absent(text)
+    assert "(message withheld)\nRuntimeError\n" in text
+    assert " gen=1 XBI 5m load_requested +" in text

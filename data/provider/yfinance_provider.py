@@ -19,16 +19,21 @@ shadowing the yfinance package on import.
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from typing import Any, cast
+from typing import Any, Never, cast
 
 import pandas as pd
 import yfinance as yf
-from yfinance.exceptions import YFPricesMissingError
+from curl_cffi.requests import exceptions as curl_exceptions
+from yfinance.exceptions import YFPricesMissingError, YFRateLimitError
 
+from data.errors import http_status
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import (
     DataProvider,
     HistoryUnavailableError,
+    ProviderRateLimitedError,
+    ProviderRequestRefusedError,
+    ProviderUnreachableError,
     UnsupportedTimeframeError,
 )
 
@@ -48,6 +53,15 @@ _TIMEFRAME_MAP: dict[Timeframe, str] = {
     Timeframe.WEEKLY: "1wk",
 }
 
+# What yfinance's history raises for a failed request: its own rate-limit
+# error and curl_cffi's transport and HTTP errors.
+_REQUEST_ERRORS = (
+    YFRateLimitError,
+    curl_exceptions.ConnectionError,
+    curl_exceptions.Timeout,
+    curl_exceptions.HTTPError,
+)
+
 
 class YFinanceProvider(DataProvider):
     """
@@ -55,6 +69,10 @@ class YFinanceProvider(DataProvider):
 
     No authentication required — yfinance needs no API key.
     """
+
+    def __init__(self, *, display_name: str = "Yahoo Finance") -> None:
+        # The connection's name, for the neutral errors this provider raises.
+        self._display_name = display_name
 
     def fetch_bars(
         self,
@@ -91,6 +109,8 @@ class YFinanceProvider(DataProvider):
             )
         except YFPricesMissingError as exc:
             raise HistoryUnavailableError(symbol, timeframe) from exc
+        except _REQUEST_ERRORS as exc:
+            _raise_request_error(exc, self._display_name)
 
         if df.empty:
             return []
@@ -152,6 +172,19 @@ class YFinanceProvider(DataProvider):
 # ------------------------------------------------------------------
 # Private helpers
 # ------------------------------------------------------------------
+
+
+def _raise_request_error(error: Exception, display_name: str) -> Never:
+    # Translates the library's failure into SimpleChart's neutral errors;
+    # anything else is re-raised unchanged.
+    if isinstance(error, curl_exceptions.ConnectionError | curl_exceptions.Timeout):
+        raise ProviderUnreachableError(display_name) from error
+    status = http_status(error)
+    if isinstance(error, YFRateLimitError) or status == 429:
+        raise ProviderRateLimitedError(display_name) from error
+    if status in (401, 403):
+        raise ProviderRequestRefusedError(display_name) from error
+    raise error
 
 
 def _unique_symbols(symbols: list[str]) -> list[str]:

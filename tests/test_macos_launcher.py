@@ -70,8 +70,9 @@ def test_missing_install_does_not_create_bundle(tmp_path: Path) -> None:
 
 
 def test_repeat_install_does_not_write_unchanged_bundle(tmp_path: Path) -> None:
+    project = _project(tmp_path)
     bundle = tmp_path / "Simple Chart.app"
-    installer.install_app(ROOT, bundle)
+    installer.install_app(project, bundle)
     original_open = Path.open
 
     def deny_bundle_writes(
@@ -87,12 +88,13 @@ def test_repeat_install_does_not_write_unchanged_bundle(tmp_path: Path) -> None:
         patch.object(Path, "open", deny_bundle_writes),
         patch.object(Path, "chmod", side_effect=PermissionError("Cannot change mode")),
     ):
-        installer.install_app(ROOT, bundle)
+        installer.install_app(project, bundle)
 
 
 def test_install_updates_changed_files_and_restores_executable_mode(tmp_path: Path) -> None:
+    project = _project(tmp_path)
     bundle = tmp_path / "Simple Chart.app"
-    installer.install_app(ROOT, bundle)
+    installer.install_app(project, bundle)
     files = [bundle / relative for relative in (
         "Contents/Resources/SimpleChart.icns", "Contents/MacOS/SimpleChart",
         "Contents/Info.plist",
@@ -101,7 +103,7 @@ def test_install_updates_changed_files_and_restores_executable_mode(tmp_path: Pa
     for path in files:
         path.write_bytes(b"outdated")
     files[1].chmod(0o644)
-    installer.install_app(ROOT, bundle)
+    installer.install_app(project, bundle)
     assert [path.read_bytes() for path in files] == expected
     assert files[1].stat().st_mode & 0o777 == 0o755
 
@@ -141,3 +143,16 @@ def test_setup_wires_macos_installer_after_package_install(tmp_path: Path) -> No
                              capture_output=True, text=True, check=False)
     assert failure.returncode == 1
     assert "[OK] Setup complete!" not in failure.stdout
+
+
+def _project(tmp_path: Path) -> Path:
+    project = tmp_path / "project"
+    launcher = project / ".venv" / "bin" / "simplechart-gui"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n")
+    launcher.chmod(0o755)
+    (project / "assets").mkdir()
+    (project / "assets" / "simple-chart.svg").write_bytes(
+        (ROOT / "assets" / "simple-chart.svg").read_bytes(),
+    )
+    return project

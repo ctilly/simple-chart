@@ -6,9 +6,12 @@ import sys
 import traceback
 from pathlib import Path
 
+from simplechart.output_safety import install
+
 
 def main() -> None:
     try:
+        install()
         from main import main as run
 
         run()

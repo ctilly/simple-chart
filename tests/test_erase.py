@@ -114,7 +114,7 @@ def test_erase_runs_cleanly_and_spares_avwap_anchors(tmp_path: Path) -> None:
         runtime.start_drawing("erase", series, runtime.chart_event(series, 2.5, 100.0))
 
         assert _vertical_count(runtime, series) == 0  # transient line erased
-        assert [h for h in store._handlers if isinstance(h, AvwapAnchorStore)][0].anchors()
+        assert [h for _owner, h in store._handlers if isinstance(h, AvwapAnchorStore)][0].anchors()
 
 
 def _configure(

@@ -117,6 +117,16 @@ Test plan:
   - `register_extension(YourTool)`
   - `register_store_handler(YourStore)`
 - The store handler lives in the tool package, subclassing `DrawingStore`.
+- Errors are handled by the host. Do not catch exceptions just to keep the
+  app alive: if any extension or store-handler method raises, SimpleChart logs
+  the failure with secrets removed (exception type names and code locations,
+  never the message text) and turns that extension off until restart, along
+  with every extension registered by the same module when its store handler
+  raises. Other extensions keep working. A plugin that raises while loading is
+  rolled back and skipped. The exception's text is never displayed; the user
+  sees only a fixed notice naming the extension's label.
+- Plugins never receive credentials, and must not try to read them. Plugins
+  are trusted code: they run in the app's process with its permissions.
 - If a tool needs a change outside its own package (app, chart, runtime, data,
   public API), stop and treat each as a separate boundary-specific side task:
   name the boundary, explain why the tool-only change is insufficient, list the

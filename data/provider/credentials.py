@@ -11,6 +11,8 @@ from importlib import import_module
 from secrets import token_urlsafe
 from typing import Protocol, cast
 
+from data.errors import UserFacingError
+
 
 _KEYRING_SERVICE = "simplechart.provider-credentials"
 
@@ -46,7 +48,7 @@ class _PasswordBackend(Protocol):
     def delete_password(self, service_name: str, username: str) -> None: ...
 
 
-class CredentialStoreUnavailableError(RuntimeError):
+class CredentialStoreUnavailableError(UserFacingError, RuntimeError):
     pass
 
 
@@ -87,7 +89,9 @@ class KeyringCredentialStore:
         try:
             payload = self._backend.get_password(_KEYRING_SERVICE, connection_id)
         except Exception as exc:
-            raise RuntimeError("Unable to read provider credentials from the OS keyring.") from exc
+            raise CredentialStoreUnavailableError(
+                "Unable to read provider credentials from the OS keyring."
+            ) from exc
         if payload is None:
             return None
         decoded = json.loads(payload)
@@ -113,7 +117,9 @@ class KeyringCredentialStore:
         try:
             self._backend.set_password(_KEYRING_SERVICE, connection_id, payload)
         except Exception as exc:
-            raise RuntimeError("Unable to save provider credentials in the OS keyring.") from exc
+            raise CredentialStoreUnavailableError(
+                "Unable to save provider credentials in the OS keyring."
+            ) from exc
 
     def delete(self, connection_id: str) -> None:
         try:
@@ -121,7 +127,9 @@ class KeyringCredentialStore:
             if existing is not None:
                 self._backend.delete_password(_KEYRING_SERVICE, connection_id)
         except Exception as exc:
-            raise RuntimeError("Unable to delete provider credentials from the OS keyring.") from exc
+            raise CredentialStoreUnavailableError(
+                "Unable to delete provider credentials from the OS keyring."
+            ) from exc
 
     def verify_available(self) -> None:
         probe_id = f"availability-probe-{token_urlsafe(12)}"

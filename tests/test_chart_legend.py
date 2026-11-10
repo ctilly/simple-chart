@@ -1,5 +1,5 @@
 from PyQt6.QtCore import QPoint, Qt
-from PyQt6.QtWidgets import QFrame, QLabel, QToolButton, QWidget
+from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QToolButton, QWidget
 
 from chart.legend import ChartLegend
 
@@ -42,7 +42,7 @@ def test_chart_legend_toggles_drawing_tool_palette(qtbot) -> None:  # type: igno
     assert palette_button.isVisible()
     assert not palette.isWindow()
     assert palette_button.toolTip() == "Trend Line"
-    assert palette.width() > palette.height()
+    assert isinstance(tool_row.layout(), QHBoxLayout)
     assert title_bar.y() < tool_row.y()
     assert close_button.mapTo(palette, QPoint(0, 0)).y() < palette_button.mapTo(
         palette,

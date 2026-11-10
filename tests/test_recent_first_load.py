@@ -1,3 +1,4 @@
+import logging
 import math
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -456,6 +457,14 @@ def test_recent_window_requests_are_foreground_and_backfill_is_background(
     assert backfill and all(entry[3] for entry in backfill)
 
 
+class _DailyFailure(RuntimeError):
+    pass
+
+
+class _IntradayFailure(RuntimeError):
+    pass
+
+
 class GatedBranchProvider(SessionProvider):
     """
     The daily-reference call and the first intraday call each block on their own
@@ -483,7 +492,7 @@ class GatedBranchProvider(SessionProvider):
             assert self.release_daily.wait(5)
             if self.fail_daily:
                 self.raised.append("daily")
-                raise RuntimeError("daily failed")
+                raise _DailyFailure("daily failed")
             with self._lock:
                 self.completed.append("daily")
             return [
@@ -498,7 +507,7 @@ class GatedBranchProvider(SessionProvider):
             assert self.release_intraday.wait(5)
             if self.fail_intraday:
                 self.raised.append("intraday")
-                raise RuntimeError("intraday failed")
+                raise _IntradayFailure("intraday failed")
         bars = super().fetch_bars(symbol, timeframe, start, end)
         if gated:
             with self._lock:
@@ -604,14 +613,19 @@ def test_daily_references_overlap_intraday_and_commit_before_delivery(
 
 
 @pytest.mark.parametrize(
-    ("failing", "message"),
-    [("daily", "daily failed"), ("intraday", "intraday failed"), ("both", "intraday failed")],
+    ("failing", "reported"),
+    [
+        ("daily", _DailyFailure),
+        ("intraday", _IntradayFailure),
+        ("both", _IntradayFailure),
+    ],
 )
 def test_concurrent_reference_failure_reports_exactly_one_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     failing: str,
-    message: str,
+    reported: type[RuntimeError],
 ) -> None:
     provider = GatedBranchProvider(None)
     provider.fail_daily = failing in ("daily", "both")
@@ -619,11 +633,20 @@ def test_concurrent_reference_failure_reports_exactly_one_error(
     provider.release_daily.set()
     provider.release_intraday.set()
 
+    caplog.set_level(logging.ERROR, logger="app.controller")
     thread, delivered, _rows, errors = _start_worker(tmp_path / "test.db", provider, monkeypatch)
     thread.join(10)
 
     assert delivered == []
-    assert errors == [message]
+    assert errors == ["Loading XBI 5m history failed. Details were logged."]
+    # The one reported failure is identified by its logged type name.
+    logged = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.controller"
+    ]
+    assert len(logged) == 1
+    assert reported.__qualname__ in logged[0]
     assert threading.active_count() == _BASE_THREADS
 
 

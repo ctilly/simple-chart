@@ -1,5 +1,6 @@
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+import logging
 from pathlib import Path
 import threading
 from typing import Any
@@ -34,6 +35,14 @@ from data.provider.config import (
     MarketDataFeed,
 )
 from data.provider.credentials import ProviderCredentials
+from realistic_errors import (
+    LocalErrorServer,
+    assert_secret_absent,
+    http_client_invalid_header,
+    invalid_header_values,
+    requests_invalid_header,
+)
+from ui_text import capture_message_dialogs, widget_text
 
 
 _AVAILABLE_PROVIDERS = {
@@ -907,3 +916,144 @@ def _comparison_table(parent: DataQualityTab) -> QTableWidget:
     table = parent.findChild(QTableWidget, "dataQualityComparisonTable")
     assert table is not None
     return table
+
+
+def _suspicious_bar_tab(
+    qtbot: Any,
+    cache: Cache,
+    comparison_service: _ComparisonService | None = None,
+) -> DataQualityTab:
+    tab = DataQualityTab(
+        cache,
+        comparison_service=comparison_service,
+        initial_cache_namespace="alpaca:delayed_sip",
+        initial_symbol="SPY",
+        initial_timeframe=Timeframe.DAILY,
+    )
+    qtbot.addWidget(tab)
+    _button(tab, "findSuspiciousBars").click()
+    _table(tab).setCurrentCell(0, 0)
+    return tab
+
+
+def test_unchanged_correction_reports_no_correction(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [_bad_spy_bar()])
+        tab = _suspicious_bar_tab(qtbot, cache)
+
+        _button(tab, "applyBarCorrection").click()
+
+    assert [(item.title, item.message) for item in shown] == [
+        ("No Correction", "The edited values match the provider bar."),
+    ]
+
+
+def test_correction_failure_from_outside_the_app_is_shielded(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    with LocalErrorServer() as server:
+        exc = http_client_invalid_header(server)
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [_bad_spy_bar()])
+        tab = _suspicious_bar_tab(qtbot, cache)
+        high = tab.findChild(QDoubleSpinBox, "dataQualityHigh")
+        assert high is not None
+        high.setValue(700.0)
+
+        def fail(correction: BarCorrection) -> None:
+            raise exc
+
+        monkeypatch.setattr(cache, "put_bar_correction", fail)
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        _button(tab, "applyBarCorrection").click()
+
+        texts = [widget_text(tab), caplog.text]
+
+    assert [(item.title, item.message) for item in shown] == [
+        ("Invalid Correction", "Saving the bar correction failed. Details were logged."),
+    ]
+    for text in (*texts, shown[0].all_text):
+        assert_secret_absent(text)
+        assert str(exc) not in text
+    assert "ValueError" in caplog.text
+
+
+def _refresh_ready_tab(
+    qtbot: Any,
+    cache: Cache,
+) -> DataQualityTab:
+    cached = _bad_spy_bar()
+    refreshed = Bar(
+        _SESSION, cached.open, cached.high, 685.77, cached.close, cached.volume,
+    )
+    cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [cached])
+    service = _ComparisonService({_SESSION: _comparison_result(cached, refreshed)})
+    tab = _suspicious_bar_tab(qtbot, cache, service)
+    _button(tab, "compareBarSources").click()
+    comparison = _comparison_table(tab)
+    qtbot.waitUntil(lambda: comparison.rowCount() == 2)
+    return tab
+
+
+def test_provider_refresh_failure_from_outside_the_app_is_shielded(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    exc = requests_invalid_header(invalid_header_values()["unicode_newline_str"])
+    with Cache(str(tmp_path / "test.db")) as cache:
+        tab = _refresh_ready_tab(qtbot, cache)
+
+        def fail(*args: object) -> None:
+            raise exc
+
+        monkeypatch.setattr(cache, "refresh_provider_bar", fail)
+        caplog.clear()
+        caplog.set_level(logging.DEBUG)
+
+        _button(tab, "refreshProviderBar").click()
+
+        texts = [widget_text(tab), caplog.text]
+
+    assert [(item.title, item.message) for item in shown] == [
+        (
+            "Provider Refresh Failed",
+            "Refreshing the SPY provider bar failed. Details were logged.",
+        ),
+    ]
+    for text in (*texts, shown[0].all_text):
+        assert_secret_absent(text)
+        assert str(exc) not in text
+    assert "InvalidHeader" in caplog.text
+
+
+def test_provider_refresh_guidance_still_shows_its_text(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shown = capture_message_dialogs(monkeypatch)
+    with Cache(str(tmp_path / "test.db")) as cache:
+        tab = _refresh_ready_tab(qtbot, cache)
+        cache.rewind_symbol_history(
+            "alpaca:delayed_sip", "SPY", {Timeframe.DAILY: 0}, ()
+        )
+
+        _button(tab, "refreshProviderBar").click()
+
+    assert [(item.title, item.message) for item in shown] == [
+        ("Provider Refresh Failed", "The provider bar to refresh does not exist."),
+    ]

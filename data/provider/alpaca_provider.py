@@ -15,11 +15,21 @@ from alpaca.data.timeframe import TimeFrame as AlpacaTimeFrame
 from alpaca.data.timeframe import TimeFrameUnit
 from requests import PreparedRequest, Response, Session  # type: ignore[import-untyped]
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
+from requests.exceptions import (  # type: ignore[import-untyped]
+    ConnectionError as RequestsConnectionError,
+    InvalidHeader,
+    Timeout,
+)
 
+from data.errors import http_status
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import (
     DataProvider,
     MarketDataEntitlementError,
+    ProviderCredentialsMalformedError,
+    ProviderCredentialsRejectedError,
+    ProviderRateLimitedError,
+    ProviderUnreachableError,
     RequestCancelledError,
     UnsupportedTimeframeError,
     background_request_cancellation,
@@ -51,12 +61,12 @@ _BACKGROUND_POLL_SECONDS = 0.05
 _LOGGER = logging.getLogger(__name__)
 
 _TIMEFRAME_MAP: dict[Timeframe, AlpacaTimeFrame] = {
-    Timeframe.MIN1: AlpacaTimeFrame.Minute,
+    Timeframe.MIN1: AlpacaTimeFrame(1, TimeFrameUnit.Minute),
     Timeframe.MIN5: AlpacaTimeFrame(5, TimeFrameUnit.Minute),
     Timeframe.MIN15: AlpacaTimeFrame(15, TimeFrameUnit.Minute),
     Timeframe.MIN30: AlpacaTimeFrame(30, TimeFrameUnit.Minute),
-    Timeframe.DAILY: AlpacaTimeFrame.Day,
-    Timeframe.WEEKLY: AlpacaTimeFrame.Week,
+    Timeframe.DAILY: AlpacaTimeFrame(1, TimeFrameUnit.Day),
+    Timeframe.WEEKLY: AlpacaTimeFrame(1, TimeFrameUnit.Week),
 }
 
 _BAR_FEED_MAP: dict[MarketDataFeed, DataFeed] = {
@@ -70,6 +80,10 @@ _SNAPSHOT_FEED_MAP: dict[MarketDataFeed, DataFeed] = {
     MarketDataFeed.DELAYED_SIP: DataFeed.DELAYED_SIP,
     MarketDataFeed.SIP: DataFeed.SIP,
 }
+
+# What a client call raises for a failed request: alpaca-py wraps HTTP error
+# statuses in APIError and lets requests' transport errors through.
+_REQUEST_ERRORS = (APIError, RequestsConnectionError, Timeout, InvalidHeader)
 
 
 class _AlpacaBar(Protocol):
@@ -260,7 +274,11 @@ class AlpacaProvider(DataProvider):
         api_secret: str,
         feed: MarketDataFeed,
         client: _MarketDataClient | None = None,
+        *,
+        display_name: str = "Alpaca",
     ) -> None:
+        # The connection's name, for the neutral errors this provider raises.
+        self._display_name = display_name
         self._configured_feed = feed
         self._bar_feed = _BAR_FEED_MAP[feed]
         self._snapshot_feed = _SNAPSHOT_FEED_MAP[feed]
@@ -315,8 +333,8 @@ class AlpacaProvider(DataProvider):
         )
         try:
             response = self._client().get_stock_bars(request)
-        except APIError as exc:
-            _raise_market_data_error(exc, self._configured_feed)
+        except _REQUEST_ERRORS as exc:
+            _raise_request_error(exc, self._configured_feed, self._display_name)
         alpaca_bars = response.data.get(normalized, [])
         if timeframe.is_intraday:
             alpaca_bars = [
@@ -380,28 +398,59 @@ class AlpacaProvider(DataProvider):
         )
         try:
             return self._client().get_stock_snapshot(request)
-        except APIError as exc:
-            _raise_market_data_error(exc, self._configured_feed)
+        except _REQUEST_ERRORS as exc:
+            _raise_request_error(exc, self._configured_feed, self._display_name)
 
 
-def _raise_market_data_error(
-    error: APIError,
+def _raise_request_error(
+    error: Exception,
     feed: MarketDataFeed,
+    display_name: str,
 ) -> Never:
-    subscription_rejected = error.code == _SIP_ENTITLEMENT_ERROR_CODE
-    if feed == MarketDataFeed.DELAYED_SIP and subscription_rejected:
-        raise MarketDataEntitlementError(
+    # Translates the library's failure into SimpleChart's neutral errors;
+    # anything else is re-raised unchanged.
+    if isinstance(error, InvalidHeader):
+        raise ProviderCredentialsMalformedError(display_name) from error
+    if isinstance(error, RequestsConnectionError | Timeout):
+        raise ProviderUnreachableError(display_name) from error
+    if isinstance(error, APIError):
+        if _subscription_rejected(error):
+            raise _entitlement_error(feed, display_name) from error
+        status = http_status(error)
+        if status in (401, 403):
+            raise ProviderCredentialsRejectedError(display_name) from error
+        if status == 429:
+            raise ProviderRateLimitedError(display_name) from error
+    raise error
+
+
+def _subscription_rejected(error: APIError) -> bool:
+    # APIError.code parses the response body, which need not be JSON.
+    try:
+        return bool(error.code == _SIP_ENTITLEMENT_ERROR_CODE)
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def _entitlement_error(
+    feed: MarketDataFeed,
+    display_name: str,
+) -> MarketDataEntitlementError:
+    if feed == MarketDataFeed.DELAYED_SIP:
+        return MarketDataEntitlementError(
             "Alpaca rejected the delayed SIP request as too recent. "
             "Try the request again; if the problem persists, select IEX "
             "or check the market-data plan on the Alpaca account."
-        ) from error
-    if feed == MarketDataFeed.SIP and subscription_rejected:
-        raise MarketDataEntitlementError(
+        )
+    if feed == MarketDataFeed.SIP:
+        return MarketDataEntitlementError(
             "Alpaca rejected real-time SIP data for this account. "
             "Select 15-minute delayed SIP or IEX, or add a real-time "
             "SIP subscription to the Alpaca account."
-        ) from error
-    raise error
+        )
+    return MarketDataEntitlementError(
+        f"Your {display_name} plan doesn't include this data."
+    )
 
 
 def _unique_symbols(symbols: list[str]) -> list[str]:

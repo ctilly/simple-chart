@@ -1,3 +1,4 @@
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,6 +33,7 @@ from app.bar_comparison import (
     BarField,
 )
 from app.dialogs import build_dialog_content, show_information, show_warning
+from app.errors import ErrorContext, report_error
 from data.cache import Cache
 from data.calendar import MARKET_TIMEZONE
 from data.models import Bar, BarCorrection, BarInspection, Timeframe
@@ -46,6 +48,7 @@ _CHART_TIMEFRAMES = (
     Timeframe.DAILY,
     Timeframe.WEEKLY,
 )
+_LOGGER = logging.getLogger(__name__)
 _SOURCE_LABELS = {
     "yfinance": "Yahoo Finance",
     "alpaca:iex": "Alpaca / IEX",
@@ -983,7 +986,14 @@ class DataQualityTab(QWidget):
                 refreshed_bar,
             )
         except ValueError as exc:
-            show_warning(self, "Provider Refresh Failed", str(exc))
+            context = ErrorContext(
+                f"Refreshing the {inspection.symbol} provider bar"
+            )
+            show_warning(
+                self,
+                "Provider Refresh Failed",
+                report_error(_LOGGER, exc, context),
+            )
             return
 
         self._invalidate_comparison_scope(inspection)
@@ -1070,7 +1080,12 @@ class DataQualityTab(QWidget):
                     "The edited values match the provider bar.",
                 )
             else:
-                show_warning(self, "Invalid Correction", str(exc))
+                context = ErrorContext("Saving the bar correction")
+                show_warning(
+                    self,
+                    "Invalid Correction",
+                    report_error(_LOGGER, exc, context),
+                )
             return
         self._refresh_selected_row()
         self.bars_changed.emit()

@@ -208,7 +208,7 @@ def test_fetch_worker_real_yahoo_failure_emits_error_without_coverage(
     worker.error.connect(lambda identity, message: errors.append(message))
     worker.finished.connect(lambda identity, series: successes.append(series))
     worker.run()
-    assert errors == ["synthetic Yahoo transport failure"]
+    assert errors == ["Loading SPY 5m history failed. Details were logged."]
     assert successes == []
     with Cache(db_path) as cache:
         for timeframe in (Timeframe.DAILY, Timeframe.MIN5):

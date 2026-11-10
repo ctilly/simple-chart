@@ -25,6 +25,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 
+from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 
 # Set while the current context makes background (history backfill) requests;
@@ -70,11 +71,40 @@ class UnsupportedTimeframeError(Exception):
     """
 
 
-class MarketDataEntitlementError(RuntimeError):
+class ProviderCredentialsRejectedError(UserFacingError, RuntimeError):
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"{provider} rejected the credentials.")
+
+
+class ProviderRequestRefusedError(UserFacingError, RuntimeError):
+    # A 401/403 from a provider that takes no user credentials.
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"{provider} refused the request.")
+
+
+class ProviderRateLimitedError(UserFacingError, RuntimeError):
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"{provider} is rate limiting requests. Try again shortly.")
+
+
+class ProviderUnreachableError(UserFacingError, RuntimeError):
+    def __init__(self, provider: str) -> None:
+        super().__init__(f"Couldn't reach {provider}. Check your connection.")
+
+
+class ProviderCredentialsMalformedError(UserFacingError, RuntimeError):
+    def __init__(self, provider: str) -> None:
+        super().__init__(
+            f"The saved {provider} credentials are malformed. "
+            "Re-enter them in Settings."
+        )
+
+
+class MarketDataEntitlementError(UserFacingError, RuntimeError):
     pass
 
 
-class HistoryUnavailableError(RuntimeError):
+class HistoryUnavailableError(UserFacingError, RuntimeError):
     def __init__(self, symbol: str, timeframe: Timeframe) -> None:
         super().__init__(
             f"History is currently unavailable for {symbol} ({timeframe.value})."
