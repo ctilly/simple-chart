@@ -533,40 +533,6 @@ def test_runtime_uses_indicator_owned_avwap_config(tmp_path: Path) -> None:
     assert anchors[0].color == "#FFB000"
 
 
-def test_avwap_anchor_store_applies_avwap_mutations(tmp_path: Path) -> None:
-    state = State(symbol="SPY")
-
-    with Cache(str(tmp_path / "test.db")) as cache:
-        store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
-        store.apply(
-            ChartExtensionMutation(
-                extension_name="avwap",
-                operation="add_anchor",
-                payload={
-                    "anchor_ts": 1_700_000_000_000,
-                    "label": "2023-11-14",
-                    "color": "#00FF88",
-                },
-            )
-        )
-
-        assert state.get_extension("avwap") is not None
-        assert len(store.anchors()) == 1
-
-        store.apply(
-            ChartExtensionMutation(
-                extension_name="avwap",
-                operation="delete_anchor",
-                payload={"anchor": store.anchors()[0]},
-            )
-        )
-        anchors = _get_avwap_anchors(cache, "SPY")
-
-    assert store.anchors() == []
-    assert anchors == []
-    assert state.get_extension("avwap") is None
-
-
 def _series() -> OHLCVSeries:
     start = datetime(2026, 1, 2, tzinfo=timezone.utc)
     bars = [

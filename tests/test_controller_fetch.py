@@ -15,7 +15,7 @@ from app.controller import (
     _SnapshotWorker,
     _asset_reference_refresh_due,
     _fetch_and_cache_bars,
-    _fetch_series_with_references,
+    _fetch_series_with_concurrent_references,
     _history_end,
     _history_start,
     _resolve_company_name,
@@ -251,8 +251,9 @@ def test_intraday_fetch_also_caches_daily_reference_bars(tmp_path: Path) -> None
     aggregator = Aggregator(provider)
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        series = _fetch_series_with_references(
+        series = _fetch_series_with_concurrent_references(
             aggregator,
+            str(tmp_path / "test.db"),
             cache,
             "test-provider",
             "SPY",
@@ -267,7 +268,9 @@ def test_intraday_fetch_also_caches_daily_reference_bars(tmp_path: Path) -> None
             int(now.timestamp() * 1000),
         )
 
-    assert [call[1] for call in provider.calls] == [Timeframe.DAILY, Timeframe.MIN15]
+    assert sorted((call[1] for call in provider.calls), key=lambda tf: tf.value) == [
+        Timeframe.MIN15, Timeframe.DAILY,
+    ]
     assert series.timeframe == Timeframe.MIN15
     assert len(series.bars) == 1
     assert len(daily_bars) == 1
@@ -279,8 +282,9 @@ def test_daily_fetch_does_not_request_extra_reference_bars(tmp_path: Path) -> No
     aggregator = Aggregator(provider)
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        series = _fetch_series_with_references(
+        series = _fetch_series_with_concurrent_references(
             aggregator,
+            str(tmp_path / "test.db"),
             cache,
             "test-provider",
             "SPY",
@@ -339,8 +343,9 @@ def test_delayed_provider_fetch_and_coverage_stop_at_delayed_endpoint(
     provider = DelayedHistoryProvider()
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        _fetch_series_with_references(
+        _fetch_series_with_concurrent_references(
             Aggregator(provider),
+            str(tmp_path / "test.db"),
             cache,
             "alpaca:delayed_sip",
             "AAPL",
@@ -432,8 +437,9 @@ def test_complete_premarket_equity_cache_skips_daily_and_intraday_tails(
             int(prior_settled.timestamp() * 1000),
         )
 
-        series = _fetch_series_with_references(
+        series = _fetch_series_with_concurrent_references(
             Aggregator(provider),
+            str(tmp_path / "test.db"),
             cache,
             "alpaca:delayed_sip",
             "IWM",
@@ -485,8 +491,9 @@ def test_delayed_endpoint_controls_premarket_cache_eligibility(
             int(prior_settled.timestamp() * 1000),
         )
 
-        series = _fetch_series_with_references(
+        series = _fetch_series_with_concurrent_references(
             Aggregator(provider),
+            str(tmp_path / "test.db"),
             cache,
             "alpaca:delayed_sip",
             "AAPL",
@@ -543,8 +550,9 @@ def test_premarket_equity_cache_missing_prior_session_fetches_from_newest_bars(
             int(misleading_coverage_end.timestamp() * 1000),
         )
 
-        _fetch_series_with_references(
+        _fetch_series_with_concurrent_references(
             Aggregator(provider),
+            str(tmp_path / "test.db"),
             cache,
             "alpaca:delayed_sip",
             "IWM",
@@ -552,12 +560,11 @@ def test_premarket_equity_cache_missing_prior_session_fetches_from_newest_bars(
             now,
         )
 
-    assert [call[1] for call in provider.calls] == [
-        Timeframe.DAILY,
-        Timeframe.MIN5,
-    ]
-    assert provider.calls[0][2] == stale_daily
-    assert provider.calls[1][2] == stale_last_65m
+    assert len(provider.calls) == 2
+    assert {call[1]: call[2] for call in provider.calls} == {
+        Timeframe.DAILY: stale_daily,
+        Timeframe.MIN5: stale_last_65m,
+    }
 
 
 @pytest.mark.parametrize(
@@ -1174,7 +1181,7 @@ def test_typed_history_unavailable_is_suppressed_only_for_cached_tail(
             )
 
 
-def test_repeat_empty_intraday_refresh_starts_at_completed_boundary(
+def test_repeat_intraday_refresh_overlaps_the_cached_bar_and_covers_completed_boundary(
     tmp_path: Path,
 ) -> None:
     first_end = datetime(2026, 11, 4, 15, 3, 4, tzinfo=timezone.utc)
@@ -1300,7 +1307,7 @@ def test_boundary_crossing_finalizes_previous_forming_bar(
     )
 
 
-def test_repeat_intraday_load_refreshes_daily_from_day_boundary(
+def test_repeat_intraday_load_refreshes_each_branch_from_its_cached_bar(
     tmp_path: Path,
 ) -> None:
     first_now = datetime(2026, 11, 4, 15, 3, 4, tzinfo=timezone.utc)
@@ -1309,16 +1316,18 @@ def test_repeat_intraday_load_refreshes_daily_from_day_boundary(
     aggregator = Aggregator(provider)
 
     with Cache(str(tmp_path / "test.db")) as cache:
-        _fetch_series_with_references(
+        _fetch_series_with_concurrent_references(
             aggregator,
+            str(tmp_path / "test.db"),
             cache,
             "test-provider",
             "AAPL",
             Timeframe.MIN15,
             first_now,
         )
-        _fetch_series_with_references(
+        _fetch_series_with_concurrent_references(
             aggregator,
+            str(tmp_path / "test.db"),
             cache,
             "test-provider",
             "AAPL",
@@ -1328,18 +1337,11 @@ def test_repeat_intraday_load_refreshes_daily_from_day_boundary(
 
     # Each repeat request starts at the one cached bar, compared for a basis
     # change (Wave 3), instead of at the day or bar boundary.
-    assert provider.calls[2] == (
-        "AAPL",
-        Timeframe.DAILY,
-        first_now - timedelta(days=1),
-        second_now,
-    )
-    assert provider.calls[3] == (
-        "AAPL",
-        Timeframe.MIN15,
-        first_now - timedelta(minutes=15),
-        second_now,
-    )
+    assert len(provider.calls) == 4
+    assert sorted(provider.calls[2:], key=lambda call: call[1].value) == [
+        ("AAPL", Timeframe.MIN15, first_now - timedelta(minutes=15), second_now),
+        ("AAPL", Timeframe.DAILY, first_now - timedelta(days=1), second_now),
+    ]
 
 
 def test_existing_bars_without_coverage_are_refetched_then_refreshed(
@@ -1487,23 +1489,33 @@ def test_fetch_coverage_is_independent_for_each_provider_namespace(
 def test_snapshot_worker_merges_provider_batches() -> None:
     equity_provider = SnapshotProvider()
     futures_provider = SnapshotProvider()
-    received: list[dict[str, MarketSnapshot]] = []
+    received: list[tuple[_SnapshotRequest, dict[str, MarketSnapshot]]] = []
+    request = _SnapshotRequest(0, ())
     worker = _SnapshotWorker(
         [
             _SnapshotBatch(Aggregator(equity_provider), ["AAPL"]),
             _SnapshotBatch(Aggregator(futures_provider), ["ES=F"]),
         ],
-        _SnapshotRequest(0, ()),
+        request,
     )
-    worker.finished.connect(lambda request, snapshots: received.append(snapshots))
+    worker.finished.connect(lambda delivered, snapshots: received.append((delivered, snapshots)))
 
     worker.run()
 
-    assert set(received[0]) == {"AAPL", "ES=F"}
+    assert received == [(request, {"AAPL": _snapshot("AAPL"), "ES=F": _snapshot("ES=F")})]
 
 
 def test_provider_validation_exercises_market_data_snapshot() -> None:
-    _validate_provider_connection(ValidProvider())
+    calls: list[str] = []
+
+    class RecordingProvider(ValidProvider):
+        def fetch_level1(self, symbol: str) -> Level1Quote | None:
+            calls.append(symbol)
+            return super().fetch_level1(symbol)
+
+    _validate_provider_connection(RecordingProvider())
+
+    assert calls == ["SPY"]
 
 
 def test_provider_validation_rejects_missing_market_data() -> None:

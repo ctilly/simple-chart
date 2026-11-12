@@ -65,30 +65,37 @@ def _alpaca(feed: MarketDataFeed) -> Aggregator:
 # ----------------------------------------------------------------------
 
 
+# Calendar alignment is shared by every intraday timeframe. Exercise each
+# calendar boundary on 5m and timeframe dispatch at the just-after-open boundary.
+_YAHOO_CUTOFFS = [
+    pytest.param(_et(2026, 8, 26, 9, 29), _et(2026, 8, 26, 9, 30), id="just-before-open"),
+    pytest.param(_et(2026, 8, 26, 9, 30), _et(2026, 8, 26, 9, 30), id="at-open"),
+    pytest.param(_et(2026, 8, 26, 9, 30, 1), _et(2026, 8, 27, 9, 30), id="just-after-open"),
+    pytest.param(_et(2026, 8, 25, 20, 0), _et(2026, 8, 26, 9, 30), id="weekday-evening"),
+    pytest.param(_et(2026, 8, 28, 11, 0), _et(2026, 8, 31, 9, 30), id="friday-session"),
+    pytest.param(_et(2026, 8, 29, 12, 0), _et(2026, 8, 31, 9, 30), id="saturday"),
+    pytest.param(_et(2026, 8, 30, 23, 59), _et(2026, 8, 31, 9, 30), id="sunday-night"),
+    # 09:30 EST is 14:30 UTC; 09:30 EDT is 13:30 UTC.
+    pytest.param(_et(2026, 3, 6, 10, 0), _et(2026, 3, 9, 9, 30), id="into-daylight-time"),
+    pytest.param(_et(2026, 3, 8, 3, 0), _et(2026, 3, 9, 9, 30), id="spring-forward-day"),
+    pytest.param(_et(2026, 10, 30, 10, 0), _et(2026, 11, 2, 9, 30), id="into-standard-time"),
+    pytest.param(_et(2026, 11, 1, 1, 30), _et(2026, 11, 2, 9, 30), id="fall-back-day"),
+    # No holiday calendar: a weekday holiday is a session start; its first
+    # bars arrive on the next session, as before.
+    pytest.param(_et(2026, 11, 26, 8, 0), _et(2026, 11, 26, 9, 30), id="holiday-morning"),
+    pytest.param(_et(2026, 11, 25, 16, 30), _et(2026, 11, 26, 9, 30), id="eve-of-holiday"),
+]
+
+
 @pytest.mark.parametrize(
-    ("cutoff", "expected"),
+    ("timeframe", "cutoff", "expected"),
     [
-        pytest.param(_et(2026, 8, 26, 9, 29), _et(2026, 8, 26, 9, 30), id="just-before-open"),
-        pytest.param(_et(2026, 8, 26, 9, 30), _et(2026, 8, 26, 9, 30), id="at-open"),
-        pytest.param(_et(2026, 8, 26, 9, 30, 1), _et(2026, 8, 27, 9, 30), id="just-after-open"),
-        pytest.param(_et(2026, 8, 25, 20, 0), _et(2026, 8, 26, 9, 30), id="weekday-evening"),
-        pytest.param(_et(2026, 8, 28, 11, 0), _et(2026, 8, 31, 9, 30), id="friday-session"),
-        pytest.param(_et(2026, 8, 29, 12, 0), _et(2026, 8, 31, 9, 30), id="saturday"),
-        pytest.param(_et(2026, 8, 30, 23, 59), _et(2026, 8, 31, 9, 30), id="sunday-night"),
-        # 09:30 EST is 14:30 UTC; 09:30 EDT is 13:30 UTC.
-        pytest.param(_et(2026, 3, 6, 10, 0), _et(2026, 3, 9, 9, 30), id="into-daylight-time"),
-        pytest.param(_et(2026, 3, 8, 3, 0), _et(2026, 3, 9, 9, 30), id="spring-forward-day"),
-        pytest.param(_et(2026, 10, 30, 10, 0), _et(2026, 11, 2, 9, 30), id="into-standard-time"),
-        pytest.param(_et(2026, 11, 1, 1, 30), _et(2026, 11, 2, 9, 30), id="fall-back-day"),
-        # No holiday calendar: a weekday holiday is a session start; its first
-        # bars arrive on the next session, as before.
-        pytest.param(_et(2026, 11, 26, 8, 0), _et(2026, 11, 26, 9, 30), id="holiday-morning"),
-        pytest.param(_et(2026, 11, 25, 16, 30), _et(2026, 11, 26, 9, 30), id="eve-of-holiday"),
+        pytest.param(Timeframe.MIN5, *case.values, id=f"5m-{case.id}")
+        for case in _YAHOO_CUTOFFS
+    ] + [
+        pytest.param(timeframe, _et(2026, 8, 26, 9, 30, 1), _et(2026, 8, 27, 9, 30), id=timeframe.value)
+        for timeframe in (Timeframe.MIN15, Timeframe.MIN30, Timeframe.MIN39, Timeframe.MIN65)
     ],
-)
-@pytest.mark.parametrize(
-    "timeframe",
-    [Timeframe.MIN5, Timeframe.MIN15, Timeframe.MIN30, Timeframe.MIN39, Timeframe.MIN65],
 )
 def test_yahoo_history_start_is_the_first_session_open_at_or_after_the_55_day_limit(
     cutoff: datetime,

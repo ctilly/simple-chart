@@ -32,7 +32,6 @@ _SPAN = timedelta(days=30)
 # (Wave 3), the last two cached sessions: it starts within a few days of now.
 _TAIL_LOOKBACK = timedelta(days=4)
 _NOW = datetime(2026, 6, 10, 18, 2, 41, tzinfo=UTC)
-_BASE_THREADS = threading.active_count()
 _INTRADAY = (
     Timeframe.MIN5,
     Timeframe.MIN15,
@@ -56,17 +55,17 @@ _EARLY_CLOSE = {
 }
 
 
-@pytest.mark.parametrize("timeframe", _INTRADAY)
-@pytest.mark.parametrize(
-    "end",
-    [
-        datetime(2026, 1, 2, 14, 0, tzinfo=UTC),   # after Thanksgiving + Christmas + New Year
-        datetime(2025, 12, 1, 14, 0, tzinfo=UTC),  # right after Thanksgiving
-        datetime(2026, 4, 6, 14, 0, tzinfo=UTC),   # after Good Friday
-        datetime(2026, 7, 6, 14, 0, tzinfo=UTC),   # after Juneteenth + July 3
-        datetime(2026, 6, 10, 18, 2, tzinfo=UTC),
-    ],
+_HOLIDAY_ENDS = (
+    datetime(2026, 1, 2, 14, 0, tzinfo=UTC),
+    datetime(2025, 12, 1, 14, 0, tzinfo=UTC),
+    datetime(2026, 4, 6, 14, 0, tzinfo=UTC),
+    datetime(2026, 7, 6, 14, 0, tzinfo=UTC),
+    datetime(2026, 6, 10, 18, 2, tzinfo=UTC),
 )
+
+
+@pytest.mark.parametrize("timeframe", _INTRADAY)
+@pytest.mark.parametrize("end", _HOLIDAY_ENDS)
 def test_recent_window_holds_the_initial_view(
     timeframe: Timeframe,
     end: datetime,
@@ -83,15 +82,6 @@ def test_recent_window_holds_the_initial_view(
         day += timedelta(days=1)
     full_session_bars = bars_for_n_days(1, timeframe)
     assert sessions * full_session_bars >= INITIAL_VISIBLE_BARS
-
-
-_HOLIDAY_ENDS = (
-    datetime(2026, 1, 2, 14, 0, tzinfo=UTC),
-    datetime(2025, 12, 1, 14, 0, tzinfo=UTC),
-    datetime(2026, 4, 6, 14, 0, tzinfo=UTC),
-    datetime(2026, 7, 6, 14, 0, tzinfo=UTC),
-    datetime(2026, 6, 10, 18, 2, tzinfo=UTC),
-)
 
 
 def _full_sessions(start: datetime, end: datetime) -> int:
@@ -486,10 +476,13 @@ class GatedBranchProvider(SessionProvider):
         self.fail_intraday = False
         self._intraday_gated = False
         self._lock = threading.Lock()
+        self.threads: set[threading.Thread] = set()
 
     def fetch_bars(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime,
     ) -> list[Bar]:
+        with self._lock:
+            self.threads.add(threading.current_thread())
         if timeframe == Timeframe.DAILY:
             self.daily_entered.set()
             assert self.release_daily.wait(5)
@@ -598,21 +591,24 @@ def test_daily_references_overlap_intraday_and_commit_before_delivery(
         ),
     )
 
-    # Both branches are inside the provider at once: they overlap.
-    assert provider.daily_entered.wait(5) and provider.intraday_entered.wait(5)
     first_branch = "intraday" if last_branch == "daily" else "daily"
     releases = {"daily": provider.release_daily, "intraday": provider.release_intraday}
-    releases[first_branch].set()
-    assert branch_done[first_branch].wait(5)  # fully finished, not just returned
-    releases[last_branch].set()
-    thread.join(10)
+    try:
+        # Both branches are inside the provider at once: they overlap.
+        assert provider.daily_entered.wait(5) and provider.intraday_entered.wait(5)
+        releases[first_branch].set()
+        assert branch_done[first_branch].wait(5)
+    finally:
+        provider.release_daily.set()
+        provider.release_intraday.set()
+        thread.join(10)
 
     assert not thread.is_alive() and errors == []
     assert completion_order == [first_branch, last_branch]
     assert premature == []  # every delivery happened after both branches finished
     assert delivered == (["recent", "finished"] if paged else ["finished"])
     assert all(rows == 3 for rows in daily_rows)
-    assert threading.active_count() == _BASE_THREADS
+    assert not any(owned.is_alive() for owned in provider.threads)
 
 
 @pytest.mark.parametrize(
@@ -650,7 +646,8 @@ def test_concurrent_reference_failure_reports_exactly_one_error(
     ]
     assert len(logged) == 1
     assert reported.__qualname__ in logged[0]
-    assert threading.active_count() == _BASE_THREADS
+    assert not thread.is_alive()
+    assert not any(owned.is_alive() for owned in provider.threads)
 
 
 def test_failure_after_user_cancellation_reports_nothing(

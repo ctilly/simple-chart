@@ -168,7 +168,12 @@ or what decision was made, and wait for explicit user approval before continuing
    `params["_history_complete"]` is `False` (an older anchor would resolve to
    bar 0 and draw wrongly), and sets
    `ChartExtensionRender.pending_history_start_ms` to the newest omitted anchor
-   timestamp so the chart re-renders when history reaches it.
+   timestamp. The chart then loads older history until it reaches the anchor
+   and re-renders; `_history_complete` becomes `True` only once nothing older
+   exists.
+   Content the extension chooses not to draw on a chart can be explained with
+   `ChartExtensionRender.notice`, shown in the status bar (AVWAP: anchors more
+   than 600 days back on intraday charts).
 
 6. Add per-series behavior if needed.
    - `toggles_series_independently(...)`

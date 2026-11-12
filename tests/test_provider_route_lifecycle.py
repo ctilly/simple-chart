@@ -22,6 +22,8 @@ from data.provider.config import (
 from data.provider.credentials import CredentialStore
 
 
+pytestmark = pytest.mark.usefixtures("isolated_credentials")
+
 def _quote(symbol: str, price: float) -> Level1Quote:
     return Level1Quote(
         symbol=symbol, company_name="Test company", last_price=price,

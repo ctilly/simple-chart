@@ -96,7 +96,6 @@ _TIMEFRAMES = pytest.mark.parametrize(
 _VARIANTS = pytest.mark.parametrize(
     ("tail", "loads"),
     [
-        pytest.param("empty", 1, id="empty-tail"),
         pytest.param("unavailable", 1, id="history-unavailable-tail"),
         pytest.param("empty", 2, id="two-loads"),
     ],

@@ -16,6 +16,7 @@ def test_poly_line_declares_toolbar_and_icon() -> None:
     tool = PolyLineTool()
     assert tool.add_mode() == ChartExtensionAddMode.TOOLBAR
     assert tool.max_vertices() == 15
+    assert tool.toolbar_icon() is not None
 
 
 def test_clicks_add_vertices_until_enter_commits(tmp_path: Path) -> None:
@@ -54,7 +55,9 @@ def test_enter_with_single_vertex_cancels(tmp_path: Path) -> None:
         render = runtime.render_all(series)
 
     assert commit.cancel
-    assert render == [] or render[0].render.polylines == []
+    assert commit.deactivate_tool
+    assert state.get_extension("poly_line") is None
+    assert render == []
 
 
 def test_fifteenth_click_auto_commits(tmp_path: Path) -> None:
@@ -75,7 +78,8 @@ def test_fifteenth_click_auto_commits(tmp_path: Path) -> None:
     # 1 start + 14 advances = 15 vertices -> auto-commit on the fifteenth only.
     assert not any(result.done for result in results[:-1])
     assert results[-1].done
-    assert len(render.polylines[0].points) == 15
+    assert results[-1].deactivate_tool
+    assert render.polylines[0].points == tuple((float(i), 100.0 + i) for i in range(15))
 
 
 def _series(count: int = 8) -> OHLCVSeries:

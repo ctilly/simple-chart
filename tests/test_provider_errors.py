@@ -200,6 +200,15 @@ def test_real_provider_failure_surfaces_as_its_neutral_type(
     assert cause_type is not None
     _assert_translated(exc, expected_type, message, cause_type)
 
+    cause = exc.__cause__
+    assert cause is not None
+    output = describe(exc)
+    cause_name = f"{type(cause).__module__}.{type(cause).__qualname__}"
+    assert f"caused by {cause_name}" in output
+    if str(cause):
+        assert str(cause) not in output
+    assert_secret_absent(output)
+
 
 @pytest.mark.parametrize("shape", sorted(invalid_header_values()))
 def test_every_invalid_header_shape_is_malformed_credentials(
@@ -462,24 +471,3 @@ def test_provider_source_ignores_environment_proxies(
     exc = PROVIDER_SOURCES[label](error_server)
 
     assert type(exc) is EXPECTED[label][0]
-
-
-@pytest.mark.parametrize(
-    "label",
-    sorted(label for label, row in EXPECTED.items() if row[1] is not None),
-)
-def test_describe_logs_the_library_cause_type_never_its_text(
-    provider_errors: dict[str, BaseException],
-    label: str,
-) -> None:
-    exc = provider_errors[label]
-    cause = exc.__cause__
-    assert cause is not None
-
-    output = describe(exc)
-
-    cause_type = f"{type(cause).__module__}.{type(cause).__qualname__}"
-    assert f"caused by {cause_type}" in output
-    if str(cause):
-        assert str(cause) not in output
-    assert_secret_absent(output)

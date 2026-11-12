@@ -15,7 +15,6 @@ from data.provider.yfinance_provider import (
     _snapshots_from_downloaded_history,
     _snapshot_from_fast_info,
     _snapshot_from_price_fields,
-    _snapshot_from_pricing_data,
 )
 
 
@@ -143,46 +142,6 @@ def test_rows_to_bars_raises_on_invalid_interior_row() -> None:
 
     with pytest.raises(ValueError, match="invalid interior bar"):
         _rows_to_bars(df)
-
-
-def test_snapshot_from_pricing_data_uses_change_percent() -> None:
-    snapshot = _snapshot_from_pricing_data(
-        {
-            "id": "spy",
-            "price": 523.4,
-            "change": -1.25,
-            "change_percent": -0.238,
-            "previous_close": 524.65,
-            "time": 1_777_650_000_000,
-        }
-    )
-
-    assert snapshot is not None
-    assert snapshot.symbol == "SPY"
-    assert snapshot.last_price == pytest.approx(523.4)
-    assert snapshot.change == pytest.approx(-1.25)
-    assert snapshot.change_percent == pytest.approx(-0.238)
-    assert snapshot.previous_close == pytest.approx(524.65)
-    assert snapshot.timestamp == datetime(2026, 5, 1, 15, 40, tzinfo=UTC)
-
-
-def test_snapshot_from_pricing_data_ignores_invalid_numeric_fields() -> None:
-    snapshot = _snapshot_from_pricing_data(
-        {
-            "id": "QQQ",
-            "price": "not-a-number",
-            "change_percent": float("nan"),
-            "previous_close": None,
-            "time": "not-a-time",
-        }
-    )
-
-    assert snapshot is not None
-    assert snapshot.symbol == "QQQ"
-    assert snapshot.last_price is None
-    assert snapshot.change_percent is None
-    assert snapshot.previous_close is None
-    assert snapshot.timestamp is None
 
 
 def test_snapshot_from_fast_info_computes_change_percent() -> None:

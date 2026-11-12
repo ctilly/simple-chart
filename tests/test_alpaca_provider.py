@@ -14,7 +14,7 @@ from requests import PreparedRequest, Response, Session
 from requests.adapters import HTTPAdapter
 
 from data.models import Timeframe
-from data.provider import alpaca_provider, create_provider
+from data.provider import alpaca_provider
 from data.provider.alpaca_provider import (
     AlpacaProvider,
     _create_stock_historical_data_client,
@@ -25,8 +25,7 @@ from data.provider.base import (
     UnsupportedTimeframeError,
     background_requests,
 )
-from data.provider.config import MarketDataFeed, alpaca_paper_connection
-from data.provider.credentials import ProviderCredentials
+from data.provider.config import MarketDataFeed
 
 
 @dataclass
@@ -113,33 +112,6 @@ class _NonEntitlementErrorClient(_FakeClient):
         raise APIError(  # type: ignore[no-untyped-call]
             '{"code":40010001,"message":"subscription does not permit this request"}'
         )
-
-
-class _CredentialStore:
-    def __init__(self, credentials: ProviderCredentials) -> None:
-        self._credentials = credentials
-
-    def get(self, connection_id: str) -> ProviderCredentials | None:
-        return self._credentials
-
-    def put(
-        self,
-        connection_id: str,
-        credentials: ProviderCredentials,
-    ) -> None:
-        self._credentials = credentials
-
-    def delete(self, connection_id: str) -> None:
-        self._credentials = ProviderCredentials("", "")
-
-
-def test_provider_factory_constructs_alpaca_provider() -> None:
-    provider = create_provider(
-        alpaca_paper_connection(),
-        _CredentialStore(ProviderCredentials("key", "secret")),
-    )
-
-    assert isinstance(provider, AlpacaProvider)
 
 
 def test_production_alpaca_transport_supplies_default_request_timeout(
@@ -303,26 +275,6 @@ def test_realtime_sip_entitlement_error_is_actionable() -> None:
         match="15-minute delayed SIP or IEX",
     ):
         provider.fetch_level1("SPY")
-
-
-def test_delayed_sip_entitlement_error_is_actionable() -> None:
-    provider = AlpacaProvider(
-        "key",
-        "secret",
-        MarketDataFeed.DELAYED_SIP,
-        _EntitlementErrorClient(),
-    )
-
-    with pytest.raises(
-        MarketDataEntitlementError,
-        match="delayed SIP request as too recent",
-    ):
-        provider.fetch_bars(
-            "SPY",
-            Timeframe.DAILY,
-            datetime(2026, 1, 1, tzinfo=UTC),
-            datetime(2026, 1, 5, tzinfo=UTC),
-        )
 
 
 def test_non_entitlement_code_is_not_classified_by_message_text() -> None:

@@ -26,8 +26,13 @@ from test_older_history import (
 
 
 def _candle_pixels(qtbot: Any, window: MainWindow) -> int:
-    qtbot.wait(100)
-    image = window._chart.grab().toImage()
+    qtbot.waitUntil(lambda: not window._chart._stale_picture_timer.isActive())
+    viewbox: Any = window._chart.plot_manager.price_viewbox()
+    graphics_view = viewbox.scene().views()[0]
+    region = graphics_view.mapFromScene(viewbox.sceneBoundingRect()).boundingRect()
+    region = region.intersected(graphics_view.viewport().rect())
+    assert not region.isEmpty()
+    image = graphics_view.viewport().grab(region).toImage()
     colors = {QColor(CANDLE_UP).rgb() & 0xFFFFFF, QColor(CANDLE_DOWN).rgb() & 0xFFFFFF}
     return sum(
         1
@@ -85,7 +90,12 @@ def test_candles_stay_drawn_after_older_history_is_merged(
     viewbox: Any = window._chart.plot_manager.price_viewbox()
     viewbox.setXRange(-20, 180, padding=0)
     qtbot.wait(100)
+    previous = window._current_series
+    assert previous is not None
 
     _older(qtbot, window)
 
+    current = window._current_series
+    assert current is not None
+    assert current.bars[0].timestamp < previous.bars[0].timestamp
     assert _candle_pixels(qtbot, window) > 0

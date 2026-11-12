@@ -1,3 +1,5 @@
+import sqlite3
+from contextlib import closing
 import logging
 from pathlib import Path
 from typing import Any
@@ -234,7 +236,8 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
     tmp_path: Path,
 ) -> None:
     store = _MemoryCredentialStore()
-    with Cache(str(tmp_path / "test.db")) as cache:
+    db_path = tmp_path / "test.db"
+    with Cache(str(db_path)) as cache:
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert connection is not None
         dialog = AlpacaConnectionDialog(connection, cache, store)
@@ -265,6 +268,7 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
         secret.setText("paper-secret")
         feed.setCurrentIndex(feed.findData(MarketDataFeed.DELAYED_SIP))
         dialog.accept()
+        assert dialog.result() == QDialog.DialogCode.Accepted
 
         assert store.get(ALPACA_PAPER_CONNECTION_ID) == ProviderCredentials(
             "paper-key",
@@ -273,6 +277,16 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
         updated = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert updated is not None
         assert updated.feed == MarketDataFeed.DELAYED_SIP
+
+        with closing(sqlite3.connect(db_path)) as database:
+            database_text = "\n".join(database.iterdump())
+        for value in ("paper-key", "paper-secret"):
+            assert value not in database_text
+
+    for path in tmp_path.glob("test.db*"):
+        contents = path.read_bytes()
+        assert b"paper-key" not in contents
+        assert b"paper-secret" not in contents
 
 
 def test_alpaca_connection_dialog_keeps_stored_credentials_when_blank(

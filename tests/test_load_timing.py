@@ -54,12 +54,12 @@ def test_symbol_and_step_cannot_inject_log_lines(tmp_path: Path) -> None:
     directory = tmp_path / "diagnostics"
     log = LoadTimingLog.from_environment(directory, {LOAD_TIMING_ENV: "1"})
 
-    log.record(1, "XBI\nfake line", "5m", "step\nother", 0.0)
+    log.record(1, "XBI\nfake line", "5m\n", "step\nother", 0.0)
     log.close()
 
     lines = (directory / "load-timing.log").read_text().splitlines()
     assert len(lines) == 1
-    assert "\n" not in lines[0]
+    assert lines[0].split(" ")[1:5] == ["gen=1", "XBI?fake?line", "5m?", "step_other"]
 
 
 def test_log_rotates_within_bounds_and_backups_stay_private(tmp_path: Path) -> None:

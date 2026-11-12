@@ -40,9 +40,11 @@ def test_update_extension_record_persists_sort_key_and_payload(tmp_path: Path) -
             updated.payload,
         )
 
-        records = cache.get_extension_records("avwap.anchors", "SPY")
     finally:
         cache.close()
+
+    with Cache(str(db_path)) as reopened:
+        records = reopened.get_extension_records("avwap.anchors", "SPY")
 
     assert records == [updated]
 
@@ -51,7 +53,7 @@ def test_extension_records_are_scoped_by_store_key_and_symbol(tmp_path: Path) ->
     db_path = tmp_path / "simplechart.db"
     cache = Cache(str(db_path))
     try:
-        cache.put_extension_record(
+        expected = cache.put_extension_record(
             "avwap.anchors",
             "QQQ",
             1_700_000_000_000,
@@ -63,10 +65,15 @@ def test_extension_records_are_scoped_by_store_key_and_symbol(tmp_path: Path) ->
             1_700_000_000_000,
             {"label": "2023-11-14"},
         )
+        cache.put_extension_record(
+            "avwap.anchors",
+            "SPY",
+            1_700_000_000_000,
+            {"label": "competing symbol"},
+        )
 
         records = cache.get_extension_records("avwap.anchors", "QQQ")
     finally:
         cache.close()
 
-    assert len(records) == 1
-    assert records[0].store_key == "avwap.anchors"
+    assert records == [expected]

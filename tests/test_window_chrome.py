@@ -68,6 +68,8 @@ def test_wayland_platform_detection(
     assert is_wayland_platform(platform_name) is expected
 
 
+pytestmark = pytest.mark.usefixtures("isolated_credentials")
+
 def test_title_bar_structure_and_accessibility(qtbot: Any) -> None:
     window = QMainWindow()
     window.setWindowTitle("Simple Chart")

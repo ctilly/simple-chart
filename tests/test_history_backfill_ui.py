@@ -1,8 +1,9 @@
 import threading
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
-from typing import Any
+from datetime import UTC, datetime, timedelta, tzinfo
+from typing import Any, Self
+from types import SimpleNamespace
 
 import finplot as fplt
 import pytest
@@ -229,9 +230,19 @@ def test_history_merge_is_held_during_real_drag_and_applied_once_after(
     window._reload_extensions(draw_bars=False)
     _FINISHED_DRAG_TIMESTAMPS.clear()
 
+    merges: list[OHLCVSeries] = []
+    apply_merge = window._apply_history_merge
+
+    def record_merge(series: OHLCVSeries, history_complete: bool = True) -> None:
+        merges.append(series)
+        apply_merge(series, history_complete)
+
+    monkeypatch.setattr(window, "_apply_history_merge", record_merge)
+
     assert window._on_drag_start(10.0, 100.0, 1.0, 1.0)
     window._on_chart_fetch_done(request, full)
     assert window._current_series is recent
+    assert merges == []
     window._on_drag_move(12.0, 100.0, 1.0, 1.0)
     window._on_drag_finish(12.0, 100.0, 1.0, 1.0)
 
@@ -241,6 +252,8 @@ def test_history_merge_is_held_during_real_drag_and_applied_once_after(
     assert window._current_series is full
     window._flush_held_history_merge()
     assert window._current_series is full
+
+    assert merges == [full]
 
 
 def test_held_history_merge_is_discarded_after_navigation(
@@ -325,11 +338,18 @@ class _GatedPagedProvider(DataProvider):
         return [Timeframe.MIN5, Timeframe.DAILY]
 
 
+class _FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz: tzinfo | None = None) -> Self:
+        return cls(2026, 6, 10, 18, 2, tzinfo=UTC).astimezone(tz)
+
+
 def test_production_load_renders_recent_window_before_backfill_completes(
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
     window = _window(qtbot, tmp_path, monkeypatch)
-    now = datetime.now(tz=UTC)
+    now = _FixedDateTime.now(UTC)
     recent_start = _production_recent_start(window, now)
     provider = _GatedPagedProvider(recent_start)
 
@@ -345,16 +365,16 @@ def test_production_load_renders_recent_window_before_backfill_completes(
 
     window._load()
 
-    qtbot.waitUntil(lambda: window._current_series is not None, timeout=10_000)
-    recent = window._current_series
-    assert recent is not None
-    assert recent.bars[0].timestamp >= recent_start
-    assert window._partial_history_request is not None
-    # The first fetch covers the default SMAs' lookback, so they render with
-    # the candles instead of waiting for the backfill.
-    assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
-
-    provider.gate.set()
+    try:
+        qtbot.waitUntil(lambda: window._current_series is not None, timeout=10_000)
+        recent = window._current_series
+        assert recent is not None
+        assert recent.bars[0].timestamp >= recent_start
+        assert window._partial_history_request is not None
+        # The first fetch covers the default SMAs' lookback.
+        assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
+    finally:
+        provider.gate.set()
     qtbot.waitUntil(lambda: window._partial_history_request is None, timeout=10_000)
     final = window._current_series
     assert final is not None and final.bars[0].timestamp < recent_start
@@ -365,7 +385,12 @@ def test_production_load_renders_recent_window_before_backfill_completes(
             window._selected_route.cache_namespace, "XBI", Timeframe.MIN5,
         )
     assert coverage is not None
-    assert coverage[0] <= int((now - timedelta(days=599)).timestamp() * 1000)
+    # Friday's 600-day cutoff is after the open, so history starts Monday.
+    assert coverage == (
+        int(datetime(2024, 10, 21, 13, 30, tzinfo=UTC).timestamp() * 1000),
+        int(datetime(2026, 6, 10, 18, 0, tzinfo=UTC).timestamp() * 1000),
+    )
+    assert final.bars[0].timestamp == datetime(2024, 10, 21, 13, 30, tzinfo=UTC)
 
 
 def test_replacement_load_does_not_reveal_partial_cache_as_complete(
@@ -598,17 +623,52 @@ def test_history_progress_re_renders_at_most_once_per_interval(
     window = _window(qtbot, tmp_path, monkeypatch)
     full = _series(500)
     request = _interim_with_probe(window, full, [full.bars[100], full.bars[20]])
+    clock = {"now": 100.0}
+    monkeypatch.setattr(controller_module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    scheduled: list[int] = []
 
+    class ManualTimer:
+        active = False
+
+        def start(self, delay: int) -> None:
+            scheduled.append(delay)
+            self.active = True
+
+        def isActive(self) -> bool:
+            return self.active
+
+        def stop(self) -> None:
+            self.active = False
+
+    timer = ManualTimer()
+    monkeypatch.setattr(window, "_history_refresh_timer", timer)
+    merges: list[OHLCVSeries] = []
+    apply_merge = window._apply_history_merge
+
+    def record_merge(series: OHLCVSeries, history_complete: bool = True) -> None:
+        merges.append(series)
+        apply_merge(series, history_complete)
+
+    monkeypatch.setattr(window, "_apply_history_merge", record_merge)
     window._on_chart_history_progress(request, _ms(full.bars[50]))
-    qtbot.waitUntil(lambda: len(_probe_keys(window)) == 1, timeout=5_000)
-
-    window._on_chart_history_progress(request, _ms(full.bars[10]))
-    window._on_chart_history_progress(request, _ms(full.bars[0]))
-    assert window._history_refresh_timer.isActive()
-    assert window._history_refresh_timer.remainingTime() > 500
+    assert scheduled == [0]
+    assert merges == []
+    timer.stop()
+    window._refresh_partial_history()
+    assert len(merges) == 1
     assert len(_probe_keys(window)) == 1
 
-    qtbot.waitUntil(lambda: len(_probe_keys(window)) == 2, timeout=5_000)
+    clock["now"] = 100.25
+    window._on_chart_history_progress(request, _ms(full.bars[10]))
+    window._on_chart_history_progress(request, _ms(full.bars[0]))
+    assert scheduled == [0, 750]
+    assert len(merges) == 1
+
+    clock["now"] = 101.0
+    timer.stop()
+    window._refresh_partial_history()
+    assert len(merges) == 2
+    assert len(_probe_keys(window)) == 2
     assert window._current_series is not None
     assert window._current_series.bars[0].timestamp == full.bars[0].timestamp
 

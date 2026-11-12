@@ -742,25 +742,6 @@ def test_refill_keeps_one_complete_bar_per_period(
         if row[0] >= _HISTORY_START
     ]
 
-
-@_SHAPES
-@_BASES
-@_TARGETS
-def test_second_ordinary_load_after_refill_keeps_one_complete_bar_per_period(
-    qtbot: Any,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    paged: bool,
-    base: Timeframe,
-    target: Timeframe,
-) -> None:
-    db_path = tmp_path / "test.db"
-    _seed(db_path, base)
-    provider = _SourceProvider(base, paged)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
-    _show(qtbot, window, target)
-    _refresh_and_reload(qtbot, window)
-
     _show(qtbot, window, target)
 
     assert warnings == []

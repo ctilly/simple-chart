@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -41,13 +42,37 @@ def test_legacy_compute_output_adapts_to_indicator_render() -> None:
     assert np.array_equal(render.series[1].values, np.full(20, 70.0))
 
 
-def test_rsi_compute_uses_wilder_smoothing_kernel() -> None:
-    result = RSIIndicator().compute(_series(), RSIIndicator().default_params())
-    values = result["rsi_14"]
+@pytest.mark.parametrize(
+    ("closes", "days", "expected"),
+    [
+        pytest.param(
+            [10.0, 12.0, 11.0, 14.0, 12.0, 15.0, 15.0], 3,
+            # Gains 2 + 3 and loss 1 seed the first value; subsequent
+            # fractions are independently reduced Wilder gain/loss ratios.
+            [np.nan, np.nan, np.nan, 100 * 5 / 6, 100 * 5 / 9,
+             100 * 47 / 63, 100 * 47 / 63],
+            id="mixed-seed-and-smoothing",
+        ),
+        pytest.param(
+            [100.0 + i for i in range(20)], 14,
+            [np.nan] * 14 + [100.0] * 6,
+            id="rising-prices-zero-loss",
+        ),
+    ],
+)
+def test_rsi_compute_uses_wilder_smoothing_kernel(
+    closes: list[float], days: int, expected: list[float],
+) -> None:
+    series = _series()
+    series.bars = [
+        replace(bar, open=close, high=close + 1, low=close - 1, close=close)
+        for bar, close in zip(series.bars, closes, strict=False)
+    ]
+    params = RSIIndicator().default_params() | {"days": days}
 
-    assert np.all(np.isnan(values[:14]))
-    assert values[14] == 100.0
-    assert values[-1] == 100.0
+    values = RSIIndicator().compute(series, params)[f"rsi_{days}"]
+
+    np.testing.assert_allclose(values, expected, equal_nan=True)
 
 
 def test_avwap_render_owns_anchor_style_label_and_marker() -> None:

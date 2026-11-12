@@ -1,4 +1,5 @@
 import importlib.util
+from importlib.machinery import EXTENSION_SUFFIXES
 import subprocess
 import sys
 from pathlib import Path
@@ -37,15 +38,18 @@ def test_each_target_is_compiled_in_its_own_mypyc_invocation(
     monkeypatch.setattr(build.subprocess, "run", fake_run)
     build.main()
 
-    compiled = [cmd[3:] for cmd in calls]
-    assert compiled == [
-        [str(Path(*target.split(".")).with_suffix(".py"))] for target in KERNELS
+    assert calls == [
+        [sys.executable, "-m", "mypyc", str(Path(*target.split(".")).with_suffix(".py"))]
+        for target in KERNELS
     ]
 
 
 def _compiled_kernels_present() -> bool:
     return all(
-        any((ROOT / Path(*target.split(".")[:-1])).glob("_kernel.*.so"))
+        any(
+            (ROOT / Path(*target.split(".")[:-1]) / ("_kernel" + suffix)).is_file()
+            for suffix in EXTENSION_SUFFIXES
+        )
         for target in KERNELS
     )
 
@@ -59,7 +63,12 @@ def test_compiled_kernels_import_without_project_root_on_path(
     # The console-script launcher does not put the project root on sys.path;
     # -I drops the current directory and PYTHONPATH the same way.
     result = subprocess.run(
-        [sys.executable, "-I", "-c", "import " + ", ".join(KERNELS)],
+        [sys.executable, "-I", "-c", (
+            "import importlib, importlib.machinery; "
+            f"modules = [importlib.import_module(name) for name in {KERNELS!r}]; "
+            "assert all(isinstance(module.__loader__, importlib.machinery.ExtensionFileLoader) "
+            "for module in modules)"
+        )],
         cwd=tmp_path,
         capture_output=True,
         text=True,

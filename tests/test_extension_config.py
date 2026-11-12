@@ -45,8 +45,12 @@ def test_session_lifecycle_group_disables_age_off_until_persistence_enabled(qtbo
     persist.setChecked(True)
 
     assert age_off.isEnabled()
+    age_off.setValue(7.0)
     assert dialog.result_params()["persist_across_sessions"] is True
-    assert dialog.result_params()["age_off_days"] == 2.0
+    assert dialog.result_params()["age_off_days"] == 7.0
+    persist.setChecked(False)
+    assert not age_off.isEnabled()
+    assert dialog.result_params()["age_off_days"] == 7.0
     assert _last_form_widget(dialog) is group
 
 

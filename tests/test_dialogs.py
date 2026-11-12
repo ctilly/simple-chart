@@ -3,7 +3,7 @@ from typing import Any
 
 from PyQt6.QtCore import QEvent, QPointF, Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPalette
-from PyQt6.QtWidgets import QDialogButtonBox, QFrame, QLabel, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QFrame, QLabel, QVBoxLayout, QWidget
 
 
 _APP_ROOT = Path(__file__).resolve().parents[1] / "app"
@@ -49,6 +49,10 @@ def test_application_message_dialog_uses_shared_shell(qtbot: Any) -> None:
     assert icon.pixmap() is not None
     assert not icon.pixmap().isNull()
     assert buttons is not None
+    ok = buttons.button(QDialogButtonBox.StandardButton.Ok)
+    assert ok is not None
+    qtbot.mouseClick(ok, Qt.MouseButton.LeftButton)
+    assert dialog.result() == QDialog.DialogCode.Accepted
 
 
 def test_dialog_shell_derives_colors_from_inherited_palette(qtbot: Any) -> None:

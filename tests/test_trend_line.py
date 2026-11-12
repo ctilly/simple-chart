@@ -186,8 +186,11 @@ def test_configure_and_remove(tmp_path: Path) -> None:
 
         # Back on the creation timeframe it returns, and can be removed.
         state.timeframe = Timeframe.DAILY
-        runtime.render_all(series)
+        restored = runtime.render_all(series)
+        assert len(restored) == 1
+        assert restored[0].render.polylines[0].key == "trend_line_-1"
         removal = runtime.remove("trend_line_-1")
+        assert runtime.render_all(series) == []
 
     assert removal is not None
     assert state.get_extension("trend_line") is None

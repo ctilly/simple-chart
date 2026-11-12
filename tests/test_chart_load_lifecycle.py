@@ -1,5 +1,4 @@
 import gc
-import inspect
 import sqlite3
 import threading
 import weakref
@@ -19,6 +18,8 @@ from data.provider.alpaca_provider import AlpacaProvider
 from data.provider.config import ProviderConnection, alpaca_paper_connection
 from data.provider.credentials import CredentialStore, ProviderCredentials
 
+
+pytestmark = pytest.mark.usefixtures("isolated_credentials")
 
 def _window(
     qtbot: Any,
@@ -1444,7 +1445,3 @@ def test_real_alpaca_factory_and_cache_support_two_chart_workers(
     assert len(credential_thread_ids) == 2
     assert len(set(credential_thread_ids)) == 2
     assert main_thread_id not in credential_thread_ids
-
-
-def test_main_window_constructor_has_no_diagnostics_parameter() -> None:
-    assert "diagnostics" not in inspect.signature(MainWindow.__init__).parameters

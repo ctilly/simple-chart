@@ -262,7 +262,7 @@ def test_correction_is_scoped_to_provider_feed(
     tmp_path: Path,
 ) -> None:
     delayed = _bar(_SPY_SESSION, low=68.64)
-    iex = _bar(_SPY_SESSION, low=685.77, volume=1_800_000)
+    iex = _bar(_SPY_SESSION, low=684.0, volume=1_800_000)
     timestamp_ms = _timestamp_ms(_SPY_SESSION)
 
     with Cache(str(tmp_path / "test.db")) as cache:
@@ -292,9 +292,14 @@ def test_correction_is_scoped_to_provider_feed(
             timestamp_ms,
             timestamp_ms,
         )
+        iex_inspection = cache.get_bar_inspection(
+            "alpaca:iex", "SPY", Timeframe.DAILY, _SPY_SESSION,
+        )
 
     assert delayed_result[0].low == pytest.approx(685.77)
     assert iex_result == [iex]
+    assert iex_inspection is not None
+    assert iex_inspection.correction is None
 
 
 def test_delete_bar_correction_restores_provider_bar(
@@ -1091,3 +1096,4 @@ def test_refresh_provider_bar_does_not_create_unmaterialized_synthesized_bars(
         )
 
         assert cache.get_raw_bars("alpaca:iex", "SPY", Timeframe.MIN39, 0, 2**62) == []
+        assert cache.get_raw_bars("alpaca:iex", "SPY", Timeframe.MIN65, 0, 2**62) == []

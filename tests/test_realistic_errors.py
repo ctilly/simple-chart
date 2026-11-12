@@ -155,6 +155,8 @@ def test_factory_produces_the_claimed_real_exception(
 
     assert type(exc) is _EXPECTED_TYPES[label]
     assert exc.__traceback__ is not None
+    if label in _EXPECTED_STATUS:
+        assert getattr(exc, "response").status_code == _EXPECTED_STATUS[label]
     if label in _SECRET_IN_MESSAGE:
         assert SECRET in str(exc)
     elif label in _SECRET_IN_CAUSE_MESSAGE:
@@ -167,18 +169,6 @@ def test_factory_produces_the_claimed_real_exception(
         assert SECRET in carrier.url
     else:
         assert SECRET not in str(exc)
-
-
-@pytest.mark.parametrize("label", sorted(_EXPECTED_STATUS))
-def test_http_failures_carry_a_real_response_status(
-    error_server: LocalErrorServer,
-    label: str,
-) -> None:
-    exc = SOURCES[label](error_server)
-
-    response = getattr(exc, "response")
-    assert response is not None
-    assert response.status_code == _EXPECTED_STATUS[label]
 
 
 def test_alpaca_entitlement_error_comes_from_the_provider_classification(

@@ -183,6 +183,9 @@ def test_update_marker_removes_same_key_orphan_items(qtbot: object) -> None:
         if getattr(item, "_simplechart_marker_key", None) == "avwap_anchor_1"
     ]
     assert len(marker_items) == 1
+    assert marker_items[0].pos().x() == 2.0
+    assert marker_items[0].pos().y() == 101.0
+    assert plot_manager._markers["avwap_anchor_1"] is marker_items[0]
 
 
 def _minute_series(count: int, first: datetime) -> OHLCVSeries:

@@ -40,7 +40,7 @@ from simplechart.api import (
     all_extensions,
     register_extension,
 )
-from simplechart.extensions import _guard, _registry, _store_registry
+from simplechart.extensions import _registry, _store_registry
 from simplechart.extensions._guard import (
     call_extension,
     call_store_handler,
@@ -579,7 +579,7 @@ def test_failed_plugin_file_is_rolled_back_and_later_plugins_load(
 
     load_plugin_directory(plugins)
 
-    assert "iso_good" in all_extensions()
+    assert all_extensions()["iso_good"]().label() == "Good"
     assert "iso_broken" not in all_extensions()
     assert all_extensions()["iso_overwritten"] is _Original
     assert _registry._labels["iso_overwritten"] == "Original"
@@ -713,8 +713,3 @@ def test_registering_module_outside_the_plugin_namespace_is_rolled_back(
     assert f"{package}.registers" not in sys.modules
     importlib.import_module(f"{package}.registers")
     assert "iso_outside" in all_extensions()
-
-
-def test_guard_state_is_reset_between_tests() -> None:
-    assert not _guard._disabled
-    assert take_notices() == []

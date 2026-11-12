@@ -24,6 +24,8 @@ from data.provider.credentials import (
 )
 
 
+pytestmark = pytest.mark.usefixtures("isolated_credentials")
+
 class _MemoryCredentialStore:
     def __init__(self) -> None:
         self.credentials: dict[str, ProviderCredentials] = {}
@@ -116,6 +118,7 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
 
     window = MainWindow(str(tmp_path / "test.db"))
     qtbot.addWidget(window)
+    window._on_application_settings()
     window._on_application_settings()
 
     assert preflight_calls == 1

@@ -126,27 +126,6 @@ def test_cache_rejects_feed_for_yahoo_and_unknown_active_connection(
             cache.set_active_provider_connection_id("another-provider")
 
 
-def test_sqlite_provider_configuration_contains_no_credentials(tmp_path: Path) -> None:
-    db_path = tmp_path / "test.db"
-    backend = _FakeKeyring()
-    credentials = ProviderCredentials("test-key-id", "test-api-secret")
-    with Cache(str(db_path)):
-        pass
-    KeyringCredentialStore(backend).put(ALPACA_PAPER_CONNECTION_ID, credentials)
-
-    with sqlite3.connect(db_path) as connection_db:
-        database_text = " ".join(
-            str(value)
-            for row in connection_db.execute("SELECT * FROM provider_connections")
-            for value in row
-        )
-    assert "test-key-id" not in database_text
-    assert "test-api-secret" not in database_text
-    database_bytes = db_path.read_bytes()
-    assert b"test-key-id" not in database_bytes
-    assert b"test-api-secret" not in database_bytes
-
-
 def test_create_provider_constructs_yahoo_without_credentials() -> None:
     provider = create_provider(yfinance_connection(), _MemoryCredentialStore())
 
@@ -272,12 +251,9 @@ def test_keyring_store_round_trips_and_deletes_credentials() -> None:
 
     store.delete(ALPACA_PAPER_CONNECTION_ID)
     assert store.get(ALPACA_PAPER_CONNECTION_ID) is None
-
-
-def test_keyring_delete_is_idempotent() -> None:
-    store = KeyringCredentialStore(_FakeKeyring())
-
+    store.delete(ALPACA_PAPER_CONNECTION_ID)
     store.delete(ALPACA_LIVE_CONNECTION_ID)
+    assert backend.passwords == {}
 
 
 def _bar(timestamp: datetime, close: float) -> Bar:

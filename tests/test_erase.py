@@ -14,7 +14,7 @@ from indicators.avwap.anchor_store import AvwapAnchorStore
 from tools.erase import EraseTool
 from tools.fib_retracement.session_store import FibRetracementStore
 from tools.vertical_line.session_store import VerticalLineStore
-from simplechart.api import ChartEvent, ChartExtensionAddMode, ChartExtensionMutation
+from simplechart.api import ChartEvent, ChartExtensionAddMode, ChartExtensionMutation, ChartExtensionRender
 
 
 def test_erase_declares_toolbar_and_icon() -> None:
@@ -24,7 +24,7 @@ def test_erase_declares_toolbar_and_icon() -> None:
     # The tool persists nothing and renders nothing of its own.
     assert tool.default_params() == {}
     series = _series()
-    assert tool.render(series, {}).vertical_lines == []
+    assert tool.render(series, {}) == ChartExtensionRender()
 
 
 def test_erase_click_requests_clear_and_deactivates() -> None:
@@ -74,6 +74,11 @@ def test_erase_clears_transient_but_keeps_persistent(tmp_path: Path) -> None:
 
         # Only the two session-protected lines remain.
         assert _vertical_count(runtime, series) == 2
+        assert sorted(
+            line.x_index
+            for rendered in runtime.render_all(series)
+            for line in rendered.render.vertical_lines
+        ) == [1.0, 2.0]
         assert not _has_fib(runtime, series)          # fib defaults to session off
 
 

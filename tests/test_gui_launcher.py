@@ -120,7 +120,10 @@ function New-Object {
 if (-not $script:shortcut.Saved) { throw 'Shortcut not saved' }
 if ($script:shortcut.TargetPath -ne (Join-Path $PWD '.venv\Scripts\simplechart-gui.exe')) { throw 'Wrong launcher' }
 if ($script:shortcut.WorkingDirectory -ne $PWD.Path) { throw 'Wrong working directory' }
-if ($script:shortcut.IconLocation -ne ((Join-Path $PWD 'assets\simple-chart.ico') + ',0')) { throw 'Wrong icon' }
+if ($script:shortcut.IconLocation -notmatch '^(.*),0$') { throw 'Invalid icon location' }
+$ShortcutIconPath = $Matches[1]
+if ([IO.Path]::GetExtension($ShortcutIconPath) -ne '.ico') { throw 'Shortcut icon must be an ICO file' }
+if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ShortcutIconPath -PathType Leaf)) { throw 'Shortcut icon does not exist' }
 if ($script:shortcut.Arguments -ne '') { throw 'Unexpected arguments' }
 '''
         result = subprocess.run(

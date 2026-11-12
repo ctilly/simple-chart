@@ -37,8 +37,8 @@ the capability you are about to build:
   kernel (EMA cannot be vectorized); the clearest model for indicators that
   require a loop where each value depends on the previous one
 - `indicators/avwap/__init__.py` — canonical example of a multi-output indicator
-  with anchor-based series keys, custom render output, interaction hooks, and a
-  compiled kernel. Read it here for stable key/render examples; use
+  with anchor-based series keys, custom render output, interaction hooks, and
+  `series_arrays` with NumPy cumulative sums (no kernel). Read it here for stable key/render examples; use
   `interactive-indicator.md` for the full interactive process.
 - `indicators/rsi/__init__.py` — reference example of panel routing: it
   overrides `render_target()` and draws in a dedicated panel below the chart
@@ -204,9 +204,12 @@ targets = [
 
 Reference kernels:
 - `indicators/ema/_kernel.py` — single-output kernel (`np.ndarray` return)
-- `indicators/avwap/_kernel.py` — multi-output kernel (`list[np.ndarray]` return);
-  use this as the model when the kernel produces more than one array (e.g.
-  upper band, middle band, lower band for Bollinger Bands)
+- `indicators/rsi/_kernel.py` — Wilder-smoothed kernel
+
+A running sum (cumulative totals, like AVWAP's price x volume over volume) is
+not a recurrence: use `np.cumsum` and no kernel (see `indicators/avwap`).
+Read input arrays with `series_arrays(series)` instead of rebuilding them from
+`series.bars` on every render.
 
 ### 7b. The ChartExtension subclass
 

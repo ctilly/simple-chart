@@ -271,6 +271,7 @@ def test_fib_zero_height_drawing_stacks_levels() -> None:
     render = indicator.preview_drawing(series, start.session, _event(series, 1, 100.0))
 
     assert render is not None
+    assert len(render.segments) == 6
     assert {segment.y_value for segment in render.segments} == {100.0}
 
 

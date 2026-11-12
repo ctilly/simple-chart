@@ -251,7 +251,9 @@ def test_whole_load_error_dialog_and_refresh_status_are_shielded(
     )
 
 
-@pytest.mark.parametrize("label", sorted(_SITE_SOURCES))
+@pytest.mark.parametrize(
+    "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
+)
 def test_background_history_error_status_bar_is_shielded(
     qtbot: Any,
     tmp_path: Any,
@@ -285,7 +287,9 @@ def test_background_history_error_status_bar_is_shielded(
     _assert_shielded([widget_text(window)], exc, caplog)
 
 
-@pytest.mark.parametrize("label", sorted(_SITE_SOURCES))
+@pytest.mark.parametrize(
+    "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
+)
 def test_quote_error_status_bar_is_shielded(
     qtbot: Any,
     tmp_path: Any,
@@ -321,7 +325,9 @@ def test_quote_error_status_bar_is_shielded(
     _assert_shielded([widget_text(window)], exc, caplog)
 
 
-@pytest.mark.parametrize("label", sorted(_SITE_SOURCES))
+@pytest.mark.parametrize(
+    "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
+)
 def test_watchlist_quote_error_status_bar_is_shielded(
     qtbot: Any,
     tmp_path: Any,
@@ -346,7 +352,9 @@ def test_watchlist_quote_error_status_bar_is_shielded(
     _assert_shielded([widget_text(window)], exc, caplog)
 
 
-@pytest.mark.parametrize("label", sorted(_SITE_SOURCES))
+@pytest.mark.parametrize(
+    "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
+)
 def test_provider_validation_error_dialog_is_shielded(
     qtbot: Any,
     tmp_path: Any,

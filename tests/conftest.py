@@ -11,6 +11,18 @@ from PyQt6.QtCore import qInstallMessageHandler
 from simplechart.extensions import _guard
 
 
+@pytest.fixture
+def isolated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    import app.controller as controller
+    from data.provider.credentials import CredentialStoreAccess, UnavailableCredentialStore
+
+    monkeypatch.setattr(
+        controller,
+        "initialize_keyring_credential_store",
+        lambda: CredentialStoreAccess(UnavailableCredentialStore("test"), False, "test"),
+    )
+
+
 def _hook_identity(hook: object) -> object:
     # pytest-qt reinstalls its excepthook and Qt message capture for each
     # test phase as a new partial or bound method around the same function.

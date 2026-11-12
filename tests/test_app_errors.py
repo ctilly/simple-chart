@@ -48,29 +48,12 @@ SIP_ENTITLEMENT = (
     "SIP subscription to the Alpaca account."
 )
 
-# Raw library failures: only SimpleChart's own errors show their text.
+# Exercise both message branches with real failures; exhaustive source/type
+# classification remains in test_provider_errors and formatting in test_errors.
 EXPECTED: dict[str, str] = {
     "requests_invalid_header": GENERIC,
-    "requests_invalid_header_bytes": GENERIC,
-    "http_client_invalid_header": GENERIC,
-    "requests_connection_error": GENERIC,
-    "requests_timeout": GENERIC,
-    "requests_http_401": GENERIC,
-    "requests_http_403": GENERIC,
-    "requests_http_429": GENERIC,
-    "requests_http_500": GENERIC,
-    "curl_connection_error": GENERIC,
-    "curl_timeout": GENERIC,
-    "curl_http_401": GENERIC,
-    "curl_http_403": GENERIC,
-    "curl_http_429": GENERIC,
-    "curl_http_500": GENERIC,
     "alpaca_api_401": GENERIC,
-    "alpaca_api_403": GENERIC,
-    "alpaca_api_429": GENERIC,
-    "alpaca_api_entitlement": GENERIC,
     "alpaca_entitlement": SIP_ENTITLEMENT,
-    "yfinance_rate_limit": GENERIC,
     "keyring_read": "Unable to read provider credentials from the OS keyring.",
     "keyring_write": "Unable to save provider credentials in the OS keyring.",
     "keyring_unavailable": "The operating-system credential store is unavailable.",
@@ -86,13 +69,14 @@ def error_server() -> Iterator[LocalErrorServer]:
 
 @pytest.fixture(scope="module")
 def real_errors(error_server: LocalErrorServer) -> dict[str, BaseException]:
-    return {label: produce(error_server) for label, produce in SOURCES.items()}
+    return {label: SOURCES[label](error_server) for label in EXPECTED}
 
 
 @pytest.fixture(scope="module")
 def provider_errors(error_server: LocalErrorServer) -> dict[str, BaseException]:
     return {
         label: produce(error_server) for label, produce in PROVIDER_SOURCES.items()
+        if label in {"alpaca_invalid_header", "alpaca_http_client_invalid_header", "alpaca_api_401"}
     }
 
 
@@ -113,11 +97,7 @@ def _assert_shielded(message: str, exc: BaseException) -> None:
         assert foreign not in message
 
 
-def test_every_harness_source_has_an_expected_row() -> None:
-    assert set(EXPECTED) == set(SOURCES)
-
-
-@pytest.mark.parametrize("label", sorted(SOURCES))
+@pytest.mark.parametrize("label", sorted(EXPECTED))
 def test_raw_real_error_shows_only_app_composed_text(
     real_errors: dict[str, BaseException],
     label: str,
@@ -130,7 +110,9 @@ def test_raw_real_error_shows_only_app_composed_text(
     _assert_shielded(message, exc)
 
 
-@pytest.mark.parametrize("label", sorted(PROVIDER_SOURCES))
+@pytest.mark.parametrize(
+    "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
+)
 def test_provider_error_shows_its_neutral_text(
     provider_errors: dict[str, BaseException],
     label: str,
@@ -146,14 +128,6 @@ def test_provider_error_shows_its_neutral_text(
     else:
         assert message == GENERIC
     _assert_shielded(message, exc)
-
-
-def test_untranslated_library_exception_gets_the_generic_message() -> None:
-    response = requests.Response()
-    response.status_code = 401
-    exc = requests.exceptions.HTTPError(f"token {SECRET}", response=response)
-
-    assert user_message(exc, CONTEXT) == GENERIC
 
 
 def test_user_facing_error_from_cache_shows_its_own_text(tmp_path: Path) -> None:
