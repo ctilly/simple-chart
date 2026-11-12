@@ -30,6 +30,7 @@ from app.data_quality import (
     DataQualityTab,
     SymbolRefresher,
 )
+from data.adjustment import BasisChangeChoice
 from data.cache import Cache
 from data.models import Timeframe
 from data.provider import ProviderAvailability
@@ -261,6 +262,10 @@ class ApplicationSettingsDialog(QDialog):
                 )
                 return
         self._selected_connection_id = connection_id
+        choice = self._basis_change_choice.currentData()
+        self._cache.set_basis_change_choice(
+            None if choice is None else BasisChangeChoice(choice)
+        )
         super().accept()
 
     def selected_connection_id(self) -> str:
@@ -333,6 +338,28 @@ class ApplicationSettingsDialog(QDialog):
         dark_mode.setObjectName("darkMode")
         dark_mode.setEnabled(False)
         form.addRow("Dark Mode", dark_mode)
+        self._basis_change_choice = QComboBox(tab)
+        self._basis_change_choice.setObjectName("basisChangeChoice")
+        self._basis_change_choice.setToolTip(
+            "When a data source adjusts its price history for a split or "
+            "dividends, cached history older than it still provides stays "
+            "on the old basis."
+        )
+        self._basis_change_choice.addItem("Ask each time")
+        self._basis_change_choice.addItem(
+            "Rescale it to match",
+            BasisChangeChoice.RESCALE.value,
+        )
+        self._basis_change_choice.addItem(
+            "Discard it",
+            BasisChangeChoice.DISCARD.value,
+        )
+        choice = self._cache.get_basis_change_choice()
+        if choice is not None:
+            self._basis_change_choice.setCurrentIndex(
+                self._basis_change_choice.findData(choice.value)
+            )
+        form.addRow("Older adjusted history", self._basis_change_choice)
         return tab
 
     def _refresh_connections(self) -> None:

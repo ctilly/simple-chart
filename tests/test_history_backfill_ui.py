@@ -692,6 +692,15 @@ def test_production_backfill_progress_renders_anchored_content_before_completion
     )
     window._state.symbol = "XBI"
     window._state.timeframe = Timeframe.MIN5
+    received_ms: list[int] = []
+    production_progress = window._on_chart_history_progress
+
+    def record_progress(request: Any, earliest_ms: int) -> None:
+        received_ms.append(earliest_ms)
+        production_progress(request, earliest_ms)
+
+    # The worker connects to this attribute when the load is dispatched.
+    monkeypatch.setattr(window, "_on_chart_history_progress", record_progress)
 
     window._load()
 
@@ -705,3 +714,28 @@ def test_production_backfill_progress_renders_anchored_content_before_completion
     final = window._current_series
     assert final is not None and final.bars[0].timestamp < displayed.bars[0].timestamp
     qtbot.waitUntil(lambda: not window._chart_load_tasks, timeout=10_000)
+    # Progress values cross the real worker signal intact: each is the UTC-ms
+    # start of a committed chunk, older than the last, inside the history the
+    # load fetched (a chunk may start up to a weekend before its first bar).
+    oldest_ms = _ms(final.bars[0]) - int(timedelta(days=7).total_seconds() * 1000)
+    newest_ms = int(recent_start.timestamp() * 1000)
+    assert received_ms
+    assert received_ms == sorted(received_ms, reverse=True)
+    assert len(set(received_ms)) == len(received_ms)
+    assert all(oldest_ms <= ms <= newest_ms for ms in received_ms)
+
+
+def test_history_progress_signal_carries_utc_ms_timestamps_intact() -> None:
+    worker = controller_module._FetchWorker(
+        db_path=":memory:",
+        credential_store=UnavailableCredentialStore("test"),
+        request=object(),  # type: ignore[arg-type]
+    )
+    received: list[tuple[object, int]] = []
+    worker.history_progress.connect(
+        lambda request, earliest_ms: received.append((request, earliest_ms))
+    )
+
+    worker._emit_history_progress(1_794_240_000_000)
+
+    assert [ms for _request, ms in received] == [1_794_240_000_000]

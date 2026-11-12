@@ -73,6 +73,9 @@ class ChartInteractions:
         self._drag_cancel_cb: Callable[[], None] | None = None
         self._mouse_move_cb:  Callable[[float, float, float, float], None] | None = None
         self._drag_active = False
+        # Set when a drag is cancelled while the mouse is still held; the
+        # rest of that gesture pans instead of grabbing an item again.
+        self._gesture_cancelled = False
         self._connect()
         self._patch_drag_handler()
 
@@ -103,6 +106,7 @@ class ChartInteractions:
         if not self._drag_active:
             return False
         self._drag_active = False
+        self._gesture_cancelled = True
         self._set_extension_drag_locked(False)
         self._price_ax.vb.win._isMouseLeftDrag = False  # type: ignore[attr-defined]
         if self._drag_cancel_cb is not None:
@@ -134,6 +138,14 @@ class ChartInteractions:
         )
 
         def _mouse_drag_event(_self_vb: object, event: object, axis: object | None = None) -> None:
+            # Before the button check: the release may carry a modifier the
+            # press did not, and it still ends the cancelled gesture.
+            if self._gesture_cancelled:
+                if event.isFinish():  # type: ignore[attr-defined]
+                    self._gesture_cancelled = False
+                original_mouse_drag(event, axis)
+                return
+
             button = event.button()  # type: ignore[attr-defined]
             modifiers = event.modifiers()  # type: ignore[attr-defined]
             if button != Qt.MouseButton.LeftButton or modifiers != Qt.KeyboardModifier.NoModifier:
@@ -153,6 +165,8 @@ class ChartInteractions:
                         self._drag_finish_cb(pos.x(), pos.y(), px_x, px_y)
                     else:
                         self.cancel_drag()
+                    # This gesture has ended.
+                    self._gesture_cancelled = False
                     self._drag_active = False
                     viewbox.win._isMouseLeftDrag = False
                     event.accept()  # type: ignore[attr-defined]

@@ -25,6 +25,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from data.adjustment import BasisChange, BasisChangeChoice, BasisChangeRecord
+from data.aggregator import resample
 from data.calendar import MARKET_TIMEZONE, bar_session_key, session_date_anchor
 from data.errors import UserFacingError
 from data.models import (
@@ -35,6 +37,11 @@ from data.models import (
     ChartExtensionStoreRecord,
     SuspiciousBarCandidate,
     Timeframe,
+)
+from data.timestamps import ms_to_datetime
+from data.session import (
+    is_regular_session_timestamp,
+    uses_regular_equity_session,
 )
 from data.provider.config import (
     FIXED_CONNECTION_IDS,
@@ -48,10 +55,16 @@ from data.provider.config import (
 
 # Path to the DDL file, relative to this module.
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+_MAX_TIMESTAMP_MS = 2**63 - 1
+_BASIS_CHANGE_CHOICE_SETTING = "basis_change_choice"
 
 
 class BarCorrectionError(UserFacingError, ValueError):
     """A bar correction or provider-bar refresh the user must change."""
+
+
+class IdenticalCorrectionError(BarCorrectionError):
+    """A bar correction whose values all match the provider bar."""
 
 
 class Cache:
@@ -480,6 +493,7 @@ class Cache:
         timeframe: Timeframe,
         original_timestamp: datetime,
         refreshed_bar: Bar,
+        synthesized_timeframes: Collection[Timeframe] = (),
     ) -> None:
         original_timestamp_ms = _datetime_to_ms(original_timestamp)
         refreshed_timestamp_ms = _datetime_to_ms(refreshed_bar.timestamp)
@@ -639,6 +653,94 @@ class Cache:
                         *correction_values,
                     ),
                 )
+            for synthesized in synthesized_timeframes:
+                self._resynthesize_session(
+                    cache_namespace,
+                    symbol,
+                    timeframe,
+                    synthesized,
+                    refreshed_bar.timestamp,
+                )
+
+    def _resynthesize_session(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        base_timeframe: Timeframe,
+        timeframe: Timeframe,
+        timestamp: datetime,
+    ) -> None:
+        """
+        Rebuild a synthesized timeframe's bars for the exchange day holding
+        timestamp from the base timeframe's raw bars, as chart loads build
+        them. A day with no synthesized bars is left alone. Runs inside the
+        caller's transaction.
+        """
+        day = timestamp.astimezone(MARKET_TIMEZONE).date()
+        start_ms = _datetime_to_ms(
+            datetime.combine(day, time.min, tzinfo=MARKET_TIMEZONE)
+        )
+        end_ms = _datetime_to_ms(
+            datetime.combine(day + timedelta(days=1), time.min, tzinfo=MARKET_TIMEZONE)
+        ) - 1
+        key = (cache_namespace, symbol, timeframe.value)
+        materialized = self._conn.execute(
+            """
+            SELECT 1 FROM bars
+            WHERE cache_namespace = ?
+              AND symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            LIMIT 1
+            """,
+            (*key, start_ms, end_ms),
+        ).fetchone()
+        if materialized is None:
+            return
+        base_bars = self.get_raw_bars(
+            cache_namespace,
+            symbol,
+            base_timeframe,
+            start_ms,
+            end_ms,
+        )
+        if uses_regular_equity_session(symbol):
+            base_bars = [
+                bar for bar in base_bars if is_regular_session_timestamp(bar.timestamp)
+            ]
+        self._conn.execute(
+            """
+            DELETE FROM bars
+            WHERE cache_namespace = ?
+              AND symbol = ?
+              AND timeframe = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            """,
+            (*key, start_ms, end_ms),
+        )
+        self._conn.executemany(
+            """
+            INSERT INTO bars
+                (cache_namespace, symbol, timeframe, timestamp,
+                 open, high, low, close, volume, vwap)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    *key,
+                    _datetime_to_ms(bar.timestamp),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                    bar.volume,
+                    bar.vwap,
+                )
+                for bar in resample(base_bars, timeframe)
+            ],
+        )
 
     def get_bar_inspection(
         self,
@@ -914,7 +1016,7 @@ class Cache:
                 normalized.volume,
             )
         ):
-            raise BarCorrectionError("A bar correction must differ from the provider bar.")
+            raise IdenticalCorrectionError("A bar correction must differ from the provider bar.")
         with self._conn:
             self._conn.execute(
                 """
@@ -992,13 +1094,16 @@ class Cache:
         cache_namespace: str,
         symbol: str,
         timeframe: Timeframe,
+        start_ts_ms: int = -(2**63),
     ) -> int | None:
+        """The oldest cached bar's timestamp at or after start_ts_ms."""
         row = self._conn.execute(
             """
             SELECT MIN(timestamp) FROM bars
             WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+              AND timestamp >= ?
             """,
-            (cache_namespace, symbol, timeframe.value),
+            (cache_namespace, symbol, timeframe.value, start_ts_ms),
         ).fetchone()
         return row[0] if row and row[0] is not None else None
 
@@ -1079,6 +1184,343 @@ class Cache:
                     end_ts_ms,
                 ),
             )
+
+    def begin_basis_change(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        dependent_timeframes: Collection[Timeframe],
+        change: BasisChange,
+        boundary_ms: int,
+        shown_from_ms: int,
+    ) -> None:
+        """Prepare a native timeframe for re-download on a new basis.
+
+        In one transaction, for the timeframe and the timeframes built from
+        it: corrections at or after boundary_ms move to the new basis (up to
+        the first bar the change says is already on it), and bars at or
+        after boundary_ms and all coverage are deleted, so the next fetch
+        starts cold. Pending basis changes of the timeframe move to the new
+        basis too. When cached bars of the timeframe at or after
+        shown_from_ms remain before the boundary, a basis_changes row
+        records them as old-basis history from the old coverage start.
+        """
+        timeframes = (timeframe, *dependent_timeframes)
+        corrections_end_ms = (
+            change.new_basis_from_ms
+            if change.new_basis_from_ms is not None
+            else _MAX_TIMESTAMP_MS
+        )
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            coverage = self.get_bar_fetch_coverage(cache_namespace, symbol, timeframe)
+            for scaled in timeframes:
+                key = (cache_namespace, symbol, scaled.value)
+                self._scale_corrections(
+                    key,
+                    boundary_ms,
+                    corrections_end_ms,
+                    change.ratio,
+                    change.volume_factor,
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM bars
+                    WHERE cache_namespace = ?
+                      AND symbol = ?
+                      AND timeframe = ?
+                      AND timestamp >= ?
+                    """,
+                    (*key, boundary_ms),
+                )
+                self._conn.execute(
+                    """
+                    DELETE FROM bar_fetch_coverage
+                    WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+                    """,
+                    key,
+                )
+            key = (cache_namespace, symbol, timeframe.value)
+            self._conn.execute(
+                """
+                UPDATE basis_changes
+                SET ratio = ratio * ?, volume_factor = volume_factor * ?
+                WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+                """,
+                (change.ratio, change.volume_factor, *key),
+            )
+            if coverage is None or coverage[0] >= boundary_ms:
+                return
+            shown_old_bar = self._conn.execute(
+                """
+                SELECT 1 FROM bars
+                WHERE cache_namespace = ?
+                  AND symbol = ?
+                  AND timeframe = ?
+                  AND timestamp >= ?
+                  AND timestamp < ?
+                LIMIT 1
+                """,
+                (*key, max(coverage[0], shown_from_ms), boundary_ms),
+            ).fetchone()
+            if shown_old_bar is None:
+                return
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO basis_changes (
+                    cache_namespace, symbol, timeframe, boundary_timestamp,
+                    old_coverage_start, ratio, volume_factor
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    *key,
+                    boundary_ms,
+                    coverage[0],
+                    change.ratio,
+                    change.volume_factor,
+                ),
+            )
+
+    def _scale_corrections(
+        self,
+        key: tuple[str, str, str],
+        start_ms: int,
+        end_ms: int,
+        ratio: float,
+        volume_factor: float,
+    ) -> None:
+        """Move corrections in [start_ms, end_ms) to a new basis."""
+        self._conn.execute(
+            """
+            UPDATE bar_corrections
+            SET open = open * :ratio,
+                high = high * :ratio,
+                low = low * :ratio,
+                close = close * :ratio,
+                volume = CAST(ROUND(volume * :volume_factor) AS INTEGER)
+            WHERE cache_namespace = :namespace
+              AND symbol = :symbol
+              AND timeframe = :timeframe
+              AND timestamp >= :start
+              AND timestamp < :end
+            """,
+            {
+                "ratio": ratio,
+                "volume_factor": volume_factor,
+                "namespace": key[0],
+                "symbol": key[1],
+                "timeframe": key[2],
+                "start": start_ms,
+                "end": end_ms,
+            },
+        )
+
+    def rescale_basis_changes(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        dependent_timeframes: Collection[Timeframe],
+    ) -> None:
+        """Move a timeframe's recorded old-basis history to the new basis.
+
+        Records are applied newest first while each one ends where the
+        timeframe's coverage starts: its bars and corrections, and those of
+        the dependent timeframes, are rescaled and the coverage start moves
+        back to the record's old coverage start. A record that no longer
+        meets the coverage (something reset it since) is dropped with the
+        bars it describes left as they are. All records of the timeframe
+        are removed. One transaction.
+        """
+        key = (cache_namespace, symbol, timeframe.value)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            coverage = self.get_bar_fetch_coverage(cache_namespace, symbol, timeframe)
+            if coverage is not None:
+                coverage_start_ms = coverage[0]
+                records = self._conn.execute(
+                    """
+                    SELECT old_coverage_start, boundary_timestamp, ratio,
+                           volume_factor
+                    FROM basis_changes
+                    WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+                    ORDER BY boundary_timestamp DESC
+                    """,
+                    key,
+                ).fetchall()
+                for record in records:
+                    if record["boundary_timestamp"] != coverage_start_ms:
+                        break
+                    for scaled in (timeframe, *dependent_timeframes):
+                        scaled_key = (cache_namespace, symbol, scaled.value)
+                        self._scale_bars(
+                            scaled_key,
+                            record["old_coverage_start"],
+                            record["boundary_timestamp"],
+                            record["ratio"],
+                            record["volume_factor"],
+                        )
+                        self._scale_corrections(
+                            scaled_key,
+                            record["old_coverage_start"],
+                            record["boundary_timestamp"],
+                            record["ratio"],
+                            record["volume_factor"],
+                        )
+                    coverage_start_ms = record["old_coverage_start"]
+                self._conn.execute(
+                    """
+                    UPDATE bar_fetch_coverage
+                    SET start_timestamp = ?
+                    WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+                    """,
+                    (coverage_start_ms, *key),
+                )
+            self._delete_basis_changes(key)
+
+    def discard_basis_changes(
+        self,
+        cache_namespace: str,
+        symbol: str,
+        timeframe: Timeframe,
+        dependent_timeframes: Collection[Timeframe],
+    ) -> None:
+        """Delete a timeframe's recorded old-basis history.
+
+        Bars before the newest record boundary, and their corrections, are
+        deleted for the timeframe and its dependent timeframes; the provider
+        no longer returns them, so the corrections could never apply again.
+        One transaction.
+        """
+        key = (cache_namespace, symbol, timeframe.value)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            row = self._conn.execute(
+                """
+                SELECT MAX(boundary_timestamp)
+                FROM basis_changes
+                WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+                """,
+                key,
+            ).fetchone()
+            if row[0] is not None:
+                for discarded in (timeframe, *dependent_timeframes):
+                    for table in ("bars", "bar_corrections"):
+                        self._conn.execute(
+                            f"""
+                            DELETE FROM {table}
+                            WHERE cache_namespace = ?
+                              AND symbol = ?
+                              AND timeframe = ?
+                              AND timestamp < ?
+                            """,
+                            (cache_namespace, symbol, discarded.value, row[0]),
+                        )
+            self._delete_basis_changes(key)
+
+    def _delete_basis_changes(self, key: tuple[str, str, str]) -> None:
+        self._conn.execute(
+            """
+            DELETE FROM basis_changes
+            WHERE cache_namespace = ? AND symbol = ? AND timeframe = ?
+            """,
+            key,
+        )
+
+    def _scale_bars(
+        self,
+        key: tuple[str, str, str],
+        start_ms: int,
+        end_ms: int,
+        ratio: float,
+        volume_factor: float,
+    ) -> None:
+        """Move bars in [start_ms, end_ms) to a new basis."""
+        self._conn.execute(
+            """
+            UPDATE bars
+            SET open = open * :ratio,
+                high = high * :ratio,
+                low = low * :ratio,
+                close = close * :ratio,
+                vwap = vwap * :ratio,
+                volume = CAST(ROUND(volume * :volume_factor) AS INTEGER)
+            WHERE cache_namespace = :namespace
+              AND symbol = :symbol
+              AND timeframe = :timeframe
+              AND timestamp >= :start
+              AND timestamp < :end
+            """,
+            {
+                "ratio": ratio,
+                "volume_factor": volume_factor,
+                "namespace": key[0],
+                "symbol": key[1],
+                "timeframe": key[2],
+                "start": start_ms,
+                "end": end_ms,
+            },
+        )
+
+    def get_basis_change_choice(self) -> BasisChangeChoice | None:
+        """The remembered answer to the basis-change question; None asks."""
+        row = self._conn.execute(
+            """
+            SELECT setting_value
+            FROM application_settings
+            WHERE setting_key = ?
+            """,
+            (_BASIS_CHANGE_CHOICE_SETTING,),
+        ).fetchone()
+        return None if row is None else BasisChangeChoice(row[0])
+
+    def set_basis_change_choice(self, choice: BasisChangeChoice | None) -> None:
+        with self._conn:
+            if choice is None:
+                self._conn.execute(
+                    "DELETE FROM application_settings WHERE setting_key = ?",
+                    (_BASIS_CHANGE_CHOICE_SETTING,),
+                )
+                return
+            self._conn.execute(
+                """
+                INSERT INTO application_settings (setting_key, setting_value)
+                VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
+                """,
+                (_BASIS_CHANGE_CHOICE_SETTING, choice.value),
+            )
+
+    def get_basis_changes(
+        self,
+        cache_namespace: str,
+        symbol: str,
+    ) -> list[BasisChangeRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT timeframe, old_coverage_start, boundary_timestamp,
+                   ratio, volume_factor
+            FROM basis_changes
+            WHERE cache_namespace = ? AND symbol = ?
+            ORDER BY timeframe, boundary_timestamp
+            """,
+            (cache_namespace, symbol),
+        )
+        return [
+            BasisChangeRecord(
+                cache_namespace,
+                symbol,
+                Timeframe(row["timeframe"]),
+                row["old_coverage_start"],
+                row["boundary_timestamp"],
+                row["ratio"],
+                row["volume_factor"],
+            )
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Watchlist
@@ -1316,7 +1758,7 @@ def _datetime_to_ms(dt: datetime) -> int:
 
 def _ms_to_datetime(ms: int) -> datetime:
     """Convert a Unix millisecond timestamp to a UTC-aware datetime."""
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    return ms_to_datetime(ms)
 
 
 def _row_to_bar(row: sqlite3.Row) -> Bar:

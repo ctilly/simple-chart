@@ -121,8 +121,10 @@ def _fill_warmup_from_daily(
         if not np.isnan(val):
             by_date[bar.timestamp.astimezone(_ET).date()] = float(val)
 
-    for i, bar in enumerate(intraday_bars):
-        if np.isnan(values[i]):
-            d = bar.timestamp.astimezone(_ET).date()
-            if d in by_date:
-                values[i] = by_date[d]
+    # Only the leading warmup zone is NaN; stop at the first computed value.
+    valid = ~np.isnan(values)
+    warmup_end = int(np.argmax(valid)) if valid.any() else len(values)
+    for i in range(warmup_end):
+        d = intraday_bars[i].timestamp.astimezone(_ET).date()
+        if d in by_date:
+            values[i] = by_date[d]

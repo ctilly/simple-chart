@@ -2,10 +2,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from enum import StrEnum
+import logging
 from statistics import median
 from typing import Literal
 
 from data.calendar import bar_session_key
+from data.errors import describe
 from data.models import Bar, Timeframe
 from data.provider import (
     ProviderAvailability,
@@ -31,6 +33,7 @@ ProviderFactory = Callable[[ProviderConnection, CredentialStore], DataProvider]
 
 _PRICE_FIELDS: tuple[BarField, ...] = ("open", "high", "low", "close")
 _BAR_FIELDS: tuple[BarField, ...] = (*_PRICE_FIELDS, "volume")
+_LOGGER = logging.getLogger(__name__)
 _SYNTHESIZED_TIMEFRAMES = (Timeframe.MIN39, Timeframe.MIN65)
 _CELL_RELATIVE_TOLERANCE = 0.0001
 _CELL_ABSOLUTE_TOLERANCE = 0.01
@@ -288,6 +291,15 @@ class BarComparisonService:
                     request,
                     "This source does not provide the selected timeframe.",
                 )
+            earliest = provider.earliest_history_start(
+                timeframe,
+                datetime.now(UTC),
+            )
+            if earliest is not None and cached_bar.timestamp < earliest:
+                return _failed_row(
+                    request,
+                    "This bar is older than the source provides.",
+                )
             start, end = _request_window(cached_bar.timestamp, timeframe)
             bars = provider.fetch_bars(symbol, timeframe, start, end)
         except MarketDataEntitlementError:
@@ -302,7 +314,8 @@ class BarComparisonService:
             )
         except ProviderConfigurationError:
             return _failed_row(request, "This data source is unavailable.")
-        except Exception:
+        except Exception as exc:
+            _LOGGER.warning("Comparison provider request failed: %s", describe(exc))
             return _failed_row(request, "The provider request failed.")
 
         target_key = bar_session_key(cached_bar.timestamp, timeframe)

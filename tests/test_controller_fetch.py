@@ -606,8 +606,10 @@ def test_unknown_or_non_equity_symbols_retain_tail_refresh(
             request_end,
         )
 
+    # The tail request also returns the cached bar, compared for a basis
+    # change (Wave 3).
     assert provider.calls == [
-        (symbol, Timeframe.MIN5, prior_close, request_end)
+        (symbol, Timeframe.MIN5, prior_last_bar, request_end)
     ]
 
 
@@ -1103,9 +1105,11 @@ def test_weekday_closure_empty_tail_is_safe_and_retryable(
             Timeframe.MIN5,
         )
 
+    # Each tail request also returns the cached bar, compared for a basis
+    # change (Wave 3).
     assert provider.calls == [
-        ("AAPL", Timeframe.MIN5, prior_close, holiday_endpoint),
-        ("AAPL", Timeframe.MIN5, prior_close, holiday_endpoint),
+        ("AAPL", Timeframe.MIN5, prior_last_bar, holiday_endpoint),
+        ("AAPL", Timeframe.MIN5, prior_last_bar, holiday_endpoint),
     ]
     assert coverage == original_coverage
 
@@ -1204,10 +1208,12 @@ def test_repeat_empty_intraday_refresh_starts_at_completed_boundary(
             Timeframe.MIN5,
         )
 
+    # The request starts at the one cached bar, compared for a basis change
+    # (Wave 3); the coverage still ends at the completed boundary.
     assert provider.calls[1] == (
         "AAPL",
         Timeframe.MIN5,
-        datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc),
+        first_end - timedelta(minutes=15),
         second_end,
     )
     assert coverage is not None
@@ -1320,16 +1326,18 @@ def test_repeat_intraday_load_refreshes_daily_from_day_boundary(
             second_now,
         )
 
+    # Each repeat request starts at the one cached bar, compared for a basis
+    # change (Wave 3), instead of at the day or bar boundary.
     assert provider.calls[2] == (
         "AAPL",
         Timeframe.DAILY,
-        datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc),
+        first_now - timedelta(days=1),
         second_now,
     )
     assert provider.calls[3] == (
         "AAPL",
         Timeframe.MIN15,
-        datetime(2026, 11, 4, 15, 0, tzinfo=timezone.utc),
+        first_now - timedelta(minutes=15),
         second_now,
     )
 

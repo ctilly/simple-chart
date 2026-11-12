@@ -152,9 +152,9 @@ material when useful, but do not treat them as automatic dependencies.
 `register_extension`, `register_store_handler`, `all_extensions`,
 `get_extension`, `OHLCVSeries`, `Bar`, `ChartExtensionStoreRecord`,
 `ChartExtensionStoreContext`, `ChartExtensionStoreHandler`, `DrawingStore`,
-`AxisPolicy`, `bars_for_n_days`,
-and `timestamp_ms_to_bar_index`. `ChartExtension` is the single base class for
-both indicators and tools.
+`AxisPolicy`, `bars_for_n_days`, `timestamp_ms_to_bar_index`,
+`SeriesArrays`, and `series_arrays`. `ChartExtension` is the single base
+class for both indicators and tools.
 
 Internal package paths (`simplechart.extensions._base`,
 `simplechart.extensions._registry`, etc.) are not part of the public

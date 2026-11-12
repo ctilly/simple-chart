@@ -38,6 +38,7 @@ import app.data_quality as data_quality_module
 import app.extension_runtime as extension_runtime_module
 from app.application_settings import ApplicationSettingsDialog
 from app.controller import MainWindow
+from chart.window import ChartWidget
 from app.data_quality import DataQualityTab
 from data.aggregator import Aggregator
 from data.cache import Cache
@@ -551,6 +552,9 @@ def _window(
     monkeypatch.setattr(MainWindow, "_load", lambda window, **_kwargs: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
+    # Older history loads on its own when a short test chart's view is near
+    # its oldest bar; tests/test_older_history.py covers that path.
+    monkeypatch.setattr(ChartWidget, "older_history_bars_wanted", lambda _chart: 0)
     window = MainWindow(str(db_path))
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
@@ -1148,8 +1152,10 @@ def _hold_tail_requests(
     gates: dict[Timeframe, _Gate],
 ) -> None:
     # The cache ends on Thursday, so each load makes one tail request for
-    # Friday. A held tail returns a bar the source does not serve after the
-    # refresh; it must be deleted by the rewind, not written after it.
+    # Friday, starting at Wednesday's open with its basis validation bars
+    # (the last two cached sessions). A held tail returns a bar the source
+    # does not serve after the refresh; it must be deleted by the rewind, not
+    # written after it.
     for timeframe in gates:
         provider.extra_bars[timeframe] = [
             _source_bar(datetime(2026, 10, 23, 17, 30, tzinfo=ET), 777),
@@ -1157,7 +1163,7 @@ def _hold_tail_requests(
 
     def hold(timeframe: Timeframe, start: datetime, end: datetime) -> None:
         gate = gates.get(timeframe)
-        if gate is not None and start >= datetime(2026, 10, 22, tzinfo=ET):
+        if gate is not None and start >= datetime(2026, 10, 21, tzinfo=ET):
             gate.entered.set()
             assert gate.release.wait(20)
 
@@ -1468,10 +1474,16 @@ def _correct_volume(
         )
 
 
-def _expected_message(source: str, days: int) -> str:
+def _expected_message(source: str, days: int, limited: bool) -> str:
+    hidden = (
+        "Cached intraday data older than that will no longer be shown, "
+        f"because {source} does not provide it. "
+        if limited
+        else ""
+    )
     return (
         f"{days} days of intraday data and daily history since 2016 can "
-        f"safely be refreshed from {source}. Proceed?"
+        f"safely be refreshed from {source}. {hidden}Proceed?"
     )
 
 
@@ -1529,7 +1541,7 @@ def test_cancelled_confirmation_shows_computed_ranges_and_changes_nothing(
     assert dialog.windowTitle() == f"Refresh {_SYMBOL}?"
     message = dialog.findChild(QLabel, "symbolRefreshMessage")
     assert message is not None
-    assert message.text() == _expected_message(source, days)
+    assert message.text() == _expected_message(source, days, limit is not None)
     buttons = dialog.findChildren(QPushButton)
     assert [button.text() for button in buttons] == ["Yes", "No"]
     assert [button.isDefault() for button in buttons] == [False, True]

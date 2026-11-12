@@ -466,10 +466,20 @@ def test_pre_a1_cache_with_mid_session_start_loads_without_duplicates(
         bar for bar in before if bar.timestamp < session_open
     ]
     displayed = finished[0].bars
-    assert displayed[0].timestamp == session_open
+    # With a provider limit the contiguous cached history before the window
+    # is shown too, from the first whole session after the old mid-session
+    # start; the partial group at that start is not.
+    first_shown = (
+        session_open
+        if limit is None
+        else controller_module._first_session_open_at_or_after(
+            datetime.fromtimestamp(target_coverage[0] / 1000, UTC)
+        )
+    )
+    assert displayed[0].timestamp == first_shown
     assert _rows(displayed[:2]) == [
-        _expected_group(session_open, period, 0),
-        _expected_group(session_open, period, 1),
+        _expected_group(first_shown, period, 0),
+        _expected_group(first_shown, period, 1),
     ]
     last_session = now.astimezone(ET).date()
     last_open = datetime.combine(last_session, time(9, 30), tzinfo=ET)

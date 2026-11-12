@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+import logging
 
 import pandas as pd
 import pytest
@@ -338,3 +339,26 @@ def test_level1_from_info_computes_change_when_absent() -> None:
 
 def test_level1_from_info_requires_some_price_data() -> None:
     assert _level1_from_info("SPY", {"longName": "SPDR S&P 500"}) is None
+
+
+def test_fetch_level1_failure_is_logged_at_debug_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FailingTicker:
+        def __init__(self, symbol: str) -> None:
+            pass
+
+        @property
+        def info(self) -> dict[str, object]:
+            raise RuntimeError("sentinel-text")
+
+    monkeypatch.setattr("data.provider.yfinance_provider.yf.Ticker", _FailingTicker)
+    caplog.set_level(logging.DEBUG, logger="data.provider.yfinance_provider")
+
+    assert YFinanceProvider().fetch_level1("SPY") is None
+
+    records = [r for r in caplog.records if r.name == "data.provider.yfinance_provider"]
+    assert [r.levelno for r in records] == [logging.DEBUG]
+    assert "RuntimeError" in records[0].getMessage()
+    assert "sentinel-text" not in caplog.text

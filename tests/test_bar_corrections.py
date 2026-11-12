@@ -1,10 +1,11 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from data.cache import Cache
+from data.aggregator import resample
+from data.cache import Cache, IdenticalCorrectionError
 from data.models import Bar, BarCorrection, Timeframe
 
 
@@ -53,6 +54,25 @@ def test_bar_correction_overrides_only_selected_field(
     assert correction.high is None
     assert correction.close is None
     assert correction.volume is None
+
+
+def test_correction_identical_to_provider_bar_raises_identical_correction_error(
+    tmp_path: Path,
+) -> None:
+    raw = _bar(_SPY_SESSION, low=68.64)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [raw])
+        with pytest.raises(IdenticalCorrectionError):
+            cache.put_bar_correction(
+                BarCorrection(
+                    cache_namespace="alpaca:delayed_sip",
+                    symbol="SPY",
+                    timeframe=Timeframe.DAILY,
+                    timestamp=_SPY_SESSION,
+                    low=raw.low,
+                )
+            )
 
 
 def test_bar_correction_stores_only_values_that_differ_from_provider(
@@ -987,3 +1007,87 @@ def _bar(
 
 def _timestamp_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
+
+
+def _session_5m_bars(session_open: datetime) -> list[Bar]:
+    """A regular session of 5m bars, plus one pre-market bar before it."""
+    stamps = [session_open - timedelta(minutes=90)] + [
+        session_open + timedelta(minutes=5 * index) for index in range(78)
+    ]
+    return [
+        Bar(
+            stamp, 601.0 + index * 0.1, 603.0 + index * 0.1, 600.0 + index * 0.1,
+            602.0 + index * 0.1, 1_000 + index,
+        )
+        for index, stamp in enumerate(stamps)
+    ]
+
+
+def test_refresh_provider_bar_resynthesizes_that_session_of_39m_and_65m(
+    tmp_path: Path,
+) -> None:
+    # X7: a refreshed source bar must not leave the synthesized bars built
+    # from it stale.
+    first_open = datetime(2026, 2, 2, 14, 30, tzinfo=UTC)
+    second_open = datetime(2026, 2, 3, 14, 30, tzinfo=UTC)
+    first = _session_5m_bars(first_open)
+    second = _session_5m_bars(second_open)
+    target = first[20]
+    refreshed = Bar(target.timestamp, target.open, 1000.0, target.low, target.close, 9_999)
+    namespace = "alpaca:iex"
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars(namespace, "SPY", Timeframe.MIN5, first + second)
+        for synthesized in (Timeframe.MIN39, Timeframe.MIN65):
+            # Built as the controller materializes them: regular session only.
+            cache.put_bars(
+                namespace, "SPY", synthesized,
+                resample(first[1:] + second[1:], synthesized),
+            )
+            cache.replace_bar_fetch_coverage(
+                namespace, "SPY", synthesized,
+                _timestamp_ms(first_open), _timestamp_ms(second_open + timedelta(hours=7)),
+            )
+        coverage_before = cache.get_bar_fetch_coverage(namespace, "SPY", Timeframe.MIN39)
+
+        cache.refresh_provider_bar(
+            namespace,
+            "SPY",
+            Timeframe.MIN5,
+            target.timestamp,
+            refreshed,
+            (Timeframe.MIN39, Timeframe.MIN65),
+        )
+
+        refreshed_first = first[1:20] + [refreshed] + first[21:]
+        for synthesized in (Timeframe.MIN39, Timeframe.MIN65):
+            assert cache.get_raw_bars(
+                namespace, "SPY", synthesized, 0, _timestamp_ms(second_open) - 1,
+            ) == resample(refreshed_first, synthesized)
+            assert cache.get_raw_bars(
+                namespace, "SPY", synthesized, _timestamp_ms(second_open), 2**62,
+            ) == resample(second[1:], synthesized)
+        assert cache.get_bar_fetch_coverage(namespace, "SPY", Timeframe.MIN39) == coverage_before
+
+
+def test_refresh_provider_bar_does_not_create_unmaterialized_synthesized_bars(
+    tmp_path: Path,
+) -> None:
+    session_open = datetime(2026, 2, 2, 14, 30, tzinfo=UTC)
+    bars = _session_5m_bars(session_open)
+    target = bars[20]
+    refreshed = Bar(target.timestamp, target.open, 1000.0, target.low, target.close, 9_999)
+
+    with Cache(str(tmp_path / "test.db")) as cache:
+        cache.put_bars("alpaca:iex", "SPY", Timeframe.MIN5, bars)
+
+        cache.refresh_provider_bar(
+            "alpaca:iex",
+            "SPY",
+            Timeframe.MIN5,
+            target.timestamp,
+            refreshed,
+            (Timeframe.MIN39, Timeframe.MIN65),
+        )
+
+        assert cache.get_raw_bars("alpaca:iex", "SPY", Timeframe.MIN39, 0, 2**62) == []

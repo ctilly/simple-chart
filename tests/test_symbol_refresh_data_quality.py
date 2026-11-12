@@ -119,6 +119,7 @@ class _Refresher:
         return data_quality_module.SymbolRefreshPlan(
             intraday_days=55,
             daily_since=date(2016, 1, 1),
+            hides_older_intraday=False,
             refresh=self._refresh,
         )
 
@@ -425,6 +426,7 @@ def test_confirmation_asks_yes_or_no_with_the_plan_ranges(
     plan = data_quality_module.SymbolRefreshPlan(
         intraday_days=days,
         daily_since=since,
+        hides_older_intraday=False,
         refresh=lambda: None,
     )
 
@@ -459,6 +461,7 @@ def test_confirmation_yes_accepts_and_no_or_enter_rejects(
     plan = data_quality_module.SymbolRefreshPlan(
         intraday_days=54,
         daily_since=date(2016, 1, 1),
+        hides_older_intraday=False,
         refresh=lambda: None,
     )
     dialog = data_quality_module.SymbolRefreshDialog("yfinance", _SYMBOL, plan)

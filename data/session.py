@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, time, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,16 @@ REGULAR_SESSION_OPEN = time(9, 30)
 REGULAR_SESSION_CLOSE = time(16, 0)
 REGULAR_SESSION_MINUTES = 390
 DAILY_SETTLEMENT_DELAY = timedelta(minutes=5)
+_REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
+
+
+def uses_regular_equity_session(symbol: str) -> bool:
+    """
+    True for plain US equity tickers, whose intraday history is kept to the
+    regular session.
+    """
+    normalized = symbol.strip().upper()
+    return _REGULAR_EQUITY_SYMBOL.fullmatch(normalized) is not None
 
 
 def is_regular_session_timestamp(timestamp: datetime) -> bool:

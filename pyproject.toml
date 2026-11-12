@@ -59,7 +59,6 @@ include = ["app*", "chart*", "data*", "indicators*", "simplechart*", "tools*"]
 [tool.simplechart.compile]
 targets = [
     "indicators.ema._kernel",
-    "indicators.avwap._kernel",
     "indicators.rsi._kernel",
 ]
 

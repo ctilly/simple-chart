@@ -38,13 +38,13 @@ import copy
 import logging
 import math
 import os
-import re
 import sqlite3
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
+from fractions import Fraction
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -72,6 +72,7 @@ from app.data_quality import (
 from app.dialogs import (
     ApplicationMessageDialog,
     MessageKind,
+    ask_basis_change_choice,
     show_information,
     show_warning,
 )
@@ -93,11 +94,18 @@ from app.window_chrome import (
     is_wayland_platform,
 )
 from chart.window import INITIAL_VISIBLE_BARS, ChartWidget
+from data.adjustment import (
+    BasisChange,
+    BasisChangeChoice,
+    BasisChangeRecord,
+    detect_basis_change,
+)
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.calendar import bars_for_n_days
 from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
+from data.timestamps import ms_to_datetime
 from data.session import (
     MARKET_TIMEZONE,
     REGULAR_SESSION_OPEN,
@@ -108,6 +116,7 @@ from data.session import (
     is_regular_session_timestamp,
     latest_expected_regular_session as _latest_expected_regular_session,
     regular_session_settled_at as _regular_session_settled_at,
+    uses_regular_equity_session as _uses_regular_equity_session,
 )
 from data.provider import (
     ProviderAvailability,
@@ -141,6 +150,7 @@ from simplechart.api import (
     DrawingSession,
     DrawingToolResult,
     ChartExtensionAddMode,
+    ChartExtensionMutation,
     AxisPriceLabelRender,
     ChartExtensionRender,
     HorizontalLineRender,
@@ -152,6 +162,7 @@ from simplechart.api import (
     ToolIconSpec,
     VerticalLineRender,
     all_extensions,
+    series_arrays,
 )
 from simplechart.plugins import load_plugins
 
@@ -193,9 +204,35 @@ _HISTORY_FETCH_WORKERS = 4
 _MAX_RECENT_WINDOW_DAYS = 125
 # Minimum spacing between interim re-renders while backfill unlocks content.
 _HISTORY_REFRESH_INTERVAL_MS = 1000
+# Cached bars compared against the provider to detect a changed adjustment
+# basis (a split or dividend applied to older history); see
+# _basis_validation_bars. The lookbacks reach past holidays.
+# Older history (History wave): the oldest start ever requested (providers
+# clip it to what they have), the minimum intraday chunk, and outcomes.
+_OLDEST_HISTORY_START = datetime(1900, 1, 1, tzinfo=timezone.utc)
+_OLDER_HISTORY_CHUNK = timedelta(days=120)
+# A chunk's span less session alignment (weekends, holidays): coverage this
+# far older than its oldest bar means an older request returned nothing.
+_EMPTY_OLDER_SPAN = _OLDER_HISTORY_CHUNK - timedelta(days=7)
+_OLDER_MORE = "more"
+_OLDER_EXHAUSTED = "exhausted"
+_OLDER_RESET = "reset"
+_OLDER_HISTORY_ERROR_MS = 10_000
+# Below every bar timestamp (UTC ms), including history before 1970.
+_OLDEST_TIMESTAMP_MS = -(2**63)
+_BASIS_VALIDATION_SESSIONS = 2
+# Records of one split or dividend found on different timeframes measure
+# its ratio from different bars; within this relative tolerance they are the
+# same event and share one answer.
+_SAME_BASIS_EVENT_TOLERANCE = 2e-3
+_BASIS_VALIDATION_BARS = {Timeframe.DAILY: 10, Timeframe.WEEKLY: 4}
+_BASIS_VALIDATION_INTRADAY_LOOKBACK = timedelta(days=10)
+_BASIS_VALIDATION_LOOKBACK = {
+    Timeframe.DAILY: timedelta(days=31),
+    Timeframe.WEEKLY: timedelta(days=60),
+}
 _ASSET_REFERENCE_MAX_AGE = timedelta(days=30)
 _ASSET_REFERENCE_RETRY_DELAY = timedelta(hours=1)
-_REGULAR_EQUITY_SYMBOL = re.compile(r"[A-Z]{1,5}")
 _CHART_TIMEFRAMES = tuple(
     timeframe for timeframe in Timeframe if timeframe != Timeframe.MIN1
 )
@@ -221,6 +258,37 @@ def _history_start(
     if not timeframe.is_intraday:
         return cutoff
     return _first_session_open_at_or_after(cutoff)
+
+
+def _display_history_start(
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    fetch_start: datetime,
+    end: datetime,
+) -> datetime:
+    """
+    Start of the bars a chart shows once its history from fetch_start has been
+    fetched: the first session open of the contiguously fetched cached history
+    when it reaches back past fetch_start, so intraday history older than the
+    provider still returns stays visible. Older caches may start mid-session;
+    their partial first session is not shown. Floored at the intraday lookback
+    cutoff.
+    """
+    if not timeframe.is_intraday:
+        return fetch_start
+    coverage = cache.get_bar_fetch_coverage(cache_namespace, symbol, timeframe)
+    fetch_start_ms = int(fetch_start.timestamp() * 1000)
+    if coverage is None or not coverage[0] < fetch_start_ms <= coverage[1]:
+        return fetch_start
+    floor = _first_session_open_at_or_after(
+        end - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+    )
+    coverage_start = _first_session_open_at_or_after(
+        ms_to_datetime(coverage[0])
+    )
+    return min(fetch_start, max(floor, coverage_start))
 
 
 def _first_session_open_at_or_after(cutoff: datetime) -> datetime:
@@ -464,8 +532,10 @@ class _RefreshReload:
 class _ChartLoadTask:
     request: _ChartLoadRequest
     thread: QThread
-    worker: "_FetchWorker"
+    worker: "_FetchWorker | _OlderHistoryWorker"
     cancellation_event: threading.Event
+    # An older-history load for the displayed request, not a chart load.
+    older: bool = False
 
 
 def _preserves_ui_state_per_symbol(extension_name: str) -> bool:
@@ -491,11 +561,6 @@ def _refreshed_off_screen_text(symbol: str, rewound_at: datetime) -> str:
 
 def _is_yahoo_futures_symbol(symbol: str) -> bool:
     return symbol.strip().upper().endswith("=F")
-
-
-def _uses_regular_equity_session(symbol: str) -> bool:
-    normalized = symbol.strip().upper()
-    return _REGULAR_EQUITY_SYMBOL.fullmatch(normalized) is not None
 
 
 def _completed_coverage_end(
@@ -659,7 +724,7 @@ class _FetchWorker(QObject):
     recent_ready: pyqtSignal = pyqtSignal(object, object)
     # (request, earliest contiguous cached bar timestamp in UTC ms) after each
     # committed backfill chunk; carries no bars.
-    history_progress: pyqtSignal = pyqtSignal(object, int)
+    history_progress: pyqtSignal = pyqtSignal(object, object)
     finished: pyqtSignal = pyqtSignal(object, object)
     error: pyqtSignal = pyqtSignal(object, str)
     completed: pyqtSignal = pyqtSignal()
@@ -718,75 +783,17 @@ class _FetchWorker(QObject):
             self._record_step("provider ready")
             aggregator = Aggregator(provider)
             now = datetime.now(tz=timezone.utc)
-            symbol = self._request.symbol
-            timeframe = self._request.timeframe
-            cache_namespace = self._request.cache_namespace
             with Cache(self._db_path) as cache:
-                history_end = _history_end(timeframe, aggregator, now)
-                history_start = (
-                    self._request.history_start
-                    if self._request.history_start is not None
-                    else _history_start(timeframe, aggregator, history_end)
-                )
-                recent_start = _recent_history_start(
-                    timeframe,
-                    history_start,
-                    history_end,
-                    self._request.lookback_days,
-                )
-                if _needs_history_backfill(
-                    aggregator,
-                    cache,
-                    cache_namespace,
-                    symbol,
-                    timeframe,
-                    history_start,
-                    recent_start,
-                ):
-                    recent = _fetch_series_with_concurrent_references(
-                        aggregator,
-                        self._db_path,
-                        cache,
-                        cache_namespace,
-                        symbol,
-                        timeframe,
-                        now,
-                        history_start=recent_start,
-                        cancellation_event=self._cancellation_event,
-                        on_references_done=self._record_daily_done,
-                    )
-                    _check_chart_load_cancelled(self._cancellation_event)
-                    self._record_step("recent fetched")
-                    if recent.bars:
-                        self.recent_ready.emit(self._request, recent)
-                    # Older history yields to foreground requests (other chart
-                    # loads, quotes) and stops sending once cancelled.
-                    with background_requests(self._cancellation_event):
-                        series = _fetch_series(
-                            aggregator,
-                            cache,
-                            cache_namespace,
-                            symbol,
-                            timeframe,
-                            now,
-                            history_start=history_start,
-                            cancellation_event=self._cancellation_event,
-                            on_history_progress=self._emit_history_progress,
-                        )
-                else:
-                    series = _fetch_series_with_concurrent_references(
-                        aggregator,
-                        self._db_path,
-                        cache,
-                        cache_namespace,
-                        symbol,
-                        timeframe,
-                        now,
-                        history_start=history_start,
-                        cancellation_event=self._cancellation_event,
-                        on_references_done=self._record_daily_done,
-                    )
+                try:
+                    series = self._fetch_chart_series(aggregator, cache, now)
+                except _BasisReset:
+                    # The provider moved this paged timeframe's history to a
+                    # new adjustment basis and its cache was reset: load it
+                    # again as a cold load, recent window first.
+                    series = self._fetch_chart_series(aggregator, cache, now)
             _check_chart_load_cancelled(self._cancellation_event)
+            # Built here, off the UI thread; rendering reuses them.
+            series_arrays(series)
             self._record_step("history fetched")
             self.finished.emit(self._request, series)
         except _ChartLoadCancelled:
@@ -802,9 +809,390 @@ class _FetchWorker(QObject):
         finally:
             self.completed.emit()
 
+    def _fetch_chart_series(
+        self,
+        aggregator: Aggregator,
+        cache: Cache,
+        now: datetime,
+    ) -> OHLCVSeries:
+        """
+        Fetch the request's series: in one phase when the cache already
+        reaches the history start, otherwise the recent window first
+        (emitted through recent_ready), then older history in the
+        background.
+        """
+        symbol = self._request.symbol
+        timeframe = self._request.timeframe
+        cache_namespace = self._request.cache_namespace
+        history_end = _history_end(timeframe, aggregator, now)
+        history_start = (
+            self._request.history_start
+            if self._request.history_start is not None
+            else _history_start(timeframe, aggregator, history_end)
+        )
+        recent_start = _recent_history_start(
+            timeframe,
+            history_start,
+            history_end,
+            self._request.lookback_days,
+        )
+        if _needs_history_backfill(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            recent_start,
+        ):
+            recent = _fetch_series_with_concurrent_references(
+                aggregator,
+                self._db_path,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                now,
+                history_start=recent_start,
+                cancellation_event=self._cancellation_event,
+                on_references_done=self._record_daily_done,
+            )
+            _check_chart_load_cancelled(self._cancellation_event)
+            self._record_step("recent fetched")
+            if recent.bars:
+                series_arrays(recent)
+                self.recent_ready.emit(self._request, recent)
+            # Older history yields to foreground requests (other chart
+            # loads, quotes) and stops sending once cancelled.
+            with background_requests(self._cancellation_event):
+                series = _fetch_series(
+                    aggregator,
+                    cache,
+                    cache_namespace,
+                    symbol,
+                    timeframe,
+                    now,
+                    history_start=history_start,
+                    cancellation_event=self._cancellation_event,
+                    on_history_progress=self._emit_history_progress,
+                )
+        else:
+            series = _fetch_series_with_concurrent_references(
+                aggregator,
+                self._db_path,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                now,
+                history_start=history_start,
+                cancellation_event=self._cancellation_event,
+                on_references_done=self._record_daily_done,
+            )
+        return series
+
+
+class _OlderHistoryWorker(QObject):
+    """
+    Loads history older than the displayed series: from the cache first,
+    then from the provider, at background request priority.
+
+    finished carries (request, series or None, outcome) with outcome one of
+    _OLDER_MORE, _OLDER_EXHAUSTED or _OLDER_RESET; it and error are
+    suppressed after cancellation. completed fires exactly once.
+    """
+
+    finished: pyqtSignal = pyqtSignal(object, object, str)
+    error: pyqtSignal = pyqtSignal(object, str)
+    completed: pyqtSignal = pyqtSignal()
+
+    def __init__(
+        self,
+        db_path: str,
+        credential_store: CredentialStore,
+        request: _ChartLoadRequest,
+        displayed_start: datetime,
+        displayed_end: datetime,
+        bars_wanted: int,
+        cancellation_event: threading.Event,
+    ) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._credential_store = credential_store
+        self._request = request
+        self._displayed_start = displayed_start
+        self._displayed_end = displayed_end
+        self._bars_wanted = bars_wanted
+        self._cancellation_event = cancellation_event
+
+    def run(self) -> None:
+        request = self._request
+        try:
+            _check_chart_load_cancelled(self._cancellation_event)
+            aggregator = Aggregator(
+                create_provider(request.connection, self._credential_store)
+            )
+            with background_requests(self._cancellation_event), Cache(
+                self._db_path
+            ) as cache:
+                series, outcome = _fetch_older_history(
+                    aggregator,
+                    cache,
+                    request.cache_namespace,
+                    request.symbol,
+                    request.timeframe,
+                    self._displayed_start,
+                    self._displayed_end,
+                    self._bars_wanted,
+                    datetime.now(tz=timezone.utc),
+                    self._cancellation_event,
+                )
+            _check_chart_load_cancelled(self._cancellation_event)
+            if series is not None:
+                series_arrays(series)
+            self.finished.emit(request, series, outcome)
+        except _ChartLoadCancelled:
+            pass
+        except Exception as exc:
+            if not self._cancellation_event.is_set():
+                context = ErrorContext(
+                    f"Loading older {request.symbol} "
+                    f"{request.timeframe.value} history",
+                )
+                self.error.emit(request, report_error(_LOGGER, exc, context))
+        finally:
+            self.completed.emit()
+
+
+def _fetch_older_history(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    displayed_start: datetime,
+    displayed_end: datetime,
+    bars_wanted: int,
+    now: datetime,
+    cancellation_event: threading.Event | None,
+) -> tuple[OHLCVSeries | None, str]:
+    """
+    Extend the displayed series [displayed_start, displayed_end] back by at
+    least bars_wanted bars where history exists: cached contiguous history
+    first, then the provider (never before its history limit). Returns the
+    extended series (None when nothing older exists) and the outcome:
+    _OLDER_RESET when the provider now returns the oldest cached bars on
+    another adjustment basis (the cache is reset here and a normal load
+    downloads it again), _OLDER_EXHAUSTED when no older history exists, else
+    _OLDER_MORE.
+    """
+    native = aggregator.native_timeframe(timeframe)
+    want = _older_history_start(timeframe, displayed_start, bars_wanted)
+    limit = aggregator.earliest_history_start(native, now)
+    if limit is None:
+        floor = _OLDEST_HISTORY_START
+    elif native.is_intraday:
+        # Loads start at the first session open after the limit; the sliver
+        # before it holds no bars and is not requested.
+        floor = _first_session_open_at_or_after(limit)
+    else:
+        floor = limit
+    floor_ms = int(floor.timestamp() * 1000)
+    coverage = cache.get_bar_fetch_coverage(cache_namespace, symbol, native)
+    if coverage is None:
+        return None, _OLDER_EXHAUSTED
+    want_ms = int(want.timestamp() * 1000)
+    if (
+        want_ms < coverage[0]
+        and not _older_history_exhausted(cache, cache_namespace, symbol, native, coverage, floor_ms)
+    ):
+        seam = _seam_validation_bars(cache, cache_namespace, symbol, native, coverage[0])
+        if seam:
+            # The seam range has cached bars, so the provider has them too:
+            # a refusal here is an error, not missing history.
+            fetched = aggregator.fetch_bars(
+                symbol,
+                native,
+                seam[0].timestamp,
+                seam[-1].timestamp + _bar_span(native),
+            )
+            change = detect_basis_change(seam, fetched)
+            if change is not None:
+                # A normal load validates only the newest sessions, so the
+                # reset happens here; the load then starts cold.
+                _reset_for_basis_change(
+                    aggregator,
+                    cache,
+                    cache_namespace,
+                    symbol,
+                    native,
+                    change,
+                    _history_start(native, aggregator, now),
+                    now,
+                )
+                return None, _OLDER_RESET
+        _check_chart_load_cancelled(cancellation_event)
+        coverage_start = ms_to_datetime(coverage[0])
+        try:
+            _fetch_bar_range(
+                aggregator,
+                cache,
+                cache_namespace,
+                symbol,
+                native,
+                ms_to_datetime(max(want_ms, floor_ms)),
+                coverage_start,
+                coverage_end=coverage_start,
+                cancellation_event=cancellation_event,
+            )
+        except HistoryUnavailableError:
+            # The provider has no older history for this range.
+            return None, _OLDER_EXHAUSTED
+        coverage = cache.get_bar_fetch_coverage(cache_namespace, symbol, native)
+        assert coverage is not None
+    exhausted = _older_history_exhausted(
+        cache, cache_namespace, symbol, native, coverage, floor_ms,
+    )
+    if native != timeframe:
+        # From a session open, so no synthesized bar is built from part of a
+        # session (an older cache may start mid-session).
+        rebuild_start = _first_session_open_at_or_after(
+            ms_to_datetime(max(want_ms, coverage[0]))
+        )
+        _materialize_synthesized_history(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            int(rebuild_start.timestamp() * 1000),
+        )
+        target_coverage = cache.get_bar_fetch_coverage(cache_namespace, symbol, timeframe)
+        if target_coverage is not None:
+            coverage = target_coverage
+    coverage_start = ms_to_datetime(coverage[0])
+    if timeframe.is_intraday:
+        coverage_start = _first_session_open_at_or_after(coverage_start)
+    display_start = max(want, coverage_start)
+    if display_start >= displayed_start:
+        return None, _OLDER_EXHAUSTED
+    series = OHLCVSeries(
+        symbol,
+        timeframe,
+        cache.get_bars(
+            cache_namespace,
+            symbol,
+            timeframe,
+            int(display_start.timestamp() * 1000),
+            int(displayed_end.timestamp() * 1000),
+        ),
+    )
+    if not series.bars or series.bars[0].timestamp >= displayed_start:
+        # Nothing older exists (before a listing, or nothing cached).
+        return None, _OLDER_EXHAUSTED
+    if exhausted and display_start == coverage_start:
+        return series, _OLDER_EXHAUSTED
+    return series, _OLDER_MORE
+
+
+def _older_history_start(
+    timeframe: Timeframe,
+    displayed_start: datetime,
+    bars_wanted: int,
+) -> datetime:
+    """
+    Start of the next older chunk: intraday at least _OLDER_HISTORY_CHUNK
+    before the displayed start, more when the view wants more bars, at a
+    session open; daily and weekly everything (they are one request).
+    """
+    if not timeframe.is_intraday:
+        return _OLDEST_HISTORY_START
+    days = math.ceil(bars_wanted / bars_for_n_days(1, timeframe) * 7 / 5) + 7
+    span = max(_OLDER_HISTORY_CHUNK, timedelta(days=days))
+    return _first_session_open_at_or_after(displayed_start - span)
+
+
+def _older_history_exhausted(
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    coverage: tuple[int, int],
+    floor_ms: int,
+) -> bool:
+    """
+    True when no older history can be fetched: coverage reaches the
+    provider's floor, or an older request returned nothing (the oldest bar in
+    coverage is about a chunk after its start: before the listing or the
+    provider's oldest data). Derived from the cache, so it holds across
+    restarts; holidays and halts shorter than _EMPTY_OLDER_SPAN do not count.
+    """
+    if coverage[0] <= floor_ms:
+        return True
+    oldest = cache.oldest_cached_timestamp(
+        cache_namespace,
+        symbol,
+        timeframe,
+        coverage[0],
+    )
+    if oldest is None:
+        return True
+    return oldest - coverage[0] >= _EMPTY_OLDER_SPAN.total_seconds() * 1000
+
+
+def _seam_validation_bars(
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    coverage_start_ms: int,
+) -> list[Bar]:
+    """
+    The oldest cached bars, compared against the provider before older bars
+    are joined to them: the first cached session intraday, the first ten
+    daily or four weekly bars.
+    """
+    lookback = (
+        _BASIS_VALIDATION_INTRADAY_LOOKBACK
+        if timeframe.is_intraday
+        else _BASIS_VALIDATION_LOOKBACK[timeframe]
+    )
+    bars = cache.get_raw_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        coverage_start_ms,
+        coverage_start_ms + int(lookback.total_seconds() * 1000),
+    )
+    if not timeframe.is_intraday:
+        return bars[: _BASIS_VALIDATION_BARS[timeframe]]
+    if not bars:
+        return []
+    first_session = _exchange_day_start(bars[0].timestamp)
+    return [
+        bar for bar in bars if _exchange_day_start(bar.timestamp) == first_session
+    ]
+
+
+def _bar_span(timeframe: Timeframe) -> timedelta:
+    if timeframe == Timeframe.WEEKLY:
+        return timedelta(days=7)
+    if timeframe == Timeframe.DAILY:
+        return timedelta(days=1)
+    minutes = timeframe.minutes
+    assert minutes is not None
+    return timedelta(minutes=minutes)
+
 
 class _ChartLoadCancelled(Exception):
     pass
+
+
+class _BasisReset(Exception):
+    """
+    A paged timeframe's cache was reset for a new adjustment basis; the
+    chart load starts over so the re-download renders recent bars first.
+    """
 
 
 def _check_chart_load_cancelled(
@@ -1157,12 +1545,21 @@ def _fetch_series(
     cancellation_event: threading.Event | None = None,
     on_history_progress: Callable[[int], None] | None = None,
 ) -> OHLCVSeries:
+    """
+    Fetch the history window from history_start (by default the full history
+    start) and return its bars. A window that starts at or before the full
+    history start shows the contiguous cached history before it as well; a
+    narrower window, such as the recent phase of a two-phase load, is shown
+    as requested.
+    """
     _check_chart_load_cancelled(cancellation_event)
     history_end = _history_end(timeframe, aggregator, now)
+    full_start = _history_start(timeframe, aggregator, history_end)
     if history_start is None:
-        history_start = _history_start(timeframe, aggregator, history_end)
+        history_start = full_start
+    series: OHLCVSeries | None = None
     if aggregator.native_timeframe(timeframe) != timeframe:
-        return _fetch_synthesized_series(
+        series = _fetch_synthesized_series(
             aggregator,
             cache,
             cache_namespace,
@@ -1172,23 +1569,47 @@ def _fetch_series(
             history_end,
             cancellation_event=cancellation_event,
         )
-    _fetch_and_cache_bars(
-        aggregator,
-        cache,
-        cache_namespace,
-        symbol,
-        timeframe,
-        history_start,
-        history_end,
-        cancellation_event=cancellation_event,
-        on_history_progress=on_history_progress,
-    )
-    _check_chart_load_cancelled(cancellation_event)
+    else:
+        _fetch_and_cache_bars(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            history_end,
+            cancellation_event=cancellation_event,
+            on_history_progress=on_history_progress,
+        )
+        _check_chart_load_cancelled(cancellation_event)
+    display_start = history_start
+    if history_start <= full_start:
+        if aggregator.native_timeframe(timeframe) != timeframe:
+            _materialize_older_cached_history(
+                aggregator,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                history_start,
+                history_end,
+            )
+            _check_chart_load_cancelled(cancellation_event)
+        display_start = _display_history_start(
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            history_end,
+        )
+    if series is not None and display_start == history_start:
+        return series
     bars = cache.get_bars(
         cache_namespace,
         symbol,
         timeframe,
-        int(history_start.timestamp() * 1000),
+        int(display_start.timestamp() * 1000),
         int(history_end.timestamp() * 1000),
     )
     return OHLCVSeries(
@@ -1257,7 +1678,7 @@ def _materialization_range(
         source_start_ms,
         int(
             _exchange_day_start(
-                datetime.fromtimestamp(rebuild_start_ms / 1000, tz=timezone.utc)
+                ms_to_datetime(rebuild_start_ms)
             ).timestamp()
             * 1000
         ),
@@ -1319,10 +1740,7 @@ def _fetch_synthesized_series(
             target_coverage,
         )
     if existing and target_coverage is not None:
-        target_coverage_end = datetime.fromtimestamp(
-            target_coverage[1] / 1000,
-            tz=timezone.utc,
-        )
+        target_coverage_end = ms_to_datetime(target_coverage[1])
         target_refresh_start = _cached_tail_refresh_start(
             aggregator,
             symbol,
@@ -1333,12 +1751,12 @@ def _fetch_synthesized_series(
             history_end,
         )
     base_coverage_start = (
-        datetime.fromtimestamp(base_coverage[0] / 1000, tz=timezone.utc)
+        ms_to_datetime(base_coverage[0])
         if base_coverage is not None
         else None
     )
     base_coverage_end = (
-        datetime.fromtimestamp(base_coverage[1] / 1000, tz=timezone.utc)
+        ms_to_datetime(base_coverage[1])
         if base_coverage is not None
         else None
     )
@@ -1355,7 +1773,7 @@ def _fetch_synthesized_series(
     if base_history_start is None:
         return OHLCVSeries(symbol, timeframe, existing)
     try:
-        _fetch_and_cache_bars(
+        if _fetch_and_cache_bars(
             aggregator,
             cache,
             cache_namespace,
@@ -1364,7 +1782,20 @@ def _fetch_synthesized_series(
             base_history_start,
             history_end,
             cancellation_event=cancellation_event,
-        )
+        ):
+            # The base moved to a new adjustment basis, and this timeframe's
+            # bars and coverage were reset with it: plan the load again from
+            # the reset cache, which also fetches the base from history_start.
+            return _fetch_synthesized_series(
+                aggregator,
+                cache,
+                cache_namespace,
+                symbol,
+                timeframe,
+                history_start,
+                history_end,
+                cancellation_event=cancellation_event,
+            )
     except HistoryUnavailableError:
         if base_coverage is None:
             if not existing:
@@ -1385,7 +1816,7 @@ def _fetch_synthesized_series(
 
     completed_target_end = aggregator.completed_history_end(
         timeframe,
-        datetime.fromtimestamp(source_end_ms / 1000, tz=timezone.utc),
+        ms_to_datetime(source_end_ms),
     )
     target_end_ms = int(completed_target_end.timestamp() * 1000)
     materialization_range = _materialization_range(
@@ -1431,13 +1862,109 @@ def _fetch_synthesized_series(
     return OHLCVSeries(symbol, timeframe, bars)
 
 
+def _materialize_older_cached_history(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    fetch_start: datetime,
+    end: datetime,
+) -> None:
+    """
+    Build a synthesized timeframe's bars from the base timeframe's contiguous
+    cached history older than the target's own coverage, so both show the
+    same history depth. Local only; the rebuild ends at the first whole
+    session of the target's coverage and the coverage start moves back to the
+    base's displayed start.
+    """
+    target_coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+    )
+    if target_coverage is None:
+        return
+    base_timeframe = aggregator.native_timeframe(timeframe)
+    start_ms = int(
+        _display_history_start(
+            cache,
+            cache_namespace,
+            symbol,
+            base_timeframe,
+            fetch_start,
+            end,
+        ).timestamp()
+        * 1000
+    )
+    if not target_coverage[0] <= int(fetch_start.timestamp() * 1000):
+        return
+    _materialize_synthesized_history(
+        aggregator,
+        cache,
+        cache_namespace,
+        symbol,
+        timeframe,
+        start_ms,
+    )
+
+
+def _materialize_synthesized_history(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    start_ms: int,
+) -> None:
+    """
+    Build a synthesized timeframe's bars from start_ms to the first whole
+    session of its coverage from the base timeframe's cached raw bars, and
+    move its coverage start back to start_ms. Local only.
+    """
+    target_coverage = cache.get_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+    )
+    if target_coverage is None or start_ms >= target_coverage[0]:
+        return
+    base_timeframe = aggregator.native_timeframe(timeframe)
+    rebuild_end = _first_session_open_at_or_after(
+        ms_to_datetime(target_coverage[0])
+    )
+    end_ms = int(rebuild_end.timestamp() * 1000) - 1
+    raw_bars = cache.get_raw_bars(
+        cache_namespace,
+        symbol,
+        base_timeframe,
+        start_ms,
+        end_ms,
+    )
+    if _uses_regular_equity_session(symbol):
+        raw_bars = [bar for bar in raw_bars if _is_regular_session_bar(bar)]
+    materialized = aggregator.synthesize_cached_bars(raw_bars, timeframe)
+    if not materialized:
+        return
+    cache.replace_materialized_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        start_ms,
+        end_ms,
+        materialized,
+        start_ms,
+        target_coverage[1],
+    )
+
+
 def _is_legacy_target_coverage(
     aggregator: Aggregator,
     timeframe: Timeframe,
     target_coverage: tuple[int, int],
 ) -> bool:
     previous_end_ms = target_coverage[1]
-    previous_end = datetime.fromtimestamp(previous_end_ms / 1000, tz=timezone.utc)
+    previous_end = ms_to_datetime(previous_end_ms)
     aligned_previous_end_ms = int(
         aggregator.completed_history_end(timeframe, previous_end).timestamp() * 1000
     )
@@ -1459,7 +1986,15 @@ def _fetch_and_cache_bars(
     *,
     cancellation_event: threading.Event | None = None,
     on_history_progress: Callable[[int], None] | None = None,
-) -> None:
+) -> bool:
+    """
+    Fetch the timeframe's history from history_start to now into the cache.
+    True when the provider moved the cached history to a new adjustment
+    basis: the timeframe and those built from it were reset (see
+    Cache.begin_basis_change) and the history was downloaded again. A paged
+    timeframe raises _BasisReset after the reset instead, so the chart load
+    starts over and renders recent bars first.
+    """
     _check_chart_load_cancelled(cancellation_event)
     if aggregator.native_timeframe(timeframe) != timeframe:
         raise ValueError(
@@ -1502,7 +2037,7 @@ def _fetch_and_cache_bars(
                 cancellation_event=cancellation_event,
                 on_history_progress=on_history_progress,
             )
-            return
+            return False
         _fetch_bar_range(
             aggregator,
             cache,
@@ -1516,13 +2051,10 @@ def _fetch_and_cache_bars(
             cancellation_event=cancellation_event,
             on_history_progress=on_history_progress,
         )
-        return
+        return False
 
     coverage_start_ms, coverage_end_ms = coverage
-    coverage_end = datetime.fromtimestamp(
-        coverage_end_ms / 1000,
-        tz=timezone.utc,
-    )
+    coverage_end = ms_to_datetime(coverage_end_ms)
     normalized_coverage_end = aggregator.completed_history_end(
         timeframe,
         coverage_end,
@@ -1554,23 +2086,9 @@ def _fetch_and_cache_bars(
             cancellation_event=cancellation_event,
             on_history_progress=on_history_progress,
         )
-        return
-    if requested_start_ms < coverage_start_ms:
-        _fetch_bar_range(
-            aggregator,
-            cache,
-            cache_namespace,
-            symbol,
-            timeframe,
-            history_start,
-            datetime.fromtimestamp(coverage_start_ms / 1000, tz=timezone.utc),
-            coverage_end=datetime.fromtimestamp(
-                coverage_start_ms / 1000,
-                tz=timezone.utc,
-            ),
-            cancellation_event=cancellation_event,
-            on_history_progress=on_history_progress,
-        )
+        return False
+    # The tail is refreshed before older history is fetched, so a changed
+    # adjustment basis is detected before anything is written.
     if (
         requested_end_ms > coverage_end_ms
         or (
@@ -1586,34 +2104,255 @@ def _fetch_and_cache_bars(
         newest_cached = (
             None
             if newest_ts is None
-            else datetime.fromtimestamp(newest_ts / 1000, tz=timezone.utc)
+            else ms_to_datetime(newest_ts)
         )
         refresh_start = _cached_tail_refresh_start(
             aggregator,
             symbol,
             timeframe,
             history_start,
-            datetime.fromtimestamp(coverage_end_ms / 1000, tz=timezone.utc),
+            ms_to_datetime(coverage_end_ms),
             newest_cached,
             now,
         )
-        if refresh_start is None:
-            return
-        try:
+        if refresh_start is not None and _refresh_cached_tail(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            refresh_start,
+            coverage_start_ms,
+            coverage_end_ms,
+            now,
+            completed_end,
+            cancellation_event,
+        ):
+            if aggregator.history_page_span(timeframe) is not None:
+                # A paged re-download is long; the chart load starts over
+                # so it renders the recent window first.
+                raise _BasisReset
+            _check_chart_load_cancelled(cancellation_event)
+            redownload_start = history_start
+            if aggregator.earliest_history_start(timeframe, now) is None:
+                # One request: keep the whole cached depth.
+                redownload_start = min(
+                    history_start,
+                    ms_to_datetime(coverage_start_ms),
+                )
             _fetch_bar_range(
                 aggregator,
                 cache,
                 cache_namespace,
                 symbol,
                 timeframe,
-                refresh_start,
+                redownload_start,
                 now,
                 coverage_end=completed_end,
-                require_bars=True,
                 cancellation_event=cancellation_event,
+                on_history_progress=on_history_progress,
             )
-        except HistoryUnavailableError:
-            return
+            return True
+    if requested_start_ms < coverage_start_ms:
+        _fetch_bar_range(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            history_start,
+            ms_to_datetime(coverage_start_ms),
+            coverage_end=ms_to_datetime(coverage_start_ms),
+            cancellation_event=cancellation_event,
+            on_history_progress=on_history_progress,
+        )
+    return False
+
+
+def _refresh_cached_tail(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    history_start: datetime,
+    refresh_start: datetime,
+    coverage_start_ms: int,
+    coverage_end_ms: int,
+    now: datetime,
+    completed_end: datetime,
+    cancellation_event: threading.Event | None,
+) -> bool:
+    """
+    Fetch the cached tail from refresh_start, together with the settled
+    validation bars before it, in one request.
+
+    When the provider returns the validation bars on a new adjustment basis,
+    the timeframe's cached history from the provider window start is reset
+    for a re-download and True is returned; nothing fetched is written.
+    Otherwise the tail is written as before and False is returned.
+    """
+    _check_chart_load_cancelled(cancellation_event)
+    validation_bars = _basis_validation_bars(
+        cache,
+        cache_namespace,
+        symbol,
+        timeframe,
+        coverage_start_ms,
+        coverage_end_ms,
+    )
+    # The provider window start; a pinned refresh reload may start earlier.
+    # A synthesized load passes its base a later history start, so the
+    # window, not history_start, bounds the validation bars requested:
+    # the provider may refuse a range reaching before it.
+    window_start = min(history_start, _history_start(timeframe, aggregator, now))
+    request_start = (
+        min(refresh_start, max(validation_bars[0].timestamp, window_start))
+        if validation_bars
+        else refresh_start
+    )
+    try:
+        fetched = aggregator.fetch_bars(symbol, timeframe, request_start, now)
+    except HistoryUnavailableError:
+        return False
+    change = detect_basis_change(validation_bars, fetched)
+    if change is not None:
+        _reset_for_basis_change(
+            aggregator,
+            cache,
+            cache_namespace,
+            symbol,
+            timeframe,
+            change,
+            window_start,
+            now,
+        )
+        return True
+    tail = [bar for bar in fetched if bar.timestamp >= refresh_start]
+    if not tail:
+        return False
+    cache.put_bars(cache_namespace, symbol, timeframe, tail)
+    cache.extend_bar_fetch_coverage(
+        cache_namespace,
+        symbol,
+        timeframe,
+        int(refresh_start.timestamp() * 1000),
+        int(completed_end.timestamp() * 1000),
+    )
+    return False
+
+
+def _reset_for_basis_change(
+    aggregator: Aggregator,
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    change: BasisChange,
+    window_start: datetime,
+    now: datetime,
+) -> None:
+    """
+    Reset a native timeframe's cache (and its dependents') for a new
+    adjustment basis; the next fetch downloads it again from window_start.
+    """
+    if aggregator.earliest_history_start(timeframe, now) is None:
+        # The provider still returns all of it: reset everything and download
+        # it again (on demand beyond the initial window).
+        boundary_ms = _OLDEST_TIMESTAMP_MS
+        shown_from_ms = _OLDEST_TIMESTAMP_MS
+    else:
+        # Older history the provider no longer returns is kept and recorded
+        # for the user to rescale or discard.
+        boundary_ms = int(window_start.timestamp() * 1000)
+        shown_from_ms = int(
+            _first_session_open_at_or_after(
+                now - timedelta(days=_DEFAULT_LOOKBACK_DAYS)
+            ).timestamp()
+            * 1000
+        )
+    cache.begin_basis_change(
+        cache_namespace,
+        symbol,
+        timeframe,
+        _dependent_timeframes(aggregator, timeframe),
+        change,
+        boundary_ms,
+        shown_from_ms,
+    )
+
+
+def _basis_validation_bars(
+    cache: Cache,
+    cache_namespace: str,
+    symbol: str,
+    timeframe: Timeframe,
+    coverage_start_ms: int,
+    coverage_end_ms: int,
+) -> list[Bar]:
+    """
+    The settled cached bars compared against the provider for a basis
+    change: intraday, the last two cached sessions before the coverage end
+    (the previous full session and the settled part of the last one); daily,
+    the last ten bars; weekly, the last four. Bars at or after the coverage
+    end may be partial and are excluded.
+    """
+    lookback = (
+        _BASIS_VALIDATION_INTRADAY_LOOKBACK
+        if timeframe.is_intraday
+        else _BASIS_VALIDATION_LOOKBACK[timeframe]
+    )
+    bars = cache.get_raw_bars(
+        cache_namespace,
+        symbol,
+        timeframe,
+        max(coverage_start_ms, coverage_end_ms - int(lookback.total_seconds() * 1000)),
+        coverage_end_ms - 1,
+    )
+    if not timeframe.is_intraday:
+        return bars[-_BASIS_VALIDATION_BARS[timeframe]:]
+    sessions = sorted({_exchange_day_start(bar.timestamp) for bar in bars})
+    if not sessions:
+        return []
+    first_session = sessions[-_BASIS_VALIDATION_SESSIONS:][0]
+    return [bar for bar in bars if bar.timestamp >= first_session]
+
+
+def _basis_change_message(symbol: str, record: BasisChangeRecord) -> str:
+    if record.volume_factor != 1.0:
+        split = Fraction(record.volume_factor).limit_denominator(100)
+        event = f"a {split.numerator}-for-{split.denominator} split"
+    else:
+        event = "dividends"
+    return (
+        f"{symbol}'s price history was adjusted by its data source for "
+        f"{event} (older prices \u00d7 {record.ratio:.4g}). Cached history "
+        "older than the source still provides is on the old basis. Rescale "
+        "it to match (keeps it), or discard it?"
+    )
+
+
+def _dependent_timeframes(
+    aggregator: Aggregator,
+    timeframe: Timeframe,
+) -> list[Timeframe]:
+    """
+    Timeframes whose cached bars are built from, or summarize the same
+    sessions as, timeframe and go stale with it: synthesized timeframes for
+    their base, and weekly for daily.
+    """
+    if timeframe == Timeframe.DAILY:
+        return [Timeframe.WEEKLY]
+    dependents: list[Timeframe] = []
+    for candidate in _CHART_TIMEFRAMES:
+        try:
+            native = aggregator.native_timeframe(candidate)
+        except UnsupportedTimeframeError:
+            continue
+        if candidate != timeframe and native == timeframe:
+            dependents.append(candidate)
+    return dependents
 
 
 def _fetch_bar_range(
@@ -1953,6 +2692,7 @@ class MainWindow(QMainWindow):
         self._chart.interactions.on_drag_cancel(self._on_drag_cancel)
         self._chart.on_cancel(self._on_cancel_shortcut)
         self._chart.on_commit(self._on_commit_shortcut)
+        self._chart.older_history_wanted.connect(self._on_older_history_wanted)
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
@@ -1974,6 +2714,13 @@ class MainWindow(QMainWindow):
             tuple[str, str], SymbolRefreshStatus
         ] = {}
         self._refresh_reload: _RefreshReload | None = None
+        # Answers to the basis-change question this session, by (cache
+        # namespace, symbol): (ratio of the event, choice or None when
+        # dismissed).
+        self._basis_change_answers: dict[
+            tuple[str, str],
+            list[tuple[float, BasisChangeChoice | None]],
+        ] = {}
         # Request whose recent window is displayed while its older history
         # loads; None once the displayed series covers the full window.
         self._partial_history_request: _ChartLoadRequest | None = None
@@ -1983,6 +2730,10 @@ class MainWindow(QMainWindow):
         self._displayed_history_complete = True
         # Full-history result that arrived during a drag or drawing session.
         self._held_history_merge: tuple[_ChartLoadRequest, OHLCVSeries] | None = None
+        # An older-history result held while a drag or drawing session runs.
+        self._held_older_merge: tuple[_ChartLoadRequest, OHLCVSeries] | None = None
+        # The displayed request whose older history is exhausted or failed.
+        self._older_history_stopped: _ChartLoadRequest | None = None
         # Interim re-render while backfill unlocks deferred extension content:
         # the start (UTC ms) of the latest committed contiguous history, a
         # timer spacing re-renders, and whether one waits for an interaction.
@@ -2029,7 +2780,12 @@ class MainWindow(QMainWindow):
         # Most recently loaded series — used to convert bar index to timestamp
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
         self._current_series: OHLCVSeries | None = None
+        # True from _load() until its series is displayed. _current_series
+        # still holds the previous load's bars then, so chart input is ignored.
+        self._chart_load_pending = False
         self._bar_correction_notice: str | None = None
+        # Status-bar text from extension renders (ChartExtensionRender.notice).
+        self._extension_notice: str | None = None
         self._history_status_message: str | None = None
 
         # The symbol for which self._state.extensions currently holds state.
@@ -2085,6 +2841,8 @@ class MainWindow(QMainWindow):
             return
         requested_at = time.monotonic()
 
+        self._end_interaction_sessions()
+        self._chart_load_pending = True
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
@@ -2115,6 +2873,8 @@ class MainWindow(QMainWindow):
         self._terminal_chart_generation = None
         self._partial_history_request = None
         self._held_history_merge = None
+        self._held_older_merge = None
+        self._extension_runtime.set_older_history_may_arrive(True)
         self._reset_history_refresh()
         self._clear_history_status_message()
         self._pending_chart_load = request
@@ -2169,6 +2929,14 @@ class MainWindow(QMainWindow):
             or request is None
             or len(self._chart_load_tasks) >= _MAX_ACTIVE_CHART_LOADS
             or (request.cache_namespace, request.symbol) in self._symbol_refreshes
+            # A cancelled older-history load may still commit a chunk; the
+            # symbol's next load waits for it so writers never overlap.
+            or any(
+                task.older
+                and (task.request.cache_namespace, task.request.symbol)
+                == (request.cache_namespace, request.symbol)
+                for task in self._chart_load_tasks.values()
+            )
         ):
             return
         self._pending_chart_load = None
@@ -2233,6 +3001,7 @@ class MainWindow(QMainWindow):
         if not self._stopping_data_workers and not self._chart_load_timer.isActive():
             self._dispatch_pending_chart_load()
         self._maybe_finalize_close()
+        QTimer.singleShot(0, self._check_older_history)
 
     def connect_symbol_rewound(self, slot: Callable[[str, str], None]) -> None:
         self.symbol_rewound.connect(slot)
@@ -2337,6 +3106,12 @@ class MainWindow(QMainWindow):
             if timeframe.is_intraday
         )
 
+        hides_older_intraday = any(
+            route.aggregator.earliest_history_start(timeframe, now) is not None
+            for timeframe in history_starts
+            if timeframe.is_intraday
+        )
+
         def refresh() -> None:
             self._refresh_symbol(
                 _SymbolRefresh(cache_namespace, symbol, route.aggregator)
@@ -2345,6 +3120,7 @@ class MainWindow(QMainWindow):
         return SymbolRefreshPlan(
             intraday_days,
             history_starts[Timeframe.DAILY].date(),
+            hides_older_intraday,
             refresh,
         )
 
@@ -2580,6 +3356,11 @@ class MainWindow(QMainWindow):
         if self._history_refresh_deferred and not interacting:
             self._history_refresh_deferred = False
             self._schedule_history_refresh()
+        held_older = self._held_older_merge
+        if held_older is not None and not interacting:
+            self._held_older_merge = None
+            if self._older_result_applies(held_older[0]):
+                self._apply_history_merge(held_older[1])
         held = self._held_history_merge
         if held is None or interacting:
             return
@@ -2650,12 +3431,15 @@ class MainWindow(QMainWindow):
             for render_pass in render_passes:
                 self._draw_extension_render(render_pass)
             self._remove_stale_extension_renders(render_passes)
+        self._update_extension_notice(render_passes)
         pm.refresh(preserve_view=True)
         self._update_bar_correction_notice(series)
         if history_complete:
             route = self._route_for_symbol(series.symbol)
             self._symbol_bar.set_data_source(route.display_name, "connected")
             self._clear_history_status_message()
+            self._resolve_basis_changes(route, series.symbol)
+            QTimer.singleShot(0, self._check_older_history)
 
     def _clear_history_status_message(self) -> None:
         status_bar = self.statusBar()
@@ -2713,6 +3497,7 @@ class MainWindow(QMainWindow):
 
         self._loaded_symbol = series.symbol
         self._current_series = series
+        self._chart_load_pending = False
         route = self._route_for_symbol(series.symbol)
         self._symbol_bar.set_data_source(
             route.display_name,
@@ -2737,6 +3522,247 @@ class MainWindow(QMainWindow):
             or self._quote_refreshed_generation != request.generation
         ):
             self._refresh_level1()
+        if history_complete:
+            self._resolve_basis_changes(route, series.symbol)
+            QTimer.singleShot(0, self._check_older_history)
+
+    def _check_older_history(self) -> None:
+        """
+        Load older history when the view nears the oldest bar, or when an
+        anchored extension waits on bars older than the loaded ones. Runs
+        again after each load, merge and finished task, so a chain of loads
+        continues until the view or anchor is covered or nothing older exists.
+        """
+        bars_wanted = self._chart.older_history_bars_wanted()
+        pending_ms = self._extension_runtime.pending_history_start_ms
+        series = self._current_series
+        if (
+            pending_ms is not None
+            and series is not None
+            and series.bars
+            and self._displayed_history_complete
+        ):
+            gap = series.bars[0].timestamp - ms_to_datetime(pending_ms)
+            if gap > timedelta(0):
+                bars_per_day = max(1, bars_for_n_days(1, series.timeframe))
+                bars_wanted = max(
+                    bars_wanted,
+                    math.ceil(gap.days * 5 / 7 * bars_per_day) + bars_per_day,
+                )
+        if bars_wanted > 0:
+            self._on_older_history_wanted(bars_wanted)
+
+    def _on_older_history_wanted(self, bars_wanted: int) -> None:
+        """
+        Load history older than the displayed series when the view nears its
+        oldest bar. One at a time, only for a complete, settled chart that no
+        other load or symbol refresh is writing.
+        """
+        request = self._current_chart_request
+        series = self._current_series
+        if (
+            self._stopping_data_workers
+            or request is None
+            or series is None
+            or not series.bars
+            or series.symbol != request.symbol
+            or series.timeframe != request.timeframe
+            or not self._displayed_history_complete
+            or self._chart_load_pending
+            or self._pending_chart_load is not None
+            or self._held_history_merge is not None
+            or self._held_older_merge is not None
+            or self._older_history_stopped == request
+            or (request.cache_namespace, request.symbol) in self._symbol_refreshes
+            or any(
+                (task.request.cache_namespace, task.request.symbol)
+                == (request.cache_namespace, request.symbol)
+                for task in self._chart_load_tasks.values()
+            )
+            or not self._older_result_applies(request)
+        ):
+            return
+        cancellation_event = threading.Event()
+        worker = _OlderHistoryWorker(
+            self._db_path,
+            self._credential_store,
+            request,
+            series.bars[0].timestamp,
+            series.bars[-1].timestamp,
+            bars_wanted,
+            cancellation_event,
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_older_history_done)
+        worker.error.connect(self._on_older_history_error)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        generation = request.generation
+        thread.finished.connect(
+            lambda: self._on_chart_thread_finished(generation)
+        )
+        self._chart_load_tasks[generation] = _ChartLoadTask(
+            request,
+            thread,
+            worker,
+            cancellation_event,
+            older=True,
+        )
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            self._history_status_message = "Loading older history..."
+            status_bar.showMessage(self._history_status_message)
+        thread.start()
+
+    def _older_result_applies(self, request: _ChartLoadRequest) -> bool:
+        return (
+            not self._stopping_data_workers
+            and request == self._current_chart_request
+            and self._state.symbol == request.symbol
+            and self._state.timeframe == request.timeframe
+            and self._route_for_symbol(request.symbol).connection
+            == request.connection
+            and self._current_series is not None
+        )
+
+    def _on_older_history_done(
+        self,
+        request: _ChartLoadRequest,
+        series: OHLCVSeries | None,
+        outcome: str,
+    ) -> None:
+        if not self._older_result_applies(request):
+            return
+        self._clear_history_status_message()
+        if outcome == _OLDER_RESET:
+            # The provider moved this history to a new adjustment basis; a
+            # normal load detects and resets it.
+            self._load()
+            return
+        if outcome == _OLDER_EXHAUSTED:
+            self._older_history_stopped = request
+            # Anchors older than all history now compute from the first bar.
+            self._extension_runtime.set_older_history_may_arrive(False)
+            if series is None:
+                self._reload_extensions(draw_bars=False)
+        if series is None:
+            return
+        if (
+            self._drawing_session is not None
+            or self._extension_runtime.drag_active
+        ):
+            self._held_older_merge = (request, series)
+            return
+        self._apply_history_merge(series)
+
+    def _on_older_history_error(
+        self,
+        request: _ChartLoadRequest,
+        message: str,
+    ) -> None:
+        if not self._older_result_applies(request):
+            return
+        self._clear_history_status_message()
+        # Not retried for this chart; changing symbol or timeframe, or
+        # reloading, tries again.
+        self._older_history_stopped = request
+        status_bar = self.statusBar()
+        if status_bar is not None:
+            status_bar.showMessage(message, _OLDER_HISTORY_ERROR_MS)
+
+    def _resolve_basis_changes(self, route: _DataRoute, symbol: str) -> None:
+        """
+        Rescale or discard the symbol's cached history that its data source
+        moved to a new adjustment basis but no longer returns. Only a
+        timeframe downloaded again since its reset (coverage starts at its
+        newest record's boundary) is resolved; the others wait. The
+        remembered choice applies; otherwise the user is asked once per
+        symbol and event this session, and the answer also applies when the
+        same event is found on another timeframe. A rescale reloads the
+        chart to show the history again.
+        """
+        cache_namespace = route.cache_namespace
+        newest: dict[Timeframe, BasisChangeRecord] = {}
+        for record in self._cache.get_basis_changes(cache_namespace, symbol):
+            current = newest.get(record.timeframe)
+            if current is None or record.boundary_ms > current.boundary_ms:
+                newest[record.timeframe] = record
+        ready: list[BasisChangeRecord] = []
+        for timeframe, record in newest.items():
+            coverage = self._cache.get_bar_fetch_coverage(
+                cache_namespace,
+                symbol,
+                timeframe,
+            )
+            if coverage is not None and coverage[0] == record.boundary_ms:
+                ready.append(record)
+        if not ready:
+            return
+        choices: dict[Timeframe, BasisChangeChoice] = {}
+        remembered = self._cache.get_basis_change_choice()
+        answers = self._basis_change_answers.setdefault((cache_namespace, symbol), [])
+        unasked: list[BasisChangeRecord] = []
+        for record in ready:
+            if remembered is not None:
+                choices[record.timeframe] = remembered
+                continue
+            answered = [
+                choice
+                for ratio, choice in answers
+                if math.isclose(ratio, record.ratio, rel_tol=_SAME_BASIS_EVENT_TOLERANCE)
+            ]
+            if not answered:
+                unasked.append(record)
+            elif answered[0] is not None:
+                choices[record.timeframe] = answered[0]
+        if unasked:
+            # Recorded as dismissed before asking: the modal question runs a
+            # nested event loop in which another load may resolve again.
+            first = len(answers)
+            answers.extend((record.ratio, None) for record in unasked)
+            answer = ask_basis_change_choice(
+                self,
+                _basis_change_message(symbol, unasked[0]),
+            )
+            if answer is not None:
+                answers[first:first + len(unasked)] = [
+                    (record.ratio, answer[0]) for record in unasked
+                ]
+                if answer[1]:
+                    self._cache.set_basis_change_choice(answer[0])
+                for record in unasked:
+                    choices[record.timeframe] = answer[0]
+        try:
+            for timeframe, choice in choices.items():
+                dependents = _dependent_timeframes(route.aggregator, timeframe)
+                if choice == BasisChangeChoice.RESCALE:
+                    self._cache.rescale_basis_changes(
+                        cache_namespace,
+                        symbol,
+                        timeframe,
+                        dependents,
+                    )
+                else:
+                    self._cache.discard_basis_changes(
+                        cache_namespace,
+                        symbol,
+                        timeframe,
+                        dependents,
+                    )
+        except sqlite3.Error as exc:
+            # Each timeframe changes in one transaction; what is left is
+            # still recorded and is offered again on the next load.
+            self._basis_change_answers.pop((cache_namespace, symbol), None)
+            context = ErrorContext(f"Updating {symbol}'s older cached history")
+            show_warning(self, "Cache Update Failed", report_error(_LOGGER, exc, context))
+            return
+        if (
+            BasisChangeChoice.RESCALE in choices.values()
+            and self._state.symbol == symbol
+        ):
+            self._load()
 
     def _on_fetch_error(self, message: str) -> None:
         if self._state.symbol is not None:
@@ -2771,6 +3797,7 @@ class MainWindow(QMainWindow):
         for render_pass in render_passes:
             self._draw_extension_render(render_pass)
         self._remove_stale_extension_renders(render_passes)
+        self._update_extension_notice(render_passes)
 
         pm.refresh()
 
@@ -3015,33 +4042,69 @@ class MainWindow(QMainWindow):
     # Chart interaction workflow
     # ------------------------------------------------------------------
 
+    def _interactive_series(self) -> OHLCVSeries | None:
+        """The displayed series chart input resolves against; None while a
+        load is replacing it."""
+        return None if self._chart_load_pending else self._current_series
+
+    def _menu_choice_applies(self, request: _ChartLoadRequest | None) -> bool:
+        """
+        QMenu.exec runs a nested event loop. The chosen action still applies
+        while the same load is displayed (a history merge may have replaced
+        the series), not once another load has started.
+        """
+        return (
+            self._current_chart_request is request
+            and self._interactive_series() is not None
+        )
+
+    def _end_interaction_sessions(self) -> None:
+        """
+        A new load replaces the displayed bars: end any drag or drawing in
+        progress so it cannot resolve against, or write into, the next load.
+        The active drawing tool stays selected.
+        """
+        self._chart.interactions.cancel_drag()
+        self._end_drawing_session()
+
+    def _end_drawing_session(self) -> ChartExtensionMutation | None:
+        if self._drawing_session is None:
+            return None
+        mutation = self._extension_runtime.cancel_drawing(self._drawing_session)
+        self._clear_pending_drawing_preview()
+        self._drawing_session = None
+        self._clear_preview_render()
+        return mutation
+
     def _on_bar_clicked(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
-        if self._current_series is None or self._active_drawing_tool is None:
+        series = self._interactive_series()
+        if series is None or self._active_drawing_tool is None:
             return
         event = self._extension_runtime.chart_event(
-            self._current_series, x_pos, y_pos,
+            series, x_pos, y_pos,
             pixel_size_x=px_x, pixel_size_y=px_y,
         )
         if self._drawing_session is None:
             result = self._extension_runtime.start_drawing(
                 self._active_drawing_tool,
-                self._current_series,
+                series,
                 event,
             )
             self._handle_drawing_result(result)
             return
         result = self._extension_runtime.advance_drawing(
-            self._current_series,
+            series,
             self._drawing_session,
             event,
         )
         self._handle_drawing_result(result)
 
     def _on_mouse_move(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
-        if self._current_series is None or self._drawing_session is None:
+        series = self._interactive_series()
+        if series is None or self._drawing_session is None:
             return
         self._pending_drawing_preview_event = self._extension_runtime.chart_event(
-            self._current_series, x_pos, y_pos,
+            series, x_pos, y_pos,
             pixel_size_x=px_x, pixel_size_y=px_y,
         )
         if not self._drawing_preview_timer.isActive():
@@ -3100,26 +4163,24 @@ class MainWindow(QMainWindow):
         if self._drawing_session is None:
             self._set_active_drawing_tool(None)
             return
-        mutation = self._extension_runtime.cancel_drawing(self._drawing_session)
-        self._clear_pending_drawing_preview()
-        self._drawing_session = None
-        self._clear_preview_render()
+        mutation = self._end_drawing_session()
         self._set_active_drawing_tool(None)
         if mutation is not None:
             self._reload_extensions(draw_bars=False, preserve_view=True)
         self._flush_held_history_merge()
 
     def _on_drag_start(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> bool:
-        if self._current_series is None:
+        series = self._interactive_series()
+        if series is None:
             return False
         event = self._extension_runtime.chart_event(
-            self._current_series,
+            series,
             x_pos,
             y_pos,
             pixel_size_x=px_x,
             pixel_size_y=px_y,
         )
-        return bool(self._extension_runtime.begin_drag(self._current_series, event))
+        return bool(self._extension_runtime.begin_drag(series, event))
 
     def _on_drag_move(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         if self._current_series is None:
@@ -3153,19 +4214,20 @@ class MainWindow(QMainWindow):
 
     def _on_bar_right_clicked(self, x_pos: float, y_pos: float, px_x: float, px_y: float) -> None:
         """Right-click on a bar: show context menu."""
-        if self._current_series is None:
+        series = self._interactive_series()
+        if series is None:
             return
         event = self._extension_runtime.chart_event(
-            self._current_series,
+            series,
             x_pos,
             y_pos,
             button="right",
             pixel_size_x=px_x,
             pixel_size_y=px_y,
         )
-        if self._drawing_session is None and self._show_drawing_context_menu(event):
+        if self._drawing_session is None and self._show_drawing_context_menu(series, event):
             return
-        actions = self._extension_runtime.context_actions(self._current_series, event)
+        actions = self._extension_runtime.context_actions(series, event)
         if not actions:
             return
         menu = QMenu(self)
@@ -3173,21 +4235,24 @@ class MainWindow(QMainWindow):
             (menu.addAction(action.label), action)
             for action in actions
         ]
+        request = self._current_chart_request
         selected = menu.exec(QCursor.pos())
+        if not self._menu_choice_applies(request):
+            return
         for qaction, action in qactions:
             if selected == qaction:
+                # The click-time series: the event's bar index refers to it.
                 self._extension_runtime.apply_action(
-                    self._current_series,
+                    series,
                     action,
                     event,
                 )
-                self._reload_extensions()
+                # Actions change extension state, never bars.
+                self._reload_extensions(draw_bars=False)
                 return
 
-    def _show_drawing_context_menu(self, event: ChartEvent) -> bool:
-        if self._current_series is None:
-            return False
-        hit = self._extension_runtime.drawing_hit_test(self._current_series, event)
+    def _show_drawing_context_menu(self, series: OHLCVSeries, event: ChartEvent) -> bool:
+        hit = self._extension_runtime.drawing_hit_test(series, event)
         if hit is None:
             return False
 
@@ -3196,7 +4261,10 @@ class MainWindow(QMainWindow):
         if self._extension_runtime.config_request(hit.handle_key) is not None:
             configure_action = menu.addAction("Configure...")
         remove_action = menu.addAction("Remove")
+        request = self._current_chart_request
         selected = menu.exec(QCursor.pos())
+        if not self._menu_choice_applies(request):
+            return True
 
         if configure_action is not None and selected == configure_action:
             self._on_extension_configure(hit.handle_key)
@@ -3219,6 +4287,9 @@ class MainWindow(QMainWindow):
         """
         if self._state.symbol is None:
             return
+        if not draw_bars and self._current_series is None:
+            # Nothing is shown yet; the pending load renders the extensions.
+            return
         if not draw_bars and self._current_series is not None:
             series = self._current_series
         else:
@@ -3229,18 +4300,27 @@ class MainWindow(QMainWindow):
                 route.aggregator,
                 now,
             )
-            history_start = _history_start(
+            history_start = _display_history_start(
+                self._cache,
+                route.cache_namespace,
+                self._state.symbol,
                 self._state.timeframe,
-                route.aggregator,
+                _history_start(
+                    self._state.timeframe,
+                    route.aggregator,
+                    history_end,
+                ),
                 history_end,
             )
             if (
-                not self._displayed_history_complete
-                and self._current_series is not None
+                self._current_series is not None
                 and self._current_series.bars
+                and self._current_series.symbol == self._state.symbol
+                and self._current_series.timeframe == self._state.timeframe
             ):
-                # Keep the displayed recent window: older bars already stored
-                # by the running backfill would shift every bar index.
+                # Keep the displayed range: older bars stored by a running
+                # backfill would shift every bar index, and older history
+                # loaded by panning must stay shown.
                 history_start = self._current_series.bars[0].timestamp
             bars = self._cache.get_bars(
                 route.cache_namespace,
@@ -3296,9 +4376,13 @@ class MainWindow(QMainWindow):
             for render_pass in render_passes:
                 self._draw_extension_render(render_pass)
             self._remove_stale_extension_renders(render_passes)
+        self._update_extension_notice(render_passes)
         pm.refresh(preserve_view=preserve_view)
         if draw_bars:
             self._update_bar_correction_notice(series)
+        # A new or edited anchored extension may wait on older bars.
+        if self._extension_runtime.pending_history_start_ms is not None:
+            QTimer.singleShot(0, self._check_older_history)
 
     def _update_bar_correction_notice(self, series: OHLCVSeries) -> None:
         status_bar = self.statusBar()
@@ -3330,6 +4414,34 @@ class MainWindow(QMainWindow):
             f"{conflict_count} {noun} {verb} review in Settings > Data Quality."
         )
         status_bar.showMessage(self._bar_correction_notice)
+
+    def _update_extension_notice(
+        self,
+        render_passes: list[ChartExtensionRenderPass],
+    ) -> None:
+        """
+        Show what extensions report about content they did not draw (for
+        example an AVWAP anchored too far back for an intraday chart), and
+        clear it once no extension reports anything.
+        """
+        status_bar = self.statusBar()
+        if status_bar is None:
+            return
+        notices = [
+            render_pass.render.notice
+            for render_pass in render_passes
+            if render_pass.render.notice
+        ]
+        notice = " ".join(notices) if notices else None
+        if notice is None:
+            if (
+                self._extension_notice is not None
+                and status_bar.currentMessage() == self._extension_notice
+            ):
+                status_bar.clearMessage()
+        elif notice != status_bar.currentMessage():
+            status_bar.showMessage(notice)
+        self._extension_notice = notice
 
     def _remove_stale_extension_renders(
         self,
@@ -3563,6 +4675,7 @@ class MainWindow(QMainWindow):
             self._drawing_preview_timer.stop()
         self._pending_chart_load = None
         self._held_history_merge = None
+        self._held_older_merge = None
         self._reset_history_refresh()
         self._drop_refresh_reload()
         for task in tuple(self._chart_load_tasks.values()):
@@ -3999,7 +5112,7 @@ class MainWindow(QMainWindow):
             self._state.extensions.append(
                 ChartExtensionState(name=name, params=dialog.result_params())
             )
-            self._reload_extensions()
+            self._reload_extensions(draw_bars=False)
 
     def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:
         toolbar: dict[str, ChartExtension] = {}

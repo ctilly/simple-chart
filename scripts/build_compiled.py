@@ -11,12 +11,19 @@ What it does:
   1. Reads the target module paths from pyproject.toml
   2. Converts dotted module paths to file paths (e.g. indicators._fast.ma
      → indicators/_fast/ma.py)
-  3. Runs mypyc on all targets in one invocation
+  3. Runs mypyc once per target
+
+Each target gets its own mypyc invocation. Compiling several modules in
+one invocation makes mypyc emit a shared runtime library at the project
+root that every .so imports by name; that library is importable only when
+the project root is on sys.path, which the console-script launcher does
+not provide. A single-module build places its runtime library inside the
+target's own package, where it imports through the package path.
 
 The compiled .so files are placed alongside the .py source files.
-Python automatically imports the .so if present, falling back to the
-.py if not — so you can delete the .so files at any time to revert to
-interpreted mode.
+Python imports the .so instead of the .py whenever the .so is present,
+and does not fall back to the .py if the .so fails to import. Delete
+the .so files to revert to interpreted mode.
 
 To skip compilation during development:
     SIMPLECHART_NO_COMPILE=1 python main.py
@@ -91,15 +98,15 @@ def main() -> None:
         str(module_to_path(target).relative_to(ROOT))
         for target in targets
     ]
-    cmd = [sys.executable, "-m", "mypyc"] + target_paths
-    result = subprocess.run(cmd, cwd=ROOT)
+    for target_path in target_paths:
+        cmd = [sys.executable, "-m", "mypyc", target_path]
+        result = subprocess.run(cmd, cwd=ROOT)
+        if result.returncode != 0:
+            print(f"\nBuild failed for {target_path}. See mypyc output above for details.")
+            sys.exit(result.returncode)
 
-    if result.returncode == 0:
-        print("\nBuild succeeded.")
-        print("Run 'python main.py' to launch with compiled extensions.")
-    else:
-        print("\nBuild failed. See mypyc output above for details.")
-        sys.exit(result.returncode)
+    print("\nBuild succeeded.")
+    print("Run 'python main.py' to launch with compiled extensions.")
 
 
 if __name__ == "__main__":

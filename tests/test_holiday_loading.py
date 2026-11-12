@@ -55,7 +55,9 @@ class _Scenario:
     intraday_coverage_end: datetime
     last_daily_bar: datetime
     daily_coverage_end: datetime
-    # The one tail request each fetched timeframe makes per load.
+    # The one tail request each fetched timeframe makes per load. It starts
+    # at the first basis validation bar (Wave 3): the last two cached
+    # sessions for 5m, the last ten cached bars for daily.
     tails: dict[Timeframe, tuple[datetime, datetime]]
 
 
@@ -68,8 +70,8 @@ _THANKSGIVING = _Scenario(
     last_daily_bar=_et(2026, 11, 25),
     daily_coverage_end=_et(2026, 11, 26),
     tails={
-        Timeframe.MIN5: (_et(2026, 11, 25, 15, 55), _et(2026, 11, 26, 17)),
-        Timeframe.DAILY: (_et(2026, 11, 25), _et(2026, 11, 26, 17)),
+        Timeframe.MIN5: (_et(2026, 11, 24, 9, 30), _et(2026, 11, 26, 17)),
+        Timeframe.DAILY: (_et(2026, 11, 12), _et(2026, 11, 26, 17)),
     },
 )
 
@@ -83,8 +85,8 @@ _EARLY_CLOSE = _Scenario(
     last_daily_bar=_et(2026, 11, 25),
     daily_coverage_end=_et(2026, 11, 26),
     tails={
-        Timeframe.MIN5: (_et(2026, 11, 27, 13), _et(2026, 11, 27, 14)),
-        Timeframe.DAILY: (_et(2026, 11, 26), _et(2026, 11, 27, 14)),
+        Timeframe.MIN5: (_et(2026, 11, 25, 9, 30), _et(2026, 11, 27, 14)),
+        Timeframe.DAILY: (_et(2026, 11, 12), _et(2026, 11, 27, 14)),
     },
 )
 
@@ -332,12 +334,9 @@ def _bar_tuples(bars: list[Bar]) -> list[tuple[Any, ...]]:
 def _expected_series(scenario: _Scenario, timeframe: Timeframe) -> list[Bar]:
     if timeframe == Timeframe.DAILY:
         return _daily_bars(scenario.last_daily_bar)
-    window_start = scenario.now - _YAHOO_INTRADAY_LIMIT
-    return [
-        bar
-        for bar in _intraday_bars(scenario.last_intraday_bar)
-        if bar.timestamp >= window_start
-    ]
+    # The seeded coverage is contiguous from the first seeded bar, so the
+    # chart shows it all, including bars older than the provider window.
+    return _intraday_bars(scenario.last_intraday_bar)
 
 
 def _expected_calls(scenario: _Scenario, timeframe: Timeframe) -> list[Call]:

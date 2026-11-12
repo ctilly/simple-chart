@@ -12,7 +12,8 @@ HOW AVWAP ANCHORS WORK IN THIS SYSTEM
   3. This indicator returns an add-anchor mutation.
   4. The runtime persists the AnchorRecord and injects anchors into params.
   5. The runtime calls compute() which resolves each anchor timestamp to
-     a bar index and delegates to the avwap_multi() compiled kernel.
+     a bar index and takes running sums of typical price x volume and of
+     volume from that bar.
   6. compute() returns one named array per anchor.
   7. The chart layer draws each generic render series.
 
@@ -35,11 +36,13 @@ one plot series, keyed by stable anchor identity. Persisted anchors use
 dragged to a new timestamp. Adding a new anchor appends to the list and
 triggers a recompute; removing one removes it from the list.
 
-The avwap_multi() kernel processes all anchors in a single pass over the
-bar arrays, which is more efficient than computing each anchor separately.
+AVWAP is a running sum, not a recurrence, so it needs no compiled kernel:
+each anchor is two NumPy cumulative sums over the bars from its anchor bar,
+using the series' shared arrays (series_arrays). A drag frame therefore costs
+time proportional to the bars after the anchor, not to all loaded bars.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
@@ -61,9 +64,8 @@ from simplechart.api import (
     SeriesRender,
     register_extension,
     register_store_handler,
-    timestamp_ms_to_bar_index,
+    series_arrays,
 )
-from indicators.avwap._kernel import avwap_multi as _avwap_multi_kernel
 from indicators.avwap.models import AnchorRecord
 
 _AVWAP_PALETTE: list[str] = [
@@ -77,6 +79,14 @@ _AVWAP_PALETTE: list[str] = [
 ]
 _ANCHOR_HIT_BUFFER_FRACTION = 0.35
 _ANCHOR_HIT_MIN_PRICE_FRACTION = 0.0004
+# Horizontal grab radius around an anchor's first bar, in screen pixels, but
+# never less than this many bars when zoomed in.
+_ANCHOR_GRAB_RADIUS_PX = 6.0
+_ANCHOR_GRAB_MIN_BARS = 0.75
+# Intraday charts draw anchors at most this many calendar days before their
+# newest bar: the app's initial intraday window. Older anchors would make an
+# intraday chart load years of bars; daily and weekly charts draw them.
+_MAX_INTRADAY_ANCHOR_DAYS = 600
 
 
 class AVWAPIndicator(ChartExtension):
@@ -113,42 +123,28 @@ class AVWAPIndicator(ChartExtension):
 
         If there are no anchors, returns an empty dict — nothing to draw.
 
-        Steps:
-          1. Extract price/volume arrays from the series
-          2. Build a list of bar timestamps (ms) for anchor resolution
-          3. Resolve each anchor's UTC timestamp to a bar index
-          4. Call avwap_multi() with all anchor indexes at once
-          5. Return one named array per anchor
+        Each value is the cumulative typical price x volume divided by the
+        cumulative volume from the anchor's bar; NaN before the anchor and
+        until volume is seen.
         """
         anchors, _ = _split_loaded_anchors(series, params)
         if not anchors:
             return {}
 
-        bars = series.bars
-        highs   = np.array([b.high   for b in bars], dtype=float)
-        lows    = np.array([b.low    for b in bars], dtype=float)
-        closes  = np.array([b.close  for b in bars], dtype=float)
-        volumes = np.array([b.volume for b in bars], dtype=float)
-
-        # Build the list of bar timestamps once, reused for all anchors.
-        bar_ts_ms: list[int] = [
-            int(b.timestamp.timestamp() * 1000) for b in bars
-        ]
-
-        anchor_indexes: list[int] = [
-            timestamp_ms_to_bar_index(anchor.anchor_ts, bar_ts_ms)
-            for anchor in anchors
-        ]
-
-        arrays: list[np.ndarray] = _avwap_multi_kernel(
-            highs, lows, closes, volumes, anchor_indexes
-        )
-
+        arrays = series_arrays(series)
+        n = len(arrays.close)
         # Persisted anchors use their DB id so visibility survives drag
         # timestamp edits.
         return {
-            avwap_anchor_key(anchor): array
-            for anchor, array in zip(anchors, arrays)
+            avwap_anchor_key(anchor): _avwap_from(
+                arrays.high,
+                arrays.low,
+                arrays.close,
+                arrays.volume,
+                _anchor_bar_index(arrays.timestamps_ms, anchor.anchor_ts),
+                n,
+            )
+            for anchor in anchors
         }
 
     def render(
@@ -159,6 +155,7 @@ class AVWAPIndicator(ChartExtension):
         anchors: list[AnchorRecord] = params.get("anchors", [])
         result = self.compute(series, params)
         render = ChartExtensionRender()
+        render.notice = _too_far_back_notice(_too_far_back(series, anchors))
         _, unloaded = _split_loaded_anchors(series, params)
         if unloaded:
             render.pending_history_start_ms = max(
@@ -230,10 +227,7 @@ class AVWAPIndicator(ChartExtension):
         if action_key != "add_anchor" or event.timestamp_ms is None:
             return None
         anchors: list[AnchorRecord] = params.get("anchors", [])
-        label = datetime.fromtimestamp(
-            event.timestamp_ms / 1000,
-            tz=timezone.utc,
-        ).strftime("%Y-%m-%d")
+        label = _utc_from_ms(event.timestamp_ms).strftime("%Y-%m-%d")
         color = _AVWAP_PALETTE[len(anchors) % len(_AVWAP_PALETTE)]
         return ChartExtensionMutation(
             extension_name=self.name(),
@@ -252,26 +246,33 @@ class AVWAPIndicator(ChartExtension):
         event: ChartEvent,
         visible_keys: set[str],
     ) -> HitTestResult | None:
-        if event.bar_index is None:
-            return None
-        if event.bar_index < 0 or event.bar_index >= len(series.bars):
-            return None
-        anchors: list[AnchorRecord] = params.get("anchors", [])
-        for anchor in anchors:
+        # An anchor is grabbed at the bar its line starts on, within a radius
+        # measured in pixels so it stays grabbable when zoomed out.
+        radius = max(_ANCHOR_GRAB_MIN_BARS, _ANCHOR_GRAB_RADIUS_PX * event.pixel_size_x)
+        timestamps_ms = series_arrays(series).timestamps_ms
+        best_key: str | None = None
+        best_distance = radius
+        for anchor in params.get("anchors", []):
             key = avwap_anchor_key(anchor)
             if key not in visible_keys:
                 continue
-            if (
-                _anchor_resolves_to_bar(series, anchor, event.bar_index)
-                and _anchor_y_hit_test(series, event.bar_index, event.y)
-            ):
-                return HitTestResult(
-                    extension_name=self.name(),
-                    handle_key=key,
-                    cursor="drag",
-                    priority=10,
-                )
-        return None
+            anchor_index = _anchor_bar_index(timestamps_ms, anchor.anchor_ts)
+            if anchor_index >= len(timestamps_ms):
+                continue
+            # The event's resolved bar is an exact match on any axis; the
+            # pixel radius applies to the bar-index x of the indexed chart.
+            distance = 0.0 if event.bar_index == anchor_index else abs(event.x - anchor_index)
+            if distance <= best_distance and _anchor_y_hit_test(series, anchor_index, event.y):
+                best_key = key
+                best_distance = distance
+        if best_key is None:
+            return None
+        return HitTestResult(
+            extension_name=self.name(),
+            handle_key=best_key,
+            cursor="drag",
+            priority=10,
+        )
 
     def begin_drag(
         self,
@@ -405,17 +406,55 @@ class AVWAPIndicator(ChartExtension):
 register_extension(AVWAPIndicator)
 
 
+def _too_far_back(
+    series: OHLCVSeries,
+    anchors: list[AnchorRecord],
+) -> list[AnchorRecord]:
+    """
+    Anchors an intraday chart does not draw: more than
+    _MAX_INTRADAY_ANCHOR_DAYS before its newest bar. Drawing them would load
+    years of intraday bars; daily and weekly charts draw them.
+    """
+    if not series.timeframe.is_intraday or not series.bars:
+        return []
+    cutoff_ms = int(
+        (
+            series.bars[-1].timestamp - timedelta(days=_MAX_INTRADAY_ANCHOR_DAYS)
+        ).timestamp()
+        * 1000
+    )
+    return [anchor for anchor in anchors if anchor.anchor_ts < cutoff_ms]
+
+
+def _too_far_back_notice(anchors: list[AnchorRecord]) -> str | None:
+    if not anchors:
+        return None
+    if len(anchors) == 1:
+        subject = f"AVWAP {anchors[0].label} is"
+        pronoun = "it shows"
+    else:
+        subject = f"{len(anchors)} AVWAPs are"
+        pronoun = "they show"
+    return (
+        f"{subject} anchored more than {_MAX_INTRADAY_ANCHOR_DAYS} days back, "
+        f"so {pronoun} only on daily and weekly charts."
+    )
+
+
 def _split_loaded_anchors(
     series: OHLCVSeries,
     params: dict[str, Any],
 ) -> tuple[list[AnchorRecord], list[AnchorRecord]]:
     """
     Split anchors into those computable on the loaded bars and those older
-    than the first loaded bar while older history is still loading. Once
-    history is complete every anchor is computable (an anchor older than the
-    whole window starts at bar 0, as before).
+    than the first loaded bar while older history can still arrive (the chart
+    loads it until it reaches them). Once nothing older exists every anchor is
+    computable (an anchor older than all history starts at bar 0).
     """
-    anchors: list[AnchorRecord] = params.get("anchors", [])
+    too_far_back = _too_far_back(series, params.get("anchors", []))
+    anchors: list[AnchorRecord] = [
+        anchor for anchor in params.get("anchors", []) if anchor not in too_far_back
+    ]
     if params.get("_history_complete", True) or not series.bars:
         return anchors, []
     first_ts_ms = int(series.bars[0].timestamp.timestamp() * 1000)
@@ -443,20 +482,43 @@ def avwap_anchor_for_key(
     return None
 
 
-def _anchor_resolves_to_bar(
-    series: OHLCVSeries,
-    anchor: AnchorRecord,
-    bar_index: int,
-) -> bool:
-    if bar_index < 0 or bar_index >= len(series.bars):
-        return False
-    bar_ts = int(series.bars[bar_index].timestamp.timestamp() * 1000)
-    if bar_ts < anchor.anchor_ts:
-        return False
-    if bar_index == 0:
-        return True
-    prev_ts = int(series.bars[bar_index - 1].timestamp.timestamp() * 1000)
-    return bool(prev_ts < anchor.anchor_ts)
+def _anchor_bar_index(timestamps_ms: np.ndarray, anchor_ts: int) -> int:
+    """
+    The bar an anchor's line starts on: the last bar opening at or before
+    anchor_ts (the bar containing it), 0 for an anchor older than every bar,
+    and len(timestamps_ms) for one at least a full bar past the newest bar.
+    Same rule as simplechart.api.timestamp_ms_to_bar_index, on an array.
+    """
+    n = len(timestamps_ms)
+    if n == 0:
+        return 0
+    index = int(np.searchsorted(timestamps_ms, anchor_ts, side="right")) - 1
+    if index < 0:
+        return 0
+    if index == n - 1 and n > 1 and anchor_ts > timestamps_ms[-1]:
+        last_step = int(timestamps_ms[-1] - timestamps_ms[-2])
+        if last_step > 0 and anchor_ts >= int(timestamps_ms[-1]) + last_step:
+            return n
+    return index
+
+
+def _avwap_from(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    volumes: np.ndarray,
+    start: int,
+    n: int,
+) -> np.ndarray:
+    values = np.full(n, np.nan)
+    if start >= n:
+        return values
+    volume = volumes[start:]
+    cum_volume = np.cumsum(volume)
+    cum_tp_volume = np.cumsum((highs[start:] + lows[start:] + closes[start:]) / 3.0 * volume)
+    traded = cum_volume > 0.0
+    values[start:][traded] = cum_tp_volume[traded] / cum_volume[traded]
+    return values
 
 
 def _anchor_target_is_duplicate(
@@ -465,10 +527,11 @@ def _anchor_target_is_duplicate(
     target_idx: int,
     moving_key: str | None,
 ) -> bool:
+    timestamps_ms = series_arrays(series).timestamps_ms
     for anchor in anchors:
         if moving_key is not None and avwap_anchor_key(anchor) == moving_key:
             continue
-        if _anchor_resolves_to_bar(series, anchor, target_idx):
+        if _anchor_bar_index(timestamps_ms, anchor.anchor_ts) == target_idx:
             return True
     return False
 
@@ -520,7 +583,7 @@ def _updated_drag_anchor(
     return AnchorRecord(
         symbol=anchor.symbol,
         anchor_ts=target_ts,
-        label=datetime.fromtimestamp(target_ts / 1000, tz=timezone.utc).strftime("%Y-%m-%d"),
+        label=_utc_from_ms(target_ts).strftime("%Y-%m-%d"),
         color=anchor.color,
         line_width=anchor.line_width,
         line_style=anchor.line_style,
@@ -545,3 +608,8 @@ def _copy_anchor(anchor: AnchorRecord) -> AnchorRecord:
 from indicators.avwap.anchor_store import AvwapAnchorStore  # noqa: E402
 
 register_store_handler(AvwapAnchorStore)
+
+
+def _utc_from_ms(timestamp_ms: int) -> datetime:
+    # Not datetime.fromtimestamp: it rejects times before 1970 on Windows.
+    return datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(milliseconds=timestamp_ms)

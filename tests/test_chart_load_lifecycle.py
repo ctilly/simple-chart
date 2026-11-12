@@ -52,6 +52,7 @@ def _finished_task_stub(request: Any) -> SimpleNamespace:
         thread=_FinishedThreadStub(),
         request=request,
         cancellation_event=threading.Event(),
+        older=False,
     )
 
 
@@ -89,6 +90,7 @@ def test_load_never_waits_for_running_fetch(
         thread=RunningThread(),
         request=active_request,
         cancellation_event=threading.Event(),
+        older=False,
     )
     generation_before_load = window._chart_load_generation
 
@@ -128,6 +130,7 @@ def test_stopping_data_workers_marks_every_chart_task_cancelled(
             request=request,
             thread=_FinishedThreadStub(),
             cancellation_event=cancellation_event,
+            older=False,
         )
     window._pending_chart_load = requests[0]
     started: list[Any] = []
@@ -730,7 +733,7 @@ def test_cancel_after_synthesis_preserves_existing_materialized_cache(
     assert materialization_calls == [True]
 
 
-def test_cancel_between_head_extension_and_tail_refresh_skips_tail(
+def test_cancel_between_tail_refresh_and_head_extension_skips_head(
     tmp_path: Any,
 ) -> None:
     cancelled = threading.Event()
@@ -790,19 +793,21 @@ def test_cancel_between_head_extension_and_tail_refresh_skips_tail(
                 now,
                 cancellation_event=cancelled,
             )
-        assert calls == [(history_start, coverage_start)]
+        # Wave 3 (W3-5): the tail, with its basis validation bars, is fetched
+        # before older history so a basis change is seen before any write.
+        assert calls == [(old_bar.timestamp, now)]
         assert cache.get_bar_fetch_coverage(
             namespace,
             "NVDA",
             Timeframe.MIN5,
-        ) == (int(history_start.timestamp() * 1000), coverage_end_ms)
+        ) == (coverage_start_ms, coverage_end_ms)
         assert cache.get_bars(
             namespace,
             "NVDA",
             Timeframe.MIN5,
             int(history_start.timestamp() * 1000),
             coverage_end_ms,
-        ) == [head_bar, old_bar]
+        ) == [old_bar]
 
 
 def test_fetch_worker_uses_completed_boundaries_for_repeat_load(

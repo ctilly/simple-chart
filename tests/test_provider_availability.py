@@ -203,3 +203,139 @@ def test_credential_secret_is_excluded_from_repr() -> None:
 
     assert "visible-key-id" not in repr(credentials)
     assert "hidden-api-secret" not in repr(credentials)
+
+
+def _backend_named(module: str, qualname: str, **attrs: object) -> _ProbeBackend:
+    # The preflight identifies the active keyring backend by its class's
+    # fully qualified name; give a probe backend the name of a real one.
+    cls = type(qualname.rsplit(".", 1)[-1], (_ProbeBackend,), dict(attrs))
+    cls.__module__ = module
+    cls.__qualname__ = qualname
+    return cls()  # type: ignore[no-any-return]
+
+
+def _keyring_module(active: object) -> ModuleType:
+    module = ModuleType("keyring")
+    module.get_keyring = lambda: active  # type: ignore[attr-defined]
+    module.get_password = active.get_password  # type: ignore[attr-defined]
+    module.set_password = active.set_password  # type: ignore[attr-defined]
+    module.delete_password = active.delete_password  # type: ignore[attr-defined]
+    return module
+
+
+def test_plaintext_keyring_backend_is_rejected_before_any_write() -> None:
+    plaintext = _backend_named("keyrings.alt.file", "PlaintextKeyring")
+
+    access = initialize_keyring_credential_store(
+        importer=lambda _name: _keyring_module(plaintext),
+    )
+
+    assert not access.available
+    assert access.reason == (
+        "The configured keyring backend is not an operating-system credential store."
+    )
+    assert plaintext.operations == []
+    with pytest.raises(CredentialStoreUnavailableError):
+        access.store.put("alpaca-paper", ProviderCredentials("key", "secret"))
+
+
+def test_chained_keyring_with_a_non_os_backend_is_rejected_before_any_write() -> None:
+    os_store = _backend_named("keyring.backends.SecretService", "Keyring")
+    plaintext = _backend_named("keyrings.alt.file", "PlaintextKeyring")
+    chainer = _backend_named(
+        "keyring.backends.chainer",
+        "ChainerBackend",
+        backends=[os_store, plaintext],
+    )
+
+    access = initialize_keyring_credential_store(
+        importer=lambda _name: _keyring_module(chainer),
+    )
+
+    assert not access.available
+    assert chainer.operations == []
+    assert os_store.operations == []
+    assert plaintext.operations == []
+
+
+def test_empty_keyring_chain_is_rejected() -> None:
+    chainer = _backend_named("keyring.backends.chainer", "ChainerBackend", backends=[])
+
+    access = initialize_keyring_credential_store(
+        importer=lambda _name: _keyring_module(chainer),
+    )
+
+    assert not access.available
+    assert chainer.operations == []
+
+
+@pytest.mark.parametrize(
+    ("module", "qualname"),
+    [
+        ("keyring.backends.SecretService", "Keyring"),
+        ("keyring.backends.libsecret", "Keyring"),
+        ("keyring.backends.kwallet", "DBusKeyring"),
+        ("keyring.backends.kwallet", "DBusKeyringKWallet4"),
+        ("keyring.backends.macOS", "Keyring"),
+        ("keyring.backends.Windows", "WinVaultKeyring"),
+    ],
+)
+def test_os_keyring_backends_pass_the_preflight(module: str, qualname: str) -> None:
+    backend = _backend_named(module, qualname)
+
+    access = initialize_keyring_credential_store(
+        importer=lambda _name: _keyring_module(backend),
+    )
+
+    assert access.available
+    assert backend.operations == ["set", "get", "delete"]
+
+
+def test_chain_of_os_keyring_backends_passes_the_preflight() -> None:
+    secret_service = _backend_named("keyring.backends.SecretService", "Keyring")
+    kwallet = _backend_named("keyring.backends.kwallet", "DBusKeyring")
+    chainer = _backend_named(
+        "keyring.backends.chainer",
+        "ChainerBackend",
+        backends=[secret_service, kwallet],
+    )
+
+    access = initialize_keyring_credential_store(
+        importer=lambda _name: _keyring_module(chainer),
+    )
+
+    assert access.available
+    assert chainer.operations == ["set", "get", "delete"]
+
+
+def test_keyring_backend_resolution_failure_disables_the_store() -> None:
+    # A bad PYTHON_KEYRING_BACKEND or keyringrc.cfg makes get_keyring() raise.
+    def failing_get_keyring() -> object:
+        raise RuntimeError("backend cannot run here")
+
+    module = ModuleType("keyring")
+    module.get_keyring = failing_get_keyring  # type: ignore[attr-defined]
+
+    access = initialize_keyring_credential_store(importer=lambda _name: module)
+
+    assert not access.available
+    assert access.reason == "The operating-system credential store is unavailable."
+    with pytest.raises(CredentialStoreUnavailableError):
+        access.store.get("alpaca-paper")
+
+
+def test_store_writes_through_the_backend_that_passed_the_preflight() -> None:
+    checked = _backend_named("keyring.backends.SecretService", "Keyring")
+    replaced = _ProbeBackend()
+    module = _keyring_module(checked)
+    # Module-level functions re-resolve the active backend on every call; a
+    # later keyring.set_keyring() must not redirect credential writes.
+    module.set_password = replaced.set_password  # type: ignore[attr-defined]
+    module.get_password = replaced.get_password  # type: ignore[attr-defined]
+    module.delete_password = replaced.delete_password  # type: ignore[attr-defined]
+
+    access = initialize_keyring_credential_store(importer=lambda _name: module)
+    access.store.put("alpaca-paper", ProviderCredentials("key", "secret"))
+
+    assert replaced.operations == []
+    assert ("simplechart.provider-credentials", "alpaca-paper") in checked.passwords

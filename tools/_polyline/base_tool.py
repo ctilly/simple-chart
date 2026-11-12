@@ -25,6 +25,7 @@ from simplechart.api import (
     MarkerRender,
     OHLCVSeries,
     PolylineRender,
+    series_arrays,
 )
 
 _DEFAULT_COLOR = "#8b5a2b"
@@ -527,7 +528,8 @@ def _parse_handle(handle_key: str) -> tuple[str, str, int]:
 
 
 def _series_timestamps(series: OHLCVSeries) -> list[int]:
-    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+    timestamps: list[int] = series_arrays(series).timestamps_ms.tolist()
+    return timestamps
 
 
 def _timestamp_to_index(timestamp_ms: int, timestamps: list[int]) -> float:

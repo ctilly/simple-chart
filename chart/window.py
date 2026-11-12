@@ -27,11 +27,13 @@ finplot integration:
     height ratio is set via pyqtgraph's row stretch factors.
 """
 
+import math
 from collections.abc import Callable
+from typing import Any, cast
 
 import finplot as fplt
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
@@ -40,13 +42,15 @@ from chart.legend import ChartLegend
 from chart.panel import ExtensionPanelSlot, Panel, PanelType
 from chart.plot_manager import PlotManager
 from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
-from chart.viewport import install_extension_panel_behavior, install_viewport_behavior, reset_viewports, sync_x_axis_labels
+from chart.viewport import install_extension_panel_behavior, install_time_label_conversion, install_viewport_behavior, reset_viewports, sync_x_axis_labels
 from data.errors import UserFacingError
 from simplechart.api import ToolIconSpec
 
 # Bars shown by the initial view of a freshly loaded chart. The controller sizes
 # the recent-first history window from this.
 INITIAL_VISIBLE_BARS = 200
+# Quiet time after the last x-range change before asking for older history.
+_OLDER_HISTORY_SETTLE_MS = 150
 
 
 class ExtensionPanelLimitError(UserFacingError, RuntimeError):
@@ -84,6 +88,10 @@ class ChartWidget(QWidget):
         legend         — add/remove/toggle extension labels
         interactions   — register click handlers
     """
+
+    # Bars the view wants left of the oldest loaded bar (see
+    # older_history_bars_wanted), after the view settles.
+    older_history_wanted: pyqtSignal = pyqtSignal(int)
 
     def __init__(
         self,
@@ -167,6 +175,7 @@ class ChartWidget(QWidget):
         )
 
         install_viewport_behavior(price_ax, volume_ax)
+        install_time_label_conversion()
 
         self._price_panel  = Panel(price_ax,  PanelType.PRICE,  ratio=4)
         self._volume_panel = Panel(volume_ax, PanelType.VOLUME, ratio=1)
@@ -201,6 +210,26 @@ class ChartWidget(QWidget):
             self._extension_slots,
         )
         self._interactions = ChartInteractions(self._price_panel.ax, self._master)
+        # Any change of the visible x-range (pan, zoom, wheel, gesture or a
+        # programmatic restore) is checked once it has settled.
+        self._price_viewbox = self._price_panel.ax.vb
+        self._older_history_timer = QTimer(self)
+        self._older_history_timer.setSingleShot(True)
+        self._older_history_timer.setInterval(_OLDER_HISTORY_SETTLE_MS)
+        self._older_history_timer.timeout.connect(self._check_older_history)
+        self._price_viewbox.sigXRangeChanged.connect(
+            lambda *_args: self._older_history_timer.start()
+        )
+        # finplot redraws a candle or volume item's cached picture only while
+        # it overlaps the view; after a large jump (trackpad fling, a range
+        # set in code, an older-history merge) it must be redrawn here.
+        self._stale_picture_timer = QTimer(self)
+        self._stale_picture_timer.setSingleShot(True)
+        self._stale_picture_timer.setInterval(0)
+        self._stale_picture_timer.timeout.connect(self._repaint_stale_pictures)
+        self._price_viewbox.sigXRangeChanged.connect(
+            lambda *_args: self._stale_picture_timer.start()
+        )
 
     def _install_shortcuts(self) -> None:
         reset_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
@@ -239,6 +268,46 @@ class ChartWidget(QWidget):
 
     def set_active_drawing_tool(self, tool_name: str | None) -> None:
         self._legend.set_active_drawing_tool(tool_name)
+
+    def older_history_bars_wanted(self) -> int:
+        """
+        How many bars of older history the price view wants: the gap from
+        its left edge to the oldest loaded bar (x = 0) plus one view-width,
+        once the left edge is within one view-width of that bar; else 0.
+        """
+        rect = self._price_viewbox.viewRect()
+        left, width = float(rect.left()), float(rect.width())
+        if width <= 0 or left >= width:
+            return 0
+        return math.ceil(max(0.0, -left) + width)
+
+    def _repaint_stale_pictures(self) -> None:
+        """
+        Redraw each finplot candle or volume item whose cached picture lies
+        entirely outside the visible x-range while bars exist there: Qt would
+        never call its paint() again (what Home/End otherwise repair).
+        """
+        view = self._price_viewbox.viewRect()
+        left, right = float(view.left()), float(view.right())
+        for ax in self._all_axes():
+            for item in list(cast(Any, ax).items):
+                if not isinstance(item, fplt.FinPlotItem) or not item.isVisible():
+                    continue
+                data_bars = item.datasrc.xlen
+                if right < 0 or left > data_bars:
+                    continue  # no bars in view: nothing to draw
+                drawn = item.boundingRect()
+                if item.cachedRect is not None and not (
+                    right < drawn.left() or left > drawn.right()
+                ):
+                    continue
+                fplt._start_visual_update(item)
+                fplt._end_visual_update(item)
+
+    def _check_older_history(self) -> None:
+        bars_wanted = self.older_history_bars_wanted()
+        if bars_wanted > 0:
+            self.older_history_wanted.emit(bars_wanted)
 
     def reset_viewport(self) -> None:
         reset_viewports(self._price_panel.ax, self._volume_panel.ax)

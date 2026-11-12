@@ -101,7 +101,16 @@ matter": not rendered or hit-tested until the full window arrives.
 Timestamp-anchored extensions can return 0 instead, skip anchors older than
 the first loaded bar while params["_history_complete"] is False, and set
 ChartExtensionRender.pending_history_start_ms to the newest skipped anchor
-timestamp (UTC ms) so the chart re-renders once history reaches it.
+timestamp (UTC ms). params["_history_complete"] is False while older bars can
+still arrive (a load filling in history, or older history the chart can load
+on demand); the chart then loads older history until it reaches the anchor
+and re-renders. It is True only once nothing older exists, when such an
+anchor starts at the first bar.
+
+ChartExtensionRender.notice is a short status-bar message about content the
+extension chose not to draw on this chart (for example an AVWAP anchored too
+far back for an intraday chart); the chart clears it once no extension
+reports one.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXPORTS
@@ -146,6 +155,10 @@ EXPORTS
   Bar                          Single OHLCV bar
   bars_for_n_days              Convert a day count to a bar count for a timeframe
   timestamp_ms_to_bar_index    Convert a UTC ms timestamp to a bar index
+  series_arrays                Read-only NumPy arrays of a series' timestamps,
+                               prices and volumes, built once per series and
+                               cached; treat series.bars as immutable
+  SeriesArrays                 Return type of series_arrays()
 """
 
 from simplechart.extensions._base import (
@@ -182,6 +195,10 @@ from simplechart.extensions._registry import (
     register_extension,
 )
 from simplechart.extensions._store_registry import register_store_handler
+from simplechart.extensions._series_arrays import (
+    SeriesArrays,               # read-only NumPy views of a series' bars
+    series_arrays,              # series_arrays(series) -> SeriesArrays, built once per series
+)
 from simplechart.extensions._drawing_store import (
     AxisPolicy,                 # FIXED_ON | FIXED_OFF | USER per persistence axis
     DrawingStore,               # generic per-tool persistence store base
@@ -225,6 +242,7 @@ __all__: list[str] = [
     "OHLCVSeries",
     "PolylineRender",
     "RENDER_CHART",
+    "SeriesArrays",
     "SeriesRender",
     "ToolIconLine",
     "ToolIconSpec",
@@ -232,6 +250,7 @@ __all__: list[str] = [
     "bars_for_n_days",
     "register_extension",
     "register_store_handler",
+    "series_arrays",
     "all_extensions",
     "get_extension",
     "timestamp_ms_to_bar_index",

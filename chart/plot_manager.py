@@ -59,6 +59,7 @@ from simplechart.api import (
     MarkerRender,
     PolylineRender,
     VerticalLineRender,
+    series_arrays,
 )
 
 _LINE_STYLES: dict[str, Qt.PenStyle] = {
@@ -592,21 +593,22 @@ class PlotManager:
 # Private helpers — data formatting for finplot
 # ------------------------------------------------------------------
 
+_DAY_MS = 86_400_000
+_HALF_DAY_MS = 43_200_000
+
+
 def _bar_datetime_index(series: OHLCVSeries) -> pd.Index:
     """
-    Return the UTC DatetimeIndex finplot uses as the source x-axis.
+    Return the UTC DatetimeIndex finplot uses as the source x-axis. Daily
+    and weekly bars sit at 12:00 UTC of their UTC date.
     """
-    timestamps: list[pd.Timestamp] = []
-    for bar in series.bars:
-        timestamp = pd.Timestamp(bar.timestamp)
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.tz_localize("UTC")
-        else:
-            timestamp = timestamp.tz_convert("UTC")
-        if series.timeframe in (Timeframe.DAILY, Timeframe.WEEKLY):
-            timestamp = timestamp.normalize() + pd.Timedelta(hours=12)
-        timestamps.append(timestamp)
-    return pd.DatetimeIndex(timestamps, dtype="datetime64[ns, UTC]")
+    timestamps_ms = series_arrays(series).timestamps_ms
+    if series.timeframe in (Timeframe.DAILY, Timeframe.WEEKLY):
+        timestamps_ms = timestamps_ms // _DAY_MS * _DAY_MS + _HALF_DAY_MS
+    return pd.DatetimeIndex(
+        pd.to_datetime(timestamps_ms, unit="ms", utc=True),
+        dtype="datetime64[ns, UTC]",
+    )
 
 
 def _series_to_candle_df(series: OHLCVSeries) -> pd.DataFrame:
@@ -614,15 +616,15 @@ def _series_to_candle_df(series: OHLCVSeries) -> pd.DataFrame:
     Build the DataFrame finplot expects for candlestick_ochl().
     Column order is OCHL — finplot's required convention.
     """
-    idx = _bar_datetime_index(series)
+    arrays = series_arrays(series)
     return pd.DataFrame(
         {
-            "open":  [b.open  for b in series.bars],
-            "close": [b.close for b in series.bars],
-            "high":  [b.high  for b in series.bars],
-            "low":   [b.low   for b in series.bars],
+            "open": arrays.open,
+            "close": arrays.close,
+            "high": arrays.high,
+            "low": arrays.low,
         },
-        index=idx,
+        index=_bar_datetime_index(series),
     )
 
 
@@ -630,14 +632,14 @@ def _series_to_volume_df(series: OHLCVSeries) -> pd.DataFrame:
     """
     Build the DataFrame finplot expects for volume_ocv().
     """
-    idx = _bar_datetime_index(series)
+    arrays = series_arrays(series)
     return pd.DataFrame(
         {
-            "open":   [b.open   for b in series.bars],
-            "close":  [b.close  for b in series.bars],
-            "volume": [b.volume for b in series.bars],
+            "open": arrays.open,
+            "close": arrays.close,
+            "volume": arrays.volume.astype(np.int64),
         },
-        index=idx,
+        index=_bar_datetime_index(series),
     )
 
 

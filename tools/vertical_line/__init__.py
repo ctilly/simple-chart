@@ -12,6 +12,7 @@ from simplechart.api import (
     VerticalLineRender,
     register_extension,
     register_store_handler,
+    series_arrays,
 )
 
 _DEFAULT_AGE_OFF_DAYS = 60.0
@@ -66,7 +67,8 @@ class VerticalLineIndicator(VerticalLineShape, LineTool[VerticalLineRecord]):
 
 
 def _series_timestamps(series: OHLCVSeries) -> list[int]:
-    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+    timestamps: list[int] = series_arrays(series).timestamps_ms.tolist()
+    return timestamps
 
 
 def _timestamp_to_nearest_index(

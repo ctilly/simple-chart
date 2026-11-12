@@ -23,7 +23,7 @@ There are three layers involved in chart extensions:
 
   3. The plugin registry (simplechart/extensions/_registry.py)
      - Maps extension names to ChartExtension classes
-     - All extensions are registered at import time via register()
+     - All extensions are registered at import time via register_extension()
      - simplechart.plugins imports plugin modules so registration runs
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -261,6 +261,9 @@ class ChartExtensionRender:
     # Newest timestamp (UTC ms) of content omitted because older history is
     # still loading; the chart re-renders once loaded history reaches it.
     pending_history_start_ms: int | None = None
+    # Short text the chart shows in its status bar, e.g. why content is not
+    # drawn on this chart. None when there is nothing to say.
+    notice: str | None = None
 
 
 @dataclass(frozen=True)
@@ -597,8 +600,10 @@ class ChartExtension(ABC):
         Return 0 when output on a truncated series is exact (price-only lines,
         values computed from daily reference bars). Extensions with
         timestamp-anchored content can return 0, omit anchors older than the
-        first loaded bar while params["_history_complete"] is False, and report
-        them through ChartExtensionRender.pending_history_start_ms.
+        first loaded bar while params["_history_complete"] is False (older bars
+        can still arrive, from a running load or on demand), and report them
+        through ChartExtensionRender.pending_history_start_ms; the chart loads
+        older history until it reaches them.
         """
         return None
 

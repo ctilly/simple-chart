@@ -1,5 +1,6 @@
 from collections.abc import Mapping
-from datetime import UTC, datetime
+import logging
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
@@ -346,6 +347,26 @@ def test_provider_failures_are_isolated_and_sanitized() -> None:
     assert "synthetic-secret" not in repr(result)
 
 
+def test_unexpected_provider_failure_is_logged_without_exception_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    factory = _ProviderFactory(
+        {
+            "alpaca:delayed_sip": _Provider([_bar()]),
+            "alpaca:iex": _Provider(error=RuntimeError("sentinel-text")),
+            "yfinance": _Provider([_bar()]),
+        }
+    )
+    caplog.set_level(logging.DEBUG, logger="app.bar_comparison")
+
+    _service(factory).compare("alpaca:delayed_sip", "SPY", Timeframe.DAILY, _bar())
+
+    records = [r for r in caplog.records if r.name == "app.bar_comparison"]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "RuntimeError" in records[0].getMessage()
+    assert "sentinel-text" not in caplog.text
+
+
 def test_provider_construction_error_is_sanitized() -> None:
     factory = _ProviderFactory(
         {
@@ -573,3 +594,28 @@ def _bar(
     low: float = 685.77,
 ) -> Bar:
     return Bar(timestamp, 685.9, 693.21, low, 691.7, 79_286_521, 691.25)
+
+
+class _LimitedProvider(_Provider):
+    def earliest_history_start(
+        self,
+        timeframe: Timeframe,
+        end: datetime,
+    ) -> datetime | None:
+        return end - timedelta(days=55) if timeframe.is_intraday else None
+
+
+def test_bar_older_than_the_provider_window_reports_it_without_a_request() -> None:
+    old = datetime.now(UTC) - timedelta(days=120)
+    cached = _bar(timestamp=old.replace(second=0, microsecond=0))
+    yahoo = _LimitedProvider([cached])
+    factory = _ProviderFactory({"yfinance": yahoo})
+
+    result = _service(factory, credentials=False).compare(
+        "yfinance", "SPY", Timeframe.MIN5, cached,
+    )
+
+    refreshed = _row(result, "yfinance", refreshed=True)
+    assert refreshed.bar is None
+    assert refreshed.error == "This bar is older than the source provides."
+    assert yahoo.calls == []

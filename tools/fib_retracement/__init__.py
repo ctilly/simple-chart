@@ -29,6 +29,7 @@ from simplechart.api import (
     ToolIconSpec,
     register_extension,
     register_store_handler,
+    series_arrays,
 )
 
 _ANCHOR_MODE_OPTIONS: list[str] = ["swing_wick", "close"]
@@ -604,7 +605,8 @@ def _configured_drawing(
 
 
 def _series_timestamps(series: OHLCVSeries) -> list[int]:
-    return [int(bar.timestamp.timestamp() * 1000) for bar in series.bars]
+    timestamps: list[int] = series_arrays(series).timestamps_ms.tolist()
+    return timestamps
 
 
 def _timestamp_to_exact_index(timestamp_ms: int, timestamps: list[int]) -> int | None:

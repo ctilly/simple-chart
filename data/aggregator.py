@@ -92,7 +92,7 @@ class Aggregator:
             start,
             end,
         )
-        return _resample(base_bars, timeframe)
+        return resample(base_bars, timeframe)
 
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         return self._provider.fetch_snapshots(symbols)
@@ -173,7 +173,7 @@ class Aggregator:
     ) -> list[Bar]:
         if self.native_timeframe(target) == target:
             raise ValueError(f"Cannot synthesize native timeframe {target!r}.")
-        return _resample(bars, target)
+        return resample(bars, target)
 
 
 # ------------------------------------------------------------------
@@ -200,7 +200,7 @@ def _select_base(target: Timeframe, available: list[Timeframe]) -> Timeframe:
 # Resampling
 # ------------------------------------------------------------------
 
-def _resample(bars: list[Bar], target: Timeframe) -> list[Bar]:
+def resample(bars: list[Bar], target: Timeframe) -> list[Bar]:
     """
     Resample a list of bars into a larger timeframe.
 

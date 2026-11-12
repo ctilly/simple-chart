@@ -16,9 +16,10 @@ Note: the file is named yfinance_provider.py (not yfinance.py) to avoid
 shadowing the yfinance package on import.
 """
 
+import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Never, cast
 
 import pandas as pd
@@ -26,8 +27,9 @@ import yfinance as yf
 from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFPricesMissingError, YFRateLimitError
 
-from data.errors import http_status
+from data.errors import describe, http_status
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
+from data.timestamps import ms_to_datetime
 from data.provider.base import (
     DataProvider,
     HistoryUnavailableError,
@@ -52,6 +54,8 @@ _TIMEFRAME_MAP: dict[Timeframe, str] = {
     Timeframe.DAILY:  "1d",
     Timeframe.WEEKLY: "1wk",
 }
+
+_LOGGER = logging.getLogger(__name__)
 
 # What yfinance's history raises for a failed request: its own rate-limit
 # error and curl_cffi's transport and HTTP errors.
@@ -139,7 +143,9 @@ class YFinanceProvider(DataProvider):
             return None
         try:
             info = yf.Ticker(normalized).info
-        except Exception:
+        except Exception as exc:
+            # DEBUG: the Level 1 poll repeats this while the network is down.
+            _LOGGER.debug("Yahoo Level 1 quote request failed: %s", describe(exc))
             return None
         return _level1_from_info(normalized, info)
 
@@ -410,7 +416,7 @@ def _optional_timestamp(value: object) -> datetime | None:
         return None
     if timestamp > 10_000_000_000:
         timestamp = timestamp / 1000
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return ms_to_datetime(round(timestamp * 1000))
 
 
 def _rows_to_bars(

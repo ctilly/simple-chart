@@ -60,6 +60,8 @@ class ChartExtensionRuntime:
         self._cache_namespace = cache_namespace
         self._deferred_names: set[str] = set()
         self._history_complete = True
+        # Older bars than the loaded series can still be loaded on demand.
+        self._older_history_may_arrive = False
         self._pending_history_ms: dict[str, int] = {}
         self._drag_state: ChartExtensionState | None = None
         self._drag_session: DragSession | None = None
@@ -73,6 +75,15 @@ class ChartExtensionRuntime:
 
     def set_cache_namespace(self, cache_namespace: str) -> None:
         self._cache_namespace = cache_namespace
+
+    def set_older_history_may_arrive(self, may_arrive: bool) -> None:
+        """
+        Whether history older than the loaded series can still be loaded.
+        While it can, anchored extensions treat anchors older than the first
+        loaded bar as pending (see _history_complete) instead of computing
+        them from the first loaded bar.
+        """
+        self._older_history_may_arrive = may_arrive
 
     @property
     def pending_history_start_ms(self) -> int | None:
@@ -146,11 +157,15 @@ class ChartExtensionRuntime:
         # never into the persisted ext_state.params — otherwise the full bar list
         # rides into per-symbol saved state and gets deep-copied on every switch.
         # _history_complete tells anchored extensions whether bars older than
-        # the loaded series may still arrive.
+        # the loaded series may still arrive: from a running backfill, or by
+        # loading older history on demand.
+        anchored_complete = (
+            self._history_complete and not self._older_history_may_arrive
+        )
         params = {
             **ext_state.params,
             "_daily_bars": daily_bars,
-            "_history_complete": self._history_complete,
+            "_history_complete": anchored_complete,
         }
         render = call_extension(ext_state.name, extension.render, series, params)
         if render is None:
@@ -177,8 +192,9 @@ class ChartExtensionRuntime:
         ] + [
             label.key for label in render.axis_price_labels
         ]
-        # Content omitted while history loads keeps its saved visibility.
-        if self._history_complete:
+        # Content omitted while history loads keeps its saved visibility;
+        # keys of an extension with nothing pending are pruned.
+        if self._history_complete and render.pending_history_start_ms is None:
             ext_state.series_visibility = {
                 key: ext_state.series_visibility[key]
                 for key in ext_state.series_keys
@@ -681,9 +697,13 @@ class ChartExtensionRuntime:
         if not series.timeframe.is_intraday:
             return []
         now = datetime.now(tz=timezone.utc)
-        start_ms = int(
-            (now - timedelta(days=self._lookback_days)).timestamp() * 1000
-        )
+        lookback = timedelta(days=self._lookback_days)
+        # Reaches back past the series start too: older intraday history
+        # loaded by panning needs older daily references.
+        start = now - lookback
+        if series.bars:
+            start = min(start, series.bars[0].timestamp - lookback)
+        start_ms = int(start.timestamp() * 1000)
         end_ms = int(now.timestamp() * 1000)
         return self._cache.get_bars(
             self._cache_namespace,

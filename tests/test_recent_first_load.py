@@ -28,6 +28,9 @@ from data.session import exchange_day_start, is_regular_session_timestamp
 
 UTC = timezone.utc
 _SPAN = timedelta(days=30)
+# A tail refresh re-fetches the forming bar and, for basis validation
+# (Wave 3), the last two cached sessions: it starts within a few days of now.
+_TAIL_LOOKBACK = timedelta(days=4)
 _NOW = datetime(2026, 6, 10, 18, 2, 41, tzinfo=UTC)
 _BASE_THREADS = threading.active_count()
 _INTRADAY = (
@@ -294,7 +297,7 @@ def test_cold_paged_load_renders_recent_first_then_matches_single_pass(
     fetched = Timeframe.MIN15 if timeframe == Timeframe.MIN15 else Timeframe.MIN5
     history_calls = [call for call in paged.calls if call[0] == fetched]
     # During an open session every load re-fetches the forming bar's tail.
-    tail_calls = [call for call in history_calls if call[1] >= _end - timedelta(hours=1)]
+    tail_calls = [call for call in history_calls if call[1] >= _end - _TAIL_LOOKBACK]
     recent_calls = [
         call for call in history_calls
         if call[1] >= recent_start and call not in tail_calls
@@ -325,7 +328,7 @@ def test_warm_paged_load_is_single_phase(
     # Only the open session's forming-bar tail refresh, as before this change.
     history_calls = [call for call in provider.calls if call[0] == Timeframe.MIN5]
     assert len(history_calls) == 1
-    assert history_calls[0][1] >= _NOW - timedelta(hours=1)
+    assert history_calls[0][1] >= _NOW - _TAIL_LOOKBACK
 
 
 def test_non_paged_provider_is_single_phase(
@@ -450,7 +453,7 @@ def test_recent_window_requests_are_foreground_and_backfill_is_background(
 
     assert errors == [] and len(recent) == 1 and len(finished) == 1
     history = [entry for entry in provider.priorities if entry[0] == Timeframe.MIN5]
-    phase_one = [entry for entry in history if entry[1] >= recent_start and entry[1] < end - timedelta(hours=1)]
+    phase_one = [entry for entry in history if entry[1] >= recent_start and entry[1] < end - _TAIL_LOOKBACK]
     backfill = [entry for entry in history if entry[2] <= recent_start]
     assert len(phase_one) >= 2  # the 55/35-day recent window spans several chunks
     assert not any(entry[3] for entry in phase_one)

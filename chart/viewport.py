@@ -29,6 +29,7 @@ from typing import Protocol, cast
 from weakref import WeakKeyDictionary
 
 import finplot as fplt
+import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QNativeGestureEvent
@@ -288,6 +289,32 @@ def _patch_extension_axis_format(extension_ax: object) -> None:
         )
 
     right_axis._simplechart_ext_fmt_patch = True
+
+
+def install_time_label_conversion() -> None:
+    """
+    Format axis and crosshair times through pandas instead of finplot's
+    datetime.fromtimestamp, which rejects times before 1970 on Windows.
+    """
+    fplt._x2local_t = _x2local_t
+
+
+def _x2local_t(datasrc: object, x: float) -> tuple[str, bool]:
+    if fplt.display_timezone is None:
+        return cast(tuple[str, bool], fplt._x2utc(datasrc, x))
+
+    def to_text(t: int) -> str:
+        if t < 0:
+            # Before 1970 only daily and weekly bars exist (12:00 UTC); a local
+            # zone lookup (dateutil's tzlocal) fails there on Windows.
+            utc = pd.Timestamp(int(t), unit="ns")
+            return cast(str, fplt._millisecond_tz_wrap(utc.strftime(fplt.timestamp_format)))
+        local = pd.Timestamp(int(t), unit="ns", tz="UTC").tz_convert(
+            fplt.display_timezone
+        )
+        return cast(str, fplt._millisecond_tz_wrap(local.strftime(fplt.timestamp_format)))
+
+    return cast(tuple[str, bool], fplt._x2t(datasrc, x, to_text))
 
 
 def install_viewport_behavior(price_ax: object, volume_ax: object) -> None:

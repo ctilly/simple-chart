@@ -34,7 +34,8 @@ from app.bar_comparison import (
 )
 from app.dialogs import build_dialog_content, show_information, show_warning
 from app.errors import ErrorContext, report_error
-from data.cache import Cache
+from data.errors import describe
+from data.cache import Cache, IdenticalCorrectionError
 from data.calendar import MARKET_TIMEZONE
 from data.models import Bar, BarCorrection, BarInspection, Timeframe
 
@@ -65,6 +66,8 @@ _COMPARISON_FIELDS: dict[int, BarField] = {
     5: "volume",
 }
 _SYNTHESIZED_TIMEFRAMES = (Timeframe.MIN39, Timeframe.MIN65)
+# Every supported data source synthesizes them from 5m bars.
+_SYNTHESIS_BASE = Timeframe.MIN5
 _PROVIDER_REVISION_COLOR = QColor("#fff3cd")
 _CORROBORATION_COLOR = QColor("#d9ead3")
 _REFRESH_STATUS_STYLE = """
@@ -107,11 +110,14 @@ class BarComparisonServiceLike(Protocol):
 class SymbolRefreshPlan:
     """
     What refreshing one symbol from its source replaces, as of planning.
+    ``hides_older_intraday`` is true when the source limits intraday history,
+    so cached intraday bars older than ``intraday_days`` stop being shown.
     ``refresh`` starts the refresh.
     """
 
     intraday_days: int
     daily_since: date
+    hides_older_intraday: bool
     refresh: Callable[[], None]
 
 
@@ -198,7 +204,8 @@ class _ComparisonWorker(QObject):
                 self._request.cached_bar,
                 should_cancel=thread.isInterruptionRequested,
             )
-        except Exception:
+        except Exception as exc:
+            _LOGGER.warning("Source comparison failed: %s", describe(exc))
             self.failed.emit(self._request, "The source comparison failed.")
             return
         self.completed.emit(self._request, result)
@@ -984,6 +991,9 @@ class DataQualityTab(QWidget):
                 inspection.timeframe,
                 inspection.raw_bar.timestamp,
                 refreshed_bar,
+                _SYNTHESIZED_TIMEFRAMES
+                if inspection.timeframe == _SYNTHESIS_BASE
+                else (),
             )
         except ValueError as exc:
             context = ErrorContext(
@@ -1072,20 +1082,20 @@ class DataQualityTab(QWidget):
         )
         try:
             self._cache.put_bar_correction(correction)
+        except IdenticalCorrectionError:
+            show_information(
+                self,
+                "No Correction",
+                "The edited values match the provider bar.",
+            )
+            return
         except ValueError as exc:
-            if "must differ" in str(exc):
-                show_information(
-                    self,
-                    "No Correction",
-                    "The edited values match the provider bar.",
-                )
-            else:
-                context = ErrorContext("Saving the bar correction")
-                show_warning(
-                    self,
-                    "Invalid Correction",
-                    report_error(_LOGGER, exc, context),
-                )
+            context = ErrorContext("Saving the bar correction")
+            show_warning(
+                self,
+                "Invalid Correction",
+                report_error(_LOGGER, exc, context),
+            )
             return
         self._refresh_selected_row()
         self.bars_changed.emit()
@@ -1148,10 +1158,17 @@ class SymbolRefreshDialog(QDialog):
         self.setMinimumWidth(460)
         layout = build_dialog_content(self, "symbolRefreshDialog", title)
 
+        source = _source_label(cache_namespace)
+        hidden = (
+            "Cached intraday data older than that will no longer be shown, "
+            f"because {source} does not provide it. "
+            if plan.hides_older_intraday
+            else ""
+        )
         message = QLabel(
             f"{plan.intraday_days} days of intraday data and daily history "
             f"since {plan.daily_since.year} can safely be refreshed from "
-            f"{_source_label(cache_namespace)}. Proceed?",
+            f"{source}. {hidden}Proceed?",
             self,
         )
         message.setObjectName("symbolRefreshMessage")

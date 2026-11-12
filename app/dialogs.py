@@ -5,6 +5,7 @@ from enum import Enum
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPalette
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -15,6 +16,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from data.adjustment import BasisChangeChoice
 
 
 class MessageKind(Enum):
@@ -246,3 +249,77 @@ def _shade(
     light: bool,
 ) -> QColor:
     return color.darker(darker_factor) if light else color.lighter(lighter_factor)
+
+
+class BasisChangeDialog(QDialog):
+    """
+    Asks whether to rescale or discard cached history that a data source
+    has moved to a new adjustment basis but no longer returns.
+    """
+
+    def __init__(self, message: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._choice: BasisChangeChoice | None = None
+        title = "Price History Adjusted"
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(680)
+        layout = build_dialog_content(self, "basisChangeDialog", title)
+
+        text = QLabel(message, self)
+        text.setObjectName("basisChangeMessage")
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        help_text = QLabel(
+            "Rescaling keeps the older bars and adjusts their prices and "
+            "volumes to match. Drawings at fixed prices are not moved.",
+            self,
+        )
+        help_text.setObjectName("basisChangeHelp")
+        help_text.setWordWrap(True)
+        layout.addWidget(help_text)
+        self._remember = QCheckBox("Remember my choice", self)
+        self._remember.setObjectName("basisChangeRemember")
+        self._remember.setToolTip("You can change it later in Settings, UI.")
+        layout.addWidget(self._remember)
+
+        buttons = QDialogButtonBox(self)
+        buttons.setObjectName("basisChangeButtons")
+        rescale = buttons.addButton(
+            "Rescale",
+            QDialogButtonBox.ButtonRole.AcceptRole,
+        )
+        discard = buttons.addButton(
+            "Discard",
+            QDialogButtonBox.ButtonRole.DestructiveRole,
+        )
+        assert rescale is not None and discard is not None
+        rescale.setObjectName("basisChangeRescale")
+        discard.setObjectName("basisChangeDiscard")
+        rescale.clicked.connect(
+            lambda: self._choose(BasisChangeChoice.RESCALE)
+        )
+        discard.clicked.connect(
+            lambda: self._choose(BasisChangeChoice.DISCARD)
+        )
+        layout.addWidget(buttons)
+
+    def answer(self) -> tuple[BasisChangeChoice, bool] | None:
+        if self._choice is None:
+            return None
+        return (self._choice, self._remember.isChecked())
+
+    def _choose(self, choice: BasisChangeChoice) -> None:
+        self._choice = choice
+        self.accept()
+
+
+def ask_basis_change_choice(
+    parent: QWidget | None,
+    message: str,
+) -> tuple[BasisChangeChoice, bool] | None:
+    """The chosen action and whether to remember it; None when dismissed."""
+    dialog = BasisChangeDialog(message, parent)
+    dialog.exec()
+    return dialog.answer()

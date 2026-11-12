@@ -6,6 +6,7 @@
 --   bars              — cached OHLCV data from the data provider
 --   bar_corrections    — user-authored overrides for cached provider bars
 --   bar_fetch_coverage — successfully requested bar-data intervals
+--   basis_changes     — cached history on an outdated adjustment basis
 --   extension_records — plugin-owned persisted records
 --   watchlist         — user-curated symbols
 --   provider_connections — non-secret data-provider configuration
@@ -83,6 +84,27 @@ CREATE TABLE IF NOT EXISTS bar_fetch_coverage (
     end_timestamp   INTEGER NOT NULL,
 
     PRIMARY KEY (cache_namespace, symbol, timeframe)
+);
+
+
+-- basis changes
+-- ----------------------------------------------------------------------------
+-- Cached bars a provider has since moved to a new adjustment basis (a split
+-- or dividend) and no longer returns: [old_coverage_start, boundary_timestamp)
+-- of one native timeframe, and of the timeframes synthesized from it, is on
+-- the old basis. New price = old price * ratio; new volume = old volume *
+-- volume_factor. Rows wait for the user to rescale or discard that history.
+
+CREATE TABLE IF NOT EXISTS basis_changes (
+    cache_namespace    TEXT    NOT NULL,
+    symbol             TEXT    NOT NULL,
+    timeframe          TEXT    NOT NULL,
+    boundary_timestamp INTEGER NOT NULL,
+    old_coverage_start INTEGER NOT NULL,
+    ratio              REAL    NOT NULL,
+    volume_factor      REAL    NOT NULL,
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe, boundary_timestamp)
 );
 
 

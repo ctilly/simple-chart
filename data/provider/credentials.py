@@ -16,6 +16,21 @@ from data.errors import UserFacingError
 
 _KEYRING_SERVICE = "simplechart.provider-credentials"
 
+# keyring's operating-system backends, by fully qualified class name. Any
+# other backend (keyrings.alt's file stores, null, fail, or one named in a
+# keyringrc.cfg or PYTHON_KEYRING_BACKEND) is rejected before it is written to.
+_OS_KEYRING_BACKENDS = frozenset(
+    {
+        "keyring.backends.SecretService.Keyring",
+        "keyring.backends.libsecret.Keyring",
+        "keyring.backends.kwallet.DBusKeyring",
+        "keyring.backends.kwallet.DBusKeyringKWallet4",
+        "keyring.backends.macOS.Keyring",
+        "keyring.backends.Windows.WinVaultKeyring",
+    }
+)
+_KEYRING_CHAINER = "keyring.backends.chainer.ChainerBackend"
+
 
 @dataclass(frozen=True, repr=False)
 class ProviderCredentials:
@@ -46,6 +61,10 @@ class _PasswordBackend(Protocol):
     ) -> None: ...
 
     def delete_password(self, service_name: str, username: str) -> None: ...
+
+
+class _KeyringModule(Protocol):
+    def get_keyring(self) -> object: ...
 
 
 class CredentialStoreUnavailableError(UserFacingError, RuntimeError):
@@ -157,13 +176,29 @@ class KeyringCredentialStore:
             )
 
 
+def _backend_class_name(backend: object) -> str:
+    cls = type(backend)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _is_os_keyring(backend: object) -> bool:
+    if _backend_class_name(backend) == _KEYRING_CHAINER:
+        # The chainer writes to the first backend that accepts the write, so
+        # every chained backend must be an OS store.
+        chained: list[object] = list(getattr(backend, "backends"))
+        return bool(chained) and all(
+            _backend_class_name(item) in _OS_KEYRING_BACKENDS for item in chained
+        )
+    return _backend_class_name(backend) in _OS_KEYRING_BACKENDS
+
+
 def initialize_keyring_credential_store(
     backend: _PasswordBackend | None = None,
     importer: Callable[[str], object] = import_module,
 ) -> CredentialStoreAccess:
     if backend is None:
         try:
-            backend = cast(_PasswordBackend, importer("keyring"))
+            keyring_module = cast(_KeyringModule, importer("keyring"))
         except (ImportError, ModuleNotFoundError):
             reason = "Required package 'keyring' is not installed."
             return CredentialStoreAccess(
@@ -171,6 +206,31 @@ def initialize_keyring_credential_store(
                 False,
                 reason,
             )
+        try:
+            # Raises when PYTHON_KEYRING_BACKEND or keyringrc.cfg names a
+            # backend that cannot load.
+            active = keyring_module.get_keyring()
+            is_os_keyring = _is_os_keyring(active)
+        except Exception:
+            reason = "The operating-system credential store is unavailable."
+            return CredentialStoreAccess(
+                UnavailableCredentialStore(reason),
+                False,
+                reason,
+            )
+        if not is_os_keyring:
+            reason = (
+                "The configured keyring backend is not an operating-system "
+                "credential store."
+            )
+            return CredentialStoreAccess(
+                UnavailableCredentialStore(reason),
+                False,
+                reason,
+            )
+        # Write through the backend that was checked; keyring's module-level
+        # functions re-resolve the active backend on every call.
+        backend = cast(_PasswordBackend, active)
 
     store = KeyringCredentialStore(backend)
     try:

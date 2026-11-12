@@ -152,10 +152,18 @@ def _session_ranges(
     is_intraday: bool,
 ) -> dict[date, _SegmentRange]:
     indexes: dict[date, list[int]] = {session_date: [] for session_date in session_dates}
-    for i, bar in enumerate(bars):
+    if not session_dates:
+        return {}
+    oldest = min(session_dates)
+    # The displayed sessions are the newest ones: scan back from the end and
+    # stop before the oldest, instead of walking the whole history.
+    for i in range(len(bars) - 1, -1, -1):
+        bar = bars[i]
         session_date = _intraday_bar_date(bar) if is_intraday else _daily_bar_date(bar)
+        if session_date < oldest:
+            break
         if session_date in indexes:
-            indexes[session_date].append(i)
+            indexes[session_date].insert(0, i)
     ranges: dict[date, _SegmentRange] = {}
     for session_date, session_indexes in indexes.items():
         if not session_indexes:
