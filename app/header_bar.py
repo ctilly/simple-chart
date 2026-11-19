@@ -15,7 +15,7 @@ close. The right side keeps the keyboard shortcut hints.
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
-from chart.styles import CANDLE_DOWN, CANDLE_UP
+from app.theme import active_colors
 from data.models import Level1Quote
 
 
@@ -23,13 +23,6 @@ _SHORTCUT_MESSAGES: list[str] = [
     "<b>Ctrl+r</b>: Reset Chart View",
     "<b>Esc</b>: Cancel Drawing",
 ]
-
-# Level 1 strip palette, tuned for the dark header band.
-_SYMBOL_COLOR = "#ffffff"
-_NAME_COLOR   = "#c2ccd3"
-_LABEL_COLOR  = "#aab5bd"
-_VALUE_COLOR  = "#d7dde1"
-_FLAT_COLOR   = "#c2ccd3"
 
 _GAP = "&nbsp;&nbsp;&nbsp;"
 
@@ -44,12 +37,6 @@ class AppHeader(QFrame):
     def _build(self) -> None:
         self.setObjectName("appHeader")
         self.setFixedHeight(24)
-        self.setStyleSheet(
-            "#appHeader {"
-            " background: #2f3437;"
-            " border-bottom: 1px solid #1f2427;"
-            "}"
-        )
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
@@ -64,13 +51,13 @@ class AppHeader(QFrame):
 
         shortcuts = QLabel("&nbsp;&nbsp;&nbsp;".join(_SHORTCUT_MESSAGES))
         shortcuts.setTextFormat(Qt.TextFormat.RichText)
-        shortcuts.setStyleSheet("color: #d7dde1; font-size: 12px;")
+        shortcuts.setObjectName("appHeaderShortcuts")
         layout.addWidget(shortcuts)
 
     def set_symbol(self, symbol: str) -> None:
         """Show the bare symbol while its quote is being fetched."""
         self._quote_label.setText(
-            f'<span style="color: {_SYMBOL_COLOR}; font-weight: bold;">{symbol}</span>'
+            f'<span style="color: {active_colors()["header_symbol"]}; font-weight: bold;">{symbol}</span>'
         )
 
     def set_quote(self, quote: Level1Quote) -> None:
@@ -79,16 +66,17 @@ class AppHeader(QFrame):
 
 
 def _level1_html(quote: Level1Quote) -> str:
+    colors = active_colors()
     parts: list[str] = [
-        f'<span style="color: {_SYMBOL_COLOR}; font-weight: bold;">{quote.symbol}</span>'
+        f'<span style="color: {colors["header_symbol"]}; font-weight: bold;">{quote.symbol}</span>'
     ]
     if quote.company_name is not None:
         parts.append(
-            f'&nbsp;&nbsp;&nbsp;<span style="color: {_NAME_COLOR};">{quote.company_name}</span>'
+            f'&nbsp;&nbsp;&nbsp;<span style="color: {colors["header_name"]};">{quote.company_name}</span>'
         )
 
     parts.append(
-        f'{_GAP}<span style="color: {_VALUE_COLOR}; font-weight: bold;">'
+        f'{_GAP}<span style="color: {colors["header_value"]}; font-weight: bold;">'
         f"{_price(quote.last_price)}</span>"
     )
     if quote.change is not None:
@@ -106,9 +94,10 @@ def _level1_html(quote: Level1Quote) -> str:
 
 
 def _field(label: str, value: str) -> str:
+    colors = active_colors()
     return (
-        f'{_GAP}<span style="color: {_LABEL_COLOR};">{label}</span>'
-        f'&nbsp;<span style="color: {_VALUE_COLOR};">{value}</span>'
+        f'{_GAP}<span style="color: {colors["header_label"]};">{label}</span>'
+        f'&nbsp;<span style="color: {colors["header_value"]};">{value}</span>'
     )
 
 
@@ -138,11 +127,12 @@ def _volume(value: int | None) -> str:
 
 
 def _change_color(change: float) -> str:
+    colors = active_colors()
     if change > 0:
-        return CANDLE_UP
+        return colors["candle_up"]
     if change < 0:
-        return CANDLE_DOWN
-    return _FLAT_COLOR
+        return colors["candle_down"]
+    return colors["header_name"]
 
 
 def _change_text(change: float, change_percent: float | None) -> str:

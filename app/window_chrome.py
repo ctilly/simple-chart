@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.theme import active_colors
 
 _TITLE_HEIGHT = 36
 _CONTROL_SIZE = 28
@@ -53,7 +54,7 @@ def _window_control_icon(control: _ControlIcon) -> QIcon:
         pixmap.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        pen = QPen(QColor("#303030"), 1.5 * scale)
+        pen = QPen(QColor(active_colors()["chrome_icon"]), 1.5 * scale)
         pen.setCapStyle(Qt.PenCapStyle.SquareCap)
         pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         painter.setPen(pen)
@@ -98,24 +99,6 @@ class MainWindowTitleBar(QFrame):
         self._window = window
         self.setObjectName("mainWindowTitleBar")
         self.setFixedHeight(_TITLE_HEIGHT)
-        self.setStyleSheet(
-            "QFrame#mainWindowTitleBar {"
-            " background: #dedede;"
-            " border-bottom: 1px solid #9d978d;"
-            "}"
-            "QLabel#mainWindowTitle {"
-            " color: #202020;"
-            " font-weight: bold;"
-            "}"
-            "QToolButton {"
-            " background: transparent;"
-            " border: 1px solid transparent;"
-            " border-radius: 3px;"
-            "}"
-            "QToolButton:hover { background: #c6c6c6; }"
-            "QToolButton:pressed { background: #b5b5b5; }"
-            "QToolButton:focus { border-color: #6f6f6f; }"
-        )
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 4, 0, 4)

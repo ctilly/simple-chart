@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.theme import active_colors
 from data.models import Timeframe
 
 
@@ -45,11 +46,11 @@ _TIMEFRAME_LABELS: list[tuple[Timeframe, str]] = [
 ]
 
 _SETTINGS_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "settings.svg"
-_SOURCE_STATUS_COLORS: dict[str, str] = {
-    "pending": "#8a8e96",
-    "connected": "#198754",
-    "history": "#d39e00",
-    "error": "#c43d3d",
+_SOURCE_STATUS_COLOR_KEYS: dict[str, str] = {
+    "pending": "pending",
+    "connected": "success",
+    "history": "warning",
+    "error": "error",
 }
 SourceStatus = Literal["pending", "connected", "history", "error"]
 
@@ -87,12 +88,6 @@ class SymbolBar(QWidget):
 
     def _build(self) -> None:
         self.setObjectName("symbolBar")
-        self.setStyleSheet(
-            "#symbolBar {"
-            " background: #eef2f4;"
-            " border-bottom: 1px solid #c8d0d4;"
-            "}"
-        )
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -102,16 +97,14 @@ class SymbolBar(QWidget):
         self._symbol_input = _SymbolInput()
         self._symbol_input.setPlaceholderText("Symbol (e.g. QQQ)")
         self._symbol_input.setMaximumWidth(140)
-        self._symbol_input.setStyleSheet(
-            "font-size: 13px; padding: 2px 6px; text-transform: uppercase; "
-            "background: #ffffff; border: 1px solid #c6c6c6; border-radius: 3px;"
-        )
+        self._symbol_input.setObjectName("symbolInput")
         self._symbol_input.returnPressed.connect(self._on_symbol_submitted)
         layout.addWidget(self._symbol_input)
 
         # Timeframe buttons
         for tf, label in _TIMEFRAME_LABELS:
             btn = QPushButton(label)
+            btn.setObjectName("timeframeButton")
             btn.setCheckable(True)
             btn.setFixedWidth(40)
             btn.clicked.connect(lambda _checked, t=tf: self._on_timeframe_clicked(t))
@@ -140,7 +133,6 @@ class SymbolBar(QWidget):
         self._source_label.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        self._source_label.setStyleSheet("color: #555555; font-size: 12px;")
         source_layout.addWidget(self._source_label)
         layout.addWidget(self._source_status)
 
@@ -150,11 +142,6 @@ class SymbolBar(QWidget):
         settings_button.setIconSize(QSize(16, 16))
         settings_button.setFixedSize(24, 24)
         settings_button.setToolTip("Application settings")
-        settings_button.setStyleSheet(
-            "QToolButton { background: transparent; border: 1px solid #cccccc; "
-            "border-radius: 3px; }"
-            "QToolButton:hover { background: #eeeeee; }"
-        )
         settings_button.clicked.connect(self.settings_requested.emit)
         layout.addWidget(settings_button)
 
@@ -167,7 +154,7 @@ class SymbolBar(QWidget):
         self._symbol_input.setText(symbol.upper())
 
     def set_data_source(self, label: str, status: SourceStatus) -> None:
-        color = _SOURCE_STATUS_COLORS[status]
+        color = active_colors()[_SOURCE_STATUS_COLOR_KEYS[status]]
         self._source_dot.setStyleSheet(
             f"background: {color}; border: none; border-radius: 4px;"
         )
@@ -205,13 +192,3 @@ class SymbolBar(QWidget):
         """Set the checked state and style for all timeframe buttons."""
         for tf, btn in self._tf_buttons.items():
             btn.setChecked(tf == active)
-            if tf == active:
-                btn.setStyleSheet(
-                    "background-color: #00d4d4; color: #000000; "
-                    "font-weight: bold; border: 1px solid #00b8b8; border-radius: 3px;"
-                )
-            else:
-                btn.setStyleSheet(
-                    "background-color: #f7f7f7; color: #333333; "
-                    "border: 1px solid #cccccc; border-radius: 3px;"
-                )

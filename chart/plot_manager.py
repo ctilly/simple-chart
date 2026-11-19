@@ -33,16 +33,15 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QFontInfo, QPainter
 
 from chart.panel import ExtensionPanelSlot, Panel
 from chart.styles import (
-    BACKGROUND,
-    CANDLE_DOWN,
-    CANDLE_UP,
+    ChartColors,
+    LAST_PRICE_LINE_ALPHA,
+    LAST_PRICE_TAG_ALPHA,
+    LAST_PRICE_TAG_TEXT,
     LINE_WIDTH_INDICATOR,
-    VOLUME_DOWN,
-    VOLUME_UP,
 )
 from chart.viewport import (
     apply_interaction_modes,
@@ -79,6 +78,34 @@ class _AxisPriceLabelHandle:
     y_value: float
 
 
+# The last-price tag is smaller than the horizontal-line tool's tags: a
+# smaller font, less padding, and rounded corners.
+_LAST_PRICE_TAG_POINTS_SMALLER = 3
+_LAST_PRICE_TAG_PADDING = 1
+_LAST_PRICE_TAG_CORNER_RADIUS = 3.0
+
+
+class _RoundedTag(pg.TextItem):  # type: ignore[misc]
+    """An axis tag with rounded corners; pg.TextItem fills a square box."""
+
+    def __init__(self, text: str, text_color: str, fill_color: str) -> None:
+        super().__init__(text=text, color=text_color, anchor=(0.0, 0.5))
+        self._tag_brush = pg.mkBrush(fill_color)
+
+    def paint(self, p: QPainter, *args: object) -> None:
+        # The base class has no fill or border here; it only keeps the
+        # item's transform current.
+        super().paint(p, *args)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self._tag_brush)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.drawRoundedRect(
+            self.textItem.mapRectToParent(self.textItem.boundingRect()),
+            _LAST_PRICE_TAG_CORNER_RADIUS,
+            _LAST_PRICE_TAG_CORNER_RADIUS,
+        )
+
+
 class PlotManager:
     """
     Central registry of finplot plot handles.
@@ -92,7 +119,9 @@ class PlotManager:
         price_panel: Panel,
         volume_panel: Panel,
         extension_slots: list[ExtensionPanelSlot],
+        colors: ChartColors = ChartColors(),
     ) -> None:
+        self._colors          = colors
         self._price_panel     = price_panel
         self._volume_panel    = volume_panel
         self._extension_slots = extension_slots
@@ -105,6 +134,15 @@ class PlotManager:
         self._polylines: dict[str, tuple[object, object]] = {}
         self._axis_price_labels: dict[str, _AxisPriceLabelHandle] = {}
         self._markers: dict[str, object] = {}
+
+        # The last-price line and its axis tag belong to the chart, not to an
+        # extension, so they stay out of the registries above (stale
+        # extension renders are pruned from those). The newest bar's
+        # (index, close) is kept while the marker is turned off.
+        self._last_price_visible = True
+        self._last_price: tuple[int, float] | None = None
+        self._last_price_line: pg.PlotDataItem | None = None
+        self._last_price_label: _AxisPriceLabelHandle | None = None
 
         # Candle and volume handles are separate — they are always present
         # and replaced entirely on symbol load rather than updated in place.
@@ -142,16 +180,78 @@ class PlotManager:
             )
             # Hollow/solid scheme: bull candles have a white body (hollow)
             # with a green outline and wick; bear candles are fully red.
+            colors = self._colors
             cast(Any, self._candle_plot).colors.update({
-                "bull_body":   BACKGROUND,    # hollow
-                "bull_frame":  CANDLE_UP,
-                "bull_shadow": CANDLE_UP,
-                "bear_body":   CANDLE_DOWN,
-                "bear_frame":  CANDLE_DOWN,
-                "bear_shadow": CANDLE_DOWN,
+                "bull_body":   colors.hollow_body,
+                "bull_frame":  colors.candle_up,
+                "bull_shadow": colors.candle_up,
+                "bear_body":   colors.candle_down,
+                "bear_frame":  colors.candle_down,
+                "bear_shadow": colors.candle_down,
             })
 
         unlock_x_pan(self._price_panel.ax)
+        self._update_last_price(series)
+
+    def set_last_price_visible(self, visible: bool) -> None:
+        """Show or hide the last-price line and tag (an application setting)."""
+        self._last_price_visible = visible
+        self._draw_last_price()
+
+    def _update_last_price(self, series: OHLCVSeries) -> None:
+        self._last_price = (
+            (len(series.bars) - 1, series.bars[-1].close) if series.bars else None
+        )
+        self._draw_last_price()
+
+    def _draw_last_price(self) -> None:
+        """
+        A line from the newest bar's close to the view's right edge, and a
+        small tag on the price axis, shown while the close is in view.
+        """
+        self._remove_last_price()
+        if not self._last_price_visible or self._last_price is None:
+            return
+        index, close = self._last_price
+        ax = self._price_panel.ax
+        viewbox = ax.vb
+        x_start = self._x_value_for_index(index)
+        line = pg.PlotDataItem(
+            [x_start, x_start],
+            [close, close],
+            pen=pg.mkPen(color=self._colors.last_price + LAST_PRICE_LINE_ALPHA, width=1),
+        )
+        ax.addItem(line, ignoreBounds=True)
+
+        def follow_view(text_item: pg.TextItem) -> None:
+            rect = viewbox.viewRect()
+            line.setData([x_start, max(x_start, rect.right())], [close, close])
+            text_item.setVisible(rect.top() <= close <= rect.bottom())
+
+        text_item = _RoundedTag(
+            f"{close:.2f}",
+            LAST_PRICE_TAG_TEXT,
+            self._colors.last_price + LAST_PRICE_TAG_ALPHA,
+        )
+        text_item.textItem.document().setDocumentMargin(_LAST_PRICE_TAG_PADDING)
+        font = text_item.textItem.font()
+        # QFontInfo resolves pixel-sized fonts, whose pointSizeF() is -1.
+        font.setPointSizeF(QFontInfo(font).pointSizeF() - _LAST_PRICE_TAG_POINTS_SMALLER)
+        text_item.setFont(font)
+        label = self._add_axis_price_label(viewbox, close, text_item, follow_view)
+        # Above the horizontal-line tool's tags, so the stacking does not
+        # change from one redraw to the next.
+        text_item.setZValue(1)
+        self._last_price_line = line
+        self._last_price_label = label
+
+    def _remove_last_price(self) -> None:
+        if self._last_price_line is not None:
+            self._price_panel.ax.removeItem(self._last_price_line)
+            self._last_price_line = None
+        if self._last_price_label is not None:
+            self._discard_axis_price_label(self._last_price_label)
+            self._last_price_label = None
 
     def draw_volume(self, series: OHLCVSeries) -> None:
         """
@@ -170,11 +270,12 @@ class PlotManager:
                 ax=self._volume_panel.ax,
                 colorfunc=fplt.volume_colorfilter,
             )
+            colors = self._colors
             cast(Any, self._volume_plot).colors.update({
-                "bull_frame": VOLUME_UP,
-                "bull_body":  VOLUME_UP,
-                "bear_frame": VOLUME_DOWN,
-                "bear_body":  VOLUME_DOWN,
+                "bull_frame": colors.volume_up,
+                "bull_body":  colors.volume_up,
+                "bear_frame": colors.volume_down,
+                "bear_body":  colors.volume_down,
             })
 
         unlock_x_pan(self._volume_panel.ax)
@@ -337,8 +438,6 @@ class PlotManager:
     def update_axis_price_label(self, label: AxisPriceLabelRender) -> None:
         self.remove_axis_price_label(label.key)
         target_ax = self._resolve_ax(label.render_target)
-        viewbox = target_ax.vb  # type: ignore[attr-defined]
-        scene = viewbox.scene()
         text_item = pg.TextItem(
             text=label.text,
             color=label.text_color,
@@ -346,25 +445,45 @@ class PlotManager:
             fill=pg.mkBrush(label.fill_color),
             border=pg.mkPen(label.fill_color),
         )
+        handle = self._add_axis_price_label(
+            target_ax.vb,  # type: ignore[attr-defined]
+            label.y_value,
+            text_item,
+        )
         text_item.setVisible(label.visible)
-        scene.addItem(text_item)
+        self._axis_price_labels[label.key] = handle
 
-        y_holder = [label.y_value]
+    def _add_axis_price_label(
+        self,
+        viewbox: Any,
+        y_value: float,
+        text_item: pg.TextItem,
+        on_view_changed: Callable[[pg.TextItem], None] | None = None,
+    ) -> _AxisPriceLabelHandle:
+        """
+        Put text_item on the price axis at y_value and keep it there as the
+        view pans, zooms and resizes. on_view_changed runs after each
+        reposition.
+        """
+        scene = viewbox.scene()
+        scene.addItem(text_item)
 
         def reposition(*_args: object) -> None:
             scene_x = viewbox.sceneBoundingRect().right()
-            scene_y = viewbox.mapViewToScene(QPointF(0.0, y_holder[0])).y()
+            scene_y = viewbox.mapViewToScene(QPointF(0.0, y_value)).y()
             text_item.setPos(scene_x, scene_y)
+            if on_view_changed is not None:
+                on_view_changed(text_item)
 
         viewbox.sigRangeChanged.connect(reposition)
         viewbox.sigResized.connect(reposition)
         reposition()
-        self._axis_price_labels[label.key] = _AxisPriceLabelHandle(
+        return _AxisPriceLabelHandle(
             text_item=text_item,
             viewbox=viewbox,
             scene=scene,
             reposition=reposition,
-            y_value=label.y_value,
+            y_value=y_value,
         )
 
     @contextmanager
@@ -435,6 +554,8 @@ class PlotManager:
 
     def clear_all(self) -> None:
         """Remove everything including candles and volume."""
+        self._remove_last_price()
+        self._last_price = None
         # ax.reset() (set up by finplot on each axis) removes all items from
         # the scene and calls vb.reset() — which clears standalones, rois, and
         # datasrc. This is more thorough than calling removeItem individually
@@ -544,8 +665,10 @@ class PlotManager:
 
     def remove_axis_price_label(self, label_key: str) -> None:
         handle = self._axis_price_labels.pop(label_key, None)
-        if handle is None:
-            return
+        if handle is not None:
+            self._discard_axis_price_label(handle)
+
+    def _discard_axis_price_label(self, handle: _AxisPriceLabelHandle) -> None:
         try:
             handle.viewbox.sigRangeChanged.disconnect(handle.reposition)  # type: ignore[attr-defined]
         except (TypeError, RuntimeError):

@@ -41,7 +41,7 @@ from chart.interactions import ChartInteractions
 from chart.legend import ChartLegend
 from chart.panel import ExtensionPanelSlot, Panel, PanelType
 from chart.plot_manager import PlotManager
-from chart.styles import AXIS_TEXT_COLOR, BACKGROUND
+from chart.styles import ChartColors
 from chart.viewport import install_extension_panel_behavior, install_time_label_conversion, install_viewport_behavior, reset_viewports, sync_x_axis_labels
 from data.errors import UserFacingError
 from simplechart.api import ToolIconSpec
@@ -102,8 +102,10 @@ class ChartWidget(QWidget):
         on_drawing_tool: Callable[[str], None],
         drawing_tools: list[tuple[str, str, ToolIconSpec | None]],
         parent: QWidget | None = None,
+        colors: ChartColors = ChartColors(),
     ) -> None:
         super().__init__(parent)
+        self._colors = colors
         self._setup_finplot()
         self._legend = ChartLegend(
             on_toggle=on_toggle,
@@ -113,6 +115,7 @@ class ChartWidget(QWidget):
             on_drawing_tool=on_drawing_tool,
             drawing_tools=drawing_tools,
             parent=self,
+            legend_hidden_color=colors.legend_hidden,
         )
         self._build_layout()
         self._install_shortcuts()
@@ -138,14 +141,16 @@ class ChartWidget(QWidget):
         """
         # Set finplot globals before create_plot_widget, which calls
         # pg.setConfigOptions(foreground=..., background=...) internally.
-        fplt.background = BACKGROUND       # chart fill — white
-        fplt.foreground = AXIS_TEXT_COLOR  # axis text/ticks — dark gray
-        fplt.odd_plot_background = BACKGROUND  # all panels — also white
+        colors = self._colors
+        fplt.background = colors.background
+        fplt.foreground = colors.foreground  # axis text/ticks
+        fplt.odd_plot_background = colors.odd_plot_background
+        fplt.cross_hair_color = colors.crosshair
 
         self._master = _FinplotMaster()
         # Explicitly set master background — pg.setConfigOptions only affects
         # widgets created after the call, but _master exists already.
-        self._master.setBackground(BACKGROUND)
+        self._master.setBackground(colors.background)
 
         axes = fplt.create_plot_widget(self._master, rows=5, init_zoom_periods=INITIAL_VISIBLE_BARS)
 
@@ -168,7 +173,7 @@ class ChartWidget(QWidget):
         volume_ax = axes[1]
 
         # Grid lines — very low alpha for a barely-visible reference grid.
-        price_ax.showGrid(x=True, y=True, alpha=0.06)
+        price_ax.showGrid(x=True, y=True, alpha=colors.grid_alpha)
 
         price_ax.crosshair.infos.append(
             lambda x, y, xtext, _ytext: (xtext, "%.2f" % y)
@@ -208,6 +213,7 @@ class ChartWidget(QWidget):
             self._price_panel,
             self._volume_panel,
             self._extension_slots,
+            self._colors,
         )
         self._interactions = ChartInteractions(self._price_panel.ax, self._master)
         # Any change of the visible x-range (pan, zoom, wheel, gesture or a

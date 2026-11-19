@@ -34,6 +34,7 @@ from app.bar_comparison import (
 )
 from app.dialogs import build_dialog_content, show_information, show_warning
 from app.errors import ErrorContext, report_error
+from app.theme import active_colors, active_theme, render_stylesheet
 from data.errors import describe
 from data.cache import Cache, IdenticalCorrectionError
 from data.calendar import MARKET_TIMEZONE
@@ -68,8 +69,6 @@ _COMPARISON_FIELDS: dict[int, BarField] = {
 _SYNTHESIZED_TIMEFRAMES = (Timeframe.MIN39, Timeframe.MIN65)
 # Every supported data source synthesizes them from 5m bars.
 _SYNTHESIS_BASE = Timeframe.MIN5
-_PROVIDER_REVISION_COLOR = QColor("#fff3cd")
-_CORROBORATION_COLOR = QColor("#d9ead3")
 _REFRESH_STATUS_STYLE = """
 QLabel#symbolRefreshStatus {
     padding: 6px 10px;
@@ -78,19 +77,19 @@ QLabel#symbolRefreshStatus {
     font-weight: 600;
 }
 QLabel#symbolRefreshStatus[refreshState="running"] {
-    background: #eef2f4;
-    color: #33414d;
-    border-left-color: #8a8e96;
+    background: $panel;
+    color: $info_strong;
+    border-left-color: $pending;
 }
 QLabel#symbolRefreshStatus[refreshState="done"] {
-    background: #e7f1fb;
-    color: #0b5cad;
-    border-left-color: #0b5cad;
+    background: $accent;
+    color: $primary;
+    border-left-color: $primary;
 }
 QLabel#symbolRefreshStatus[refreshState="failed"] {
-    background: #fbeaea;
-    color: #a12e2e;
-    border-left-color: #c43d3d;
+    background: $error_background;
+    color: $error_strong;
+    border-left-color: $error;
 }
 """
 
@@ -294,7 +293,9 @@ class DataQualityTab(QWidget):
         self._refresh_status = QLabel("", self)
         self._refresh_status.setObjectName("symbolRefreshStatus")
         self._refresh_status.setWordWrap(True)
-        self._refresh_status.setStyleSheet(_REFRESH_STATUS_STYLE)
+        self._refresh_status.setStyleSheet(
+            render_stylesheet(_REFRESH_STATUS_STYLE, active_theme())
+        )
         layout.addWidget(self._refresh_status)
         layout.addWidget(self._build_inspection(initial_timeframe), 1)
         self._clear_editor()
@@ -917,14 +918,14 @@ class DataQualityTab(QWidget):
                     and comparison_row.kind
                     == BarComparisonRowKind.REFRESHED_ORIGIN
                 ):
-                    item.setBackground(_PROVIDER_REVISION_COLOR)
+                    item.setBackground(QColor(active_colors()["revision_highlight"]))
                     item.setToolTip("Refreshed provider revision")
                 elif (
                     suggestion is not None
                     and comparison_row.source_namespace
                     in suggestion.corroborating_sources
                 ):
-                    item.setBackground(_CORROBORATION_COLOR)
+                    item.setBackground(QColor(active_colors()["corroboration_highlight"]))
                     item.setToolTip("Corroborates refreshed provider value")
                 self._comparison_table.setItem(row_index, column, item)
 

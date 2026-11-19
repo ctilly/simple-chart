@@ -1,0 +1,178 @@
+/* App-wide widget styles. Dollar-prefixed names are theme colors (see app/theme.py). */
+
+/* App frame */
+QFrame#appFrame {
+    background: $background;
+    border: 5px solid $border;
+}
+QFrame#appFrame[customChrome="true"] {
+    border-width: 3px;
+}
+
+/* Header band */
+#appHeader {
+    background: $header_background;
+    border-bottom: 1px solid $header_border;
+}
+QLabel#appHeaderShortcuts {
+    color: $header_value;
+    font-size: 12px;
+}
+
+/* Window chrome */
+QFrame#mainWindowTitleBar {
+    background: $chrome_background;
+    border-bottom: 1px solid $border;
+}
+QLabel#mainWindowTitle {
+    color: $chrome_foreground;
+    font-weight: bold;
+}
+QFrame#mainWindowTitleBar QToolButton {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+}
+QFrame#mainWindowTitleBar QToolButton:hover { background: $chrome_hover; }
+QFrame#mainWindowTitleBar QToolButton:pressed { background: $chrome_pressed; }
+QFrame#mainWindowTitleBar QToolButton:focus { border-color: $chrome_focus; }
+
+/* Symbol bar */
+#symbolBar {
+    background: $panel;
+    border-bottom: 1px solid $panel_border;
+}
+QLineEdit#symbolInput {
+    font-size: 13px;
+    padding: 2px 6px;
+    text-transform: uppercase;
+    background: $background;
+    border: 1px solid $input_border;
+    border-radius: 3px;
+}
+QPushButton#timeframeButton:checked {
+    background-color: $tf_active;
+    color: $tf_active_text;
+    font-weight: bold;
+    border: 1px solid $tf_active_border;
+    border-radius: 3px;
+}
+QPushButton#timeframeButton:!checked {
+    background-color: $surface;
+    color: $foreground;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+}
+QLabel#dataSourceStatusLabel {
+    color: $text_secondary;
+    font-size: 12px;
+}
+QToolButton#applicationSettingsButton {
+    background: transparent;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+}
+QToolButton#applicationSettingsButton:hover { background: $raised; }
+
+/* Watchlist */
+QLabel#watchlistSymbolLabel {
+    color: $text_strong;
+    font-weight: 400;
+}
+QListWidget#watchlistSymbols {
+    border: none;
+    font-size: 13px;
+    background: $list_background;
+}
+QListWidget#watchlistSymbols::item {
+    padding: 5px 8px;
+    border-bottom: 1px solid $raised;
+}
+QListWidget#watchlistSymbols::item:selected {
+    background: $selection;
+    color: $selection_text;
+}
+QListWidget#watchlistSymbols::item:hover:!selected { background: $list_hover; }
+QLabel#watchlistHeader {
+    background: $watchlist_header_background;
+    font-weight: bold;
+    font-size: 11px;
+    color: $watchlist_header_foreground;
+    border-bottom: 1px solid $watchlist_rule;
+}
+QPushButton#watchlistAddButton {
+    background: $watchlist_button_background;
+    border: none;
+    border-top: 1px solid $watchlist_rule;
+    font-size: 12px;
+    color: $text_secondary;
+}
+QPushButton#watchlistAddButton:hover { background: $watchlist_button_hover; }
+
+/* Floating palettes: Add Symbol popup and the chart's Tools palette */
+QFrame#addSymbolPopupFrame, QFrame#drawingToolPaletteFrame {
+    background: $raised;
+    border: 1px solid $popup_border;
+}
+QFrame#addSymbolPopupTitleBar, QFrame#drawingToolPaletteTitleBar {
+    background: $popup_title_background;
+    border-bottom: 1px solid $popup_title_border;
+}
+QLabel#addSymbolPopupTitle, QLabel#drawingToolPaletteTitle {
+    color: $text_secondary;
+}
+QToolButton#addSymbolPopupClose, QToolButton#drawingToolPaletteClose {
+    color: $text_secondary;
+    background: $popup_title_background;
+    border: 1px solid $popup_title_border;
+    border-radius: 3px;
+}
+QToolButton#addSymbolPopupClose:hover, QToolButton#drawingToolPaletteClose:hover {
+    background: $popup_close_hover;
+}
+QFrame#addSymbolPopupInputRow, QFrame#drawingToolPaletteToolRow {
+    background: $raised;
+}
+QLineEdit#addSymbolPopupInput {
+    color: $foreground;
+    background: $background;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+    padding: 0px 6px;
+}
+QToolButton#addSymbolPopupAdd {
+    color: $text_secondary;
+    background: $surface;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+    padding: 0px 8px;
+}
+QToolButton#addSymbolPopupAdd:hover { background: $background; }
+QFrame#drawingToolPaletteToolRow QToolButton {
+    color: $text_secondary;
+    background: $surface;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+}
+QFrame#drawingToolPaletteToolRow QToolButton:hover { background: $background; }
+QFrame#drawingToolPaletteToolRow QToolButton:checked {
+    color: $text_strong;
+    background: $tool_checked_background;
+    border: 1px solid $tool_checked_border;
+}
+
+/* Chart legend strip */
+QToolButton#addIndicatorButton {
+    background: $add_button;
+    border: none;
+    border-radius: 4px;
+}
+QToolButton#addIndicatorButton:hover { background: $add_button_hover; }
+QToolButton#drawingToolsButton {
+    color: $text_secondary;
+    background: transparent;
+    border: 1px solid $control_border;
+    border-radius: 3px;
+    padding: 0px 6px;
+}
+QToolButton#drawingToolsButton:hover { background: $raised; }

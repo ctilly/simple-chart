@@ -57,6 +57,8 @@ from data.provider.config import (
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MAX_TIMESTAMP_MS = 2**63 - 1
 _BASIS_CHANGE_CHOICE_SETTING = "basis_change_choice"
+_SHOW_LAST_PRICE_LINE_SETTING = "show_last_price_line"
+_THEME_SETTING = "theme"
 
 
 class BarCorrectionError(UserFacingError, ValueError):
@@ -1492,6 +1494,46 @@ class Cache:
                     setting_value = excluded.setting_value
                 """,
                 (_BASIS_CHANGE_CHOICE_SETTING, choice.value),
+            )
+
+    def get_show_last_price_line(self) -> bool:
+        """Whether the chart shows its last-price line; on unless turned off."""
+        row = self._conn.execute(
+            "SELECT setting_value FROM application_settings WHERE setting_key = ?",
+            (_SHOW_LAST_PRICE_LINE_SETTING,),
+        ).fetchone()
+        return row is None or row[0] == "1"
+
+    def set_show_last_price_line(self, show: bool) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO application_settings (setting_key, setting_value)
+                VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
+                """,
+                (_SHOW_LAST_PRICE_LINE_SETTING, "1" if show else "0"),
+            )
+
+    def get_theme(self) -> str:
+        """The saved theme name; Light until one is chosen."""
+        row = self._conn.execute(
+            "SELECT setting_value FROM application_settings WHERE setting_key = ?",
+            (_THEME_SETTING,),
+        ).fetchone()
+        return "Light" if row is None else str(row[0])
+
+    def set_theme(self, name: str) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO application_settings (setting_key, setting_value)
+                VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
+                """,
+                (_THEME_SETTING, name),
             )
 
     def get_basis_changes(

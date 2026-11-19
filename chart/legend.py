@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from chart.styles import LEGEND_FONT_SIZE
+from chart.styles import LEGEND_FONT_SIZE, ChartColors
 from simplechart.api import ToolIconSpec
 
 
@@ -60,8 +60,10 @@ class ExtensionLabel(QLabel):
         on_toggle: Callable[[str], None],
         on_configure: Callable[[str], None],
         on_remove: Callable[[str], None],
+        hidden_color: str = ChartColors.legend_hidden,
     ) -> None:
         super().__init__(display_text)
+        self._hidden_color = hidden_color
         self._series_key   = series_key
         self._color        = color
         self._on_toggle    = on_toggle
@@ -100,7 +102,7 @@ class ExtensionLabel(QLabel):
             self._on_remove(self._series_key)
 
     def _apply_style(self) -> None:
-        color = self._color if self._visible else "#aaaaaa"
+        color = self._color if self._visible else self._hidden_color
         font = QFont()
         font.setPointSize(LEGEND_FONT_SIZE)
         self.setFont(font)
@@ -127,12 +129,6 @@ class DrawingToolPalette(QWidget):
 
         frame = QFrame(self)
         frame.setObjectName("drawingToolPaletteFrame")
-        frame.setStyleSheet(
-            "QFrame#drawingToolPaletteFrame {"
-            " background: #eeeeee;"
-            " border: 1px solid #b8bcc5;"
-            "}"
-        )
         frame.installEventFilter(self)
 
         frame_layout = QVBoxLayout(frame)
@@ -142,12 +138,6 @@ class DrawingToolPalette(QWidget):
         title_bar = QFrame(frame)
         title_bar.setObjectName("drawingToolPaletteTitleBar")
         title_bar.setCursor(Qt.CursorShape.SizeAllCursor)
-        title_bar.setStyleSheet(
-            "QFrame#drawingToolPaletteTitleBar {"
-            " background: #dddddd;"
-            " border-bottom: 1px solid #c4c4c4;"
-            "}"
-        )
         title_bar.installEventFilter(self)
 
         title_layout = QHBoxLayout(title_bar)
@@ -156,7 +146,6 @@ class DrawingToolPalette(QWidget):
 
         title = QLabel("Tools", title_bar)
         title.setObjectName("drawingToolPaletteTitle")
-        title.setStyleSheet("color: #555555;")
         title.setCursor(Qt.CursorShape.SizeAllCursor)
         title.installEventFilter(self)
         title_layout.addWidget(title)
@@ -167,18 +156,12 @@ class DrawingToolPalette(QWidget):
         close_button.setText("x")
         close_button.setToolTip("Close")
         close_button.setFixedSize(18, 18)
-        close_button.setStyleSheet(
-            "QToolButton { color: #555555; background: #dddddd; "
-            "border: 1px solid #c4c4c4; border-radius: 3px; }"
-            "QToolButton:hover { background: #d0d0d0; }"
-        )
         close_button.clicked.connect(self.hide)
         title_layout.addWidget(close_button)
         frame_layout.addWidget(title_bar)
 
         tool_row = QFrame(frame)
         tool_row.setObjectName("drawingToolPaletteToolRow")
-        tool_row.setStyleSheet("QFrame#drawingToolPaletteToolRow { background: #eeeeee; }")
 
         tool_layout = QHBoxLayout(tool_row)
         tool_layout.setContentsMargins(6, 0, 6, 0)
@@ -192,13 +175,6 @@ class DrawingToolPalette(QWidget):
             button.setToolTip(tool_label)
             button.setFixedSize(28, 28)
             button.setCheckable(True)
-            button.setStyleSheet(
-                "QToolButton { color: #555555; background: #f7f7f7; "
-                "border: 1px solid #cccccc; border-radius: 3px; }"
-                "QToolButton:hover { background: #ffffff; }"
-                "QToolButton:checked { color: #222222; background: #d6e4ff; "
-                "border: 1px solid #4f7cff; }"
-            )
             button.clicked.connect(
                 lambda _checked=False, name=tool_name: on_drawing_tool(name)
             )
@@ -284,8 +260,10 @@ class ChartLegend(QWidget):
         on_drawing_tool: Callable[[str], None],
         drawing_tools: list[tuple[str, str, ToolIconSpec | None]],
         parent: QWidget | None = None,
+        legend_hidden_color: str = ChartColors.legend_hidden,
     ) -> None:
         super().__init__(parent)
+        self._legend_hidden_color = legend_hidden_color
         self._on_toggle    = on_toggle
         self._on_configure = on_configure
         self._on_remove    = on_remove
@@ -311,10 +289,7 @@ class ChartLegend(QWidget):
         add_btn.setIconSize(QSize(16, 16))
         add_btn.setFixedSize(20, 20)
         add_btn.setToolTip("Add indicator")
-        add_btn.setStyleSheet(
-            "QToolButton { background: #2d6cf6; border: none; border-radius: 4px; }"
-            "QToolButton:hover { background: #4a82ff; }"
-        )
+        add_btn.setObjectName("addIndicatorButton")
         add_btn.clicked.connect(on_add)
         layout.addWidget(add_btn)
 
@@ -325,11 +300,7 @@ class ChartLegend(QWidget):
         tools_btn.setFixedHeight(20)
         tools_btn.setToolTip("Drawing tools")
         tools_btn.setEnabled(bool(drawing_tools))
-        tools_btn.setStyleSheet(
-            "QToolButton { color: #555555; background: transparent; "
-            "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 6px; }"
-            "QToolButton:hover { background: #eeeeee; }"
-        )
+        tools_btn.setObjectName("drawingToolsButton")
         tools_btn.clicked.connect(self._toggle_tool_palette)
         layout.addWidget(tools_btn)
         self._tools_button = tools_btn
@@ -350,6 +321,7 @@ class ChartLegend(QWidget):
             self._on_toggle,
             self._on_configure,
             self._on_remove,
+            self._legend_hidden_color,
         )
         self._labels[series_key] = label
         layout = cast(QVBoxLayout, self.layout())

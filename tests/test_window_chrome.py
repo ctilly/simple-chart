@@ -17,6 +17,7 @@ from PyQt6.QtTest import QTest
 
 import app.controller as controller_module
 from app.controller import MainWindow
+from app.theme import active_theme, apply_theme
 from app.window_chrome import (
     MainWindowTitleBar,
     WindowResizeController,
@@ -85,9 +86,14 @@ def test_title_bar_structure_and_accessibility(qtbot: Any) -> None:
     buttons = title_bar.findChildren(QToolButton)
 
     assert title_bar.height() == 36
-    assert "background: #dedede" in title_bar.styleSheet()
-    assert "border-bottom: 1px solid #9d978d" in title_bar.styleSheet()
-    assert "color: #202020" in title_bar.styleSheet()
+    app = QApplication.instance()
+    assert isinstance(app, QApplication)
+    apply_theme(app, active_theme())
+    stylesheet = app.styleSheet()
+    assert title_bar.objectName() == "mainWindowTitleBar"
+    assert "background: #dedede" in stylesheet
+    assert "border-bottom: 1px solid #9d978d" in stylesheet
+    assert "color: #202020" in stylesheet
     assert label is not None
     assert label.text() == window.windowTitle() == "Simple Chart"
     assert label.testAttribute(
@@ -122,13 +128,9 @@ def test_title_bar_structure_and_accessibility(qtbot: Any) -> None:
     assert maximize_button is not None
     assert close_button.iconSize() == QSize(16, 16)
     assert maximize_button.iconSize() == QSize(16, 16)
-    assert "QToolButton:hover { background: #c6c6c6; }" in (
-        title_bar.styleSheet()
-    )
-    assert "QToolButton:pressed { background: #b5b5b5; }" in (
-        title_bar.styleSheet()
-    )
-    assert "mainWindowCloseButton:hover" not in title_bar.styleSheet()
+    assert "QToolButton:hover { background: #c6c6c6; }" in stylesheet
+    assert "QToolButton:pressed { background: #b5b5b5; }" in stylesheet
+    assert "mainWindowCloseButton:hover" not in stylesheet
 
     close_image = close_button.icon().pixmap(QSize(16, 16)).toImage()
     maximize_image = maximize_button.icon().pixmap(QSize(16, 16)).toImage()

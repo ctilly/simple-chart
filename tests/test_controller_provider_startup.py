@@ -82,6 +82,7 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
             current_timeframe: Timeframe | None = None,
             comparison_service: object | None = None,
             symbol_refresh: object | None = None,
+            theme_names: object | None = None,
         ) -> None:
             settings_arguments["credential_store"] = credential_store
             settings_arguments["availability"] = availability

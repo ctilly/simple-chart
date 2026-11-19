@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.dialogs import build_dialog_content
+from app.theme import active_colors
 from simplechart.api import ChoiceParam, FloatParam
 
 _SESSION_PERSISTENCE_KEY = "persist_across_sessions"
@@ -81,7 +82,7 @@ class ColorButton(QPushButton):
         self.setStyleSheet(
             f"background-color: {self._color}; "
             f"color: {'#000000' if _is_light(self._color) else '#ffffff'}; "
-            f"border: 2px solid #666666; "
+            f"border: 2px solid {active_colors()['swatch_border']}; "
             f"border-radius: 3px; "
             f"padding: 4px 10px; "
             f"font-weight: bold;"

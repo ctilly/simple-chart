@@ -9,7 +9,7 @@ from simplechart.api import (
 
 STORE_KEY = "five_day_marker.settings"
 MARKER_KEY = "five_day_marker"
-DEFAULT_COLOR = "#800080"
+DEFAULT_COLOR = "#cdab8f"
 DEFAULT_LINE_WIDTH = 1.0
 DEFAULT_LINE_STYLE = "dash"
 DEFAULT_VISIBLE = True

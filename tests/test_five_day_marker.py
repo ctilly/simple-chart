@@ -31,7 +31,7 @@ def test_five_day_marker_marks_first_daily_bar_in_current_ma_window() -> None:
     assert render.vertical_lines[0].key == "five_day_marker"
     assert render.vertical_lines[0].label == "5-Day Marker"
     assert render.vertical_lines[0].x_index == 3.0
-    assert render.vertical_lines[0].color == "#800080"
+    assert render.vertical_lines[0].color == "#cdab8f"
     assert render.vertical_lines[0].line_width == 1.0
     assert render.vertical_lines[0].line_style == "dash"
 
@@ -115,7 +115,7 @@ def test_five_day_marker_store_creates_default_symbol_settings(tmp_path: Path) -
     assert settings is not None
     assert settings.symbol == "AAPL"
     assert settings.enabled
-    assert settings.color == "#800080"
+    assert settings.color == "#cdab8f"
     assert settings.line_style == "dash"
     assert len(records) == 1
     assert state.get_extension("five_day_marker") is not None
@@ -149,7 +149,7 @@ def test_five_day_marker_store_keeps_symbols_independent(tmp_path: Path) -> None
         aapl = store.settings()
 
     assert msft is not None
-    assert msft.color == "#800080"
+    assert msft.color == "#cdab8f"
     assert msft.visible
     assert aapl is not None
     assert aapl.color == "#ff0000"

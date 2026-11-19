@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
@@ -167,8 +167,10 @@ class ApplicationSettingsDialog(QDialog):
         current_timeframe: Timeframe | None = None,
         comparison_service: BarComparisonServiceLike | None = None,
         symbol_refresh: SymbolRefresher | None = None,
+        theme_names: Sequence[str] = ("Light", "Dark"),
     ) -> None:
         super().__init__(parent)
+        self._theme_names = theme_names
         self._cache = cache
         self._credential_store = credential_store
         self._provider_availability = dict(provider_availability)
@@ -266,6 +268,9 @@ class ApplicationSettingsDialog(QDialog):
         self._cache.set_basis_change_choice(
             None if choice is None else BasisChangeChoice(choice)
         )
+        self._cache.set_show_last_price_line(self._show_last_price_line.isChecked())
+        if self._theme.currentText() != self._initial_theme:
+            self._cache.set_theme(self._theme.currentText())
         super().accept()
 
     def selected_connection_id(self) -> str:
@@ -334,10 +339,28 @@ class ApplicationSettingsDialog(QDialog):
     def _build_ui_tab(self) -> QWidget:
         tab = QWidget(self)
         form = QFormLayout(tab)
-        dark_mode = QCheckBox(tab)
-        dark_mode.setObjectName("darkMode")
-        dark_mode.setEnabled(False)
-        form.addRow("Dark Mode", dark_mode)
+        self._theme = QComboBox(tab)
+        self._theme.setObjectName("theme")
+        self._theme.addItems(list(self._theme_names))
+        self._theme.setCurrentText(self._cache.get_theme())
+        self._initial_theme = self._theme.currentText()
+        theme_row = QWidget(tab)
+        theme_layout = QHBoxLayout(theme_row)
+        theme_layout.setContentsMargins(0, 0, 0, 0)
+        theme_layout.addWidget(self._theme)
+        theme_hint = QLabel("Applies on next launch", theme_row)
+        theme_hint.setObjectName("themeHint")
+        theme_layout.addWidget(theme_hint)
+        theme_layout.addStretch(1)
+        form.addRow("Theme", theme_row)
+        self._show_last_price_line = QCheckBox(tab)
+        self._show_last_price_line.setObjectName("showLastPriceLine")
+        self._show_last_price_line.setToolTip(
+            "A line from the newest candle's close to the price axis, with "
+            "the price on the axis."
+        )
+        self._show_last_price_line.setChecked(self._cache.get_show_last_price_line())
+        form.addRow("Last price line", self._show_last_price_line)
         self._basis_change_choice = QComboBox(tab)
         self._basis_change_choice.setObjectName("basisChangeChoice")
         self._basis_change_choice.setToolTip(

@@ -46,7 +46,7 @@ _FAULT_KEY = f"{_FAULT}_line"
 _HEALTHY = "iso_healthy"
 _HEALTHY_LABEL = "Healthy Plugin"
 _HEALTHY_KEY = f"{_HEALTHY}_line"
-_NOTICE_TITLE = "Extension Problem"
+_NOTICE_TITLE = "Startup Notice"
 _FAULT_NOTICE = f"'{_FAULT_LABEL}' failed and was turned off. Details were logged."
 
 

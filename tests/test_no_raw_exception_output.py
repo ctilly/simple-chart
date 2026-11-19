@@ -49,6 +49,11 @@ _ALLOWLIST: dict[tuple[str, str], str] = {
         "The shown message itself: the text of a UserFacingError only, by "
         "isinstance check."
     ),
+    ("app/theme.py", "load_themes"): (
+        "The startup notice for a skipped user theme file: the ValueError "
+        "text this module composed about the user's own file, or the TOML "
+        "parser's line/column message. Theme files hold no credentials."
+    ),
 }
 
 FORMATTED = "exception text formatted"

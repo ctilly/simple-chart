@@ -40,6 +40,10 @@ py-modules = ["main"]
 [tool.setuptools.packages.find]
 include = ["app*", "chart*", "data*", "indicators*", "simplechart*", "tools*"]
 
+[tool.setuptools.package-data]
+simplechart = ["py.typed"]
+app = ["themes/*.toml", "themes/*.qss"]
+
 # ------------------------------------------------------------------
 # mypyc compilation targets
 # ------------------------------------------------------------------

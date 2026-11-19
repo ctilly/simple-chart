@@ -7,7 +7,6 @@ from typing import Any
 import pytest
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDialog,
     QFrame,
@@ -79,7 +78,7 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
 
         tabs = dialog.findChild(QTabWidget, "applicationSettingsTabs")
         table = dialog.findChild(QTableWidget, "providerConnections")
-        dark_mode = dialog.findChild(QCheckBox, "darkMode")
+        theme = dialog.findChild(QComboBox, "theme")
         title_bar = dialog.findChild(QFrame, "dialogTitleBar")
         size_grip = dialog.findChild(QSizeGrip)
 
@@ -101,8 +100,8 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
             "Alpaca Paper",
             "Alpaca Live",
         ]
-        assert dark_mode is not None
-        assert not dark_mode.isEnabled()
+        assert theme is not None
+        assert theme.isEnabled()
         assert dialog.objectName() == "applicationSettingsDialog"
         assert "background:" in dialog.styleSheet()
         assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()

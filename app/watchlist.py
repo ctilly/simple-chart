@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.theme import active_colors
+
 
 def _format_percent_change(percent_change: float | None) -> str:
     if percent_change is None:
@@ -43,13 +45,14 @@ def _format_percent_change(percent_change: float | None) -> str:
 
 
 def _percent_color(percent_change: float | None) -> str:
+    colors = active_colors()
     if percent_change is None:
-        return "#888888"
+        return colors["percent_unknown"]
     if percent_change > 0:
-        return "#1f8f45"
+        return colors["percent_up"]
     if percent_change < 0:
-        return "#c7392f"
-    return "#666666"
+        return colors["percent_down"]
+    return colors["percent_flat"]
 
 
 class SymbolTileWidget(QWidget):
@@ -66,7 +69,6 @@ class SymbolTileWidget(QWidget):
 
         self._symbol_label = QLabel(symbol, self)
         self._symbol_label.setObjectName("watchlistSymbolLabel")
-        self._symbol_label.setStyleSheet("color: #222222; font-weight: 400;")
         layout.addWidget(self._symbol_label)
 
         layout.addStretch(1)
@@ -105,12 +107,6 @@ class SymbolListWidget(QListWidget):
     def __init__(self, symbols: list[str], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("watchlistSymbols")
-        self.setStyleSheet(
-            "QListWidget#watchlistSymbols { border: none; font-size: 13px; background: #fafafa; }"
-            "QListWidget#watchlistSymbols::item { padding: 5px 8px; border-bottom: 1px solid #eeeeee; }"
-            "QListWidget#watchlistSymbols::item:selected { background: #d0eeff; color: #000000; }"
-            "QListWidget#watchlistSymbols::item:hover:!selected { background: #f0f0f0; }"
-        )
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setDragEnabled(True)
@@ -237,10 +233,7 @@ class WatchlistWidget(QWidget):
         header = QLabel("Watchlist")
         header.setFixedHeight(26)
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.setStyleSheet(
-            "background: #e0e0e0; font-weight: bold; font-size: 11px; "
-            "color: #444444; border-bottom: 1px solid #c8c8c8;"
-        )
+        header.setObjectName("watchlistHeader")
         layout.addWidget(header)
 
         self._list = SymbolListWidget(symbols, self)
@@ -251,11 +244,7 @@ class WatchlistWidget(QWidget):
 
         self._add_btn = QPushButton("+ Add Symbol")
         self._add_btn.setFixedHeight(28)
-        self._add_btn.setStyleSheet(
-            "QPushButton { background: #f5f5f5; border: none; border-top: 1px solid #c8c8c8; "
-            "font-size: 12px; color: #555555; }"
-            "QPushButton:hover { background: #e8e8e8; }"
-        )
+        self._add_btn.setObjectName("watchlistAddButton")
         self._add_btn.clicked.connect(self._toggle_add_popup)
         layout.addWidget(self._add_btn)
 
@@ -310,12 +299,6 @@ class AddSymbolPopup(QWidget):
 
         frame = QFrame(self)
         frame.setObjectName("addSymbolPopupFrame")
-        frame.setStyleSheet(
-            "QFrame#addSymbolPopupFrame {"
-            " background: #eeeeee;"
-            " border: 1px solid #b8bcc5;"
-            "}"
-        )
         frame.installEventFilter(self)
 
         frame_layout = QVBoxLayout(frame)
@@ -325,12 +308,6 @@ class AddSymbolPopup(QWidget):
         title_bar = QFrame(frame)
         title_bar.setObjectName("addSymbolPopupTitleBar")
         title_bar.setCursor(Qt.CursorShape.SizeAllCursor)
-        title_bar.setStyleSheet(
-            "QFrame#addSymbolPopupTitleBar {"
-            " background: #dddddd;"
-            " border-bottom: 1px solid #c4c4c4;"
-            "}"
-        )
         title_bar.installEventFilter(self)
 
         title_layout = QHBoxLayout(title_bar)
@@ -339,7 +316,6 @@ class AddSymbolPopup(QWidget):
 
         title = QLabel("Add Symbol", title_bar)
         title.setObjectName("addSymbolPopupTitle")
-        title.setStyleSheet("color: #555555;")
         title.setCursor(Qt.CursorShape.SizeAllCursor)
         title.installEventFilter(self)
         title_layout.addWidget(title)
@@ -350,18 +326,12 @@ class AddSymbolPopup(QWidget):
         close_button.setText("x")
         close_button.setToolTip("Close")
         close_button.setFixedSize(18, 18)
-        close_button.setStyleSheet(
-            "QToolButton { color: #555555; background: #dddddd; "
-            "border: 1px solid #c4c4c4; border-radius: 3px; }"
-            "QToolButton:hover { background: #d0d0d0; }"
-        )
         close_button.clicked.connect(self.hide)
         title_layout.addWidget(close_button)
         frame_layout.addWidget(title_bar)
 
         input_row = QFrame(frame)
         input_row.setObjectName("addSymbolPopupInputRow")
-        input_row.setStyleSheet("QFrame#addSymbolPopupInputRow { background: #eeeeee; }")
 
         input_layout = QHBoxLayout(input_row)
         input_layout.setContentsMargins(6, 0, 6, 0)
@@ -370,10 +340,7 @@ class AddSymbolPopup(QWidget):
         self._line_edit = QLineEdit(input_row)
         self._line_edit.setPlaceholderText("Symbol")
         self._line_edit.setFixedHeight(24)
-        self._line_edit.setStyleSheet(
-            "QLineEdit { color: #333333; background: #ffffff; "
-            "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 6px; }"
-        )
+        self._line_edit.setObjectName("addSymbolPopupInput")
         self._line_edit.returnPressed.connect(self._submit)
         input_layout.addWidget(self._line_edit)
 
@@ -381,11 +348,6 @@ class AddSymbolPopup(QWidget):
         add_button.setObjectName("addSymbolPopupAdd")
         add_button.setText("Add")
         add_button.setFixedHeight(24)
-        add_button.setStyleSheet(
-            "QToolButton { color: #555555; background: #f7f7f7; "
-            "border: 1px solid #cccccc; border-radius: 3px; padding: 0px 8px; }"
-            "QToolButton:hover { background: #ffffff; }"
-        )
         add_button.clicked.connect(self._submit)
         input_layout.addWidget(add_button)
         frame_layout.addWidget(input_row)

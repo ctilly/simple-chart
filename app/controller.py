@@ -52,6 +52,7 @@ from typing import Any
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QCloseEvent, QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -87,12 +88,14 @@ from app.header_bar import AppHeader
 from app.load_timing import LoadTimingLog
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
+from app.theme import Theme, apply_theme, load_themes
 from app.watchlist import WatchlistWidget
 from app.window_chrome import (
     MainWindowTitleBar,
     WindowResizeController,
     is_wayland_platform,
 )
+from chart.styles import ChartColors
 from chart.window import INITIAL_VISIBLE_BARS, ChartWidget
 from data.adjustment import (
     BasisChange,
@@ -107,7 +110,9 @@ from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.timestamps import ms_to_datetime
 from data.session import (
+    DAILY_SETTLEMENT_DELAY,
     MARKET_TIMEZONE,
+    REGULAR_SESSION_CLOSE,
     REGULAR_SESSION_OPEN,
     completed_week_start,
     exchange_day_start as _exchange_day_start,
@@ -140,6 +145,7 @@ from data.provider.credentials import (
 from simplechart.extensions._guard import (
     call_extension,
     is_disabled,
+    queue_notice,
     set_disable_handler,
     take_notices,
 )
@@ -170,7 +176,8 @@ load_plugins()
 
 _LOGGER = logging.getLogger(__name__)
 
-_EXTENSION_NOTICE_TITLE = "Extension Problem"
+_EXTENSION_NOTICE_TITLE = "Startup Notice"
+USER_THEMES_DIR = Path.home() / ".simplechart" / "themes"
 
 
 # ------------------------------------------------------------------
@@ -189,6 +196,11 @@ INITIAL_EXTENSIONS: list[tuple[str, dict[str, Any]]] = [
 _DEFAULT_LOOKBACK_DAYS = 600
 _DAILY_HISTORY_START = datetime(2016, 1, 1, tzinfo=timezone.utc)
 _SNAPSHOT_REFRESH_MS = 60_000
+# The displayed chart polls its newest bars this often. Regular US equity
+# symbols poll only while the provider's latest bars fall in the regular
+# session or the minute after the daily bar settles (16:05 ET).
+_LIVE_REFRESH_MS = 15_000
+_LIVE_REFRESH_GRACE = DAILY_SETTLEMENT_DELAY + timedelta(minutes=1)
 _DRAWING_PREVIEW_FRAME_MS = 16
 _CHART_LOAD_DEBOUNCE_MS = 100
 _MAX_ACTIVE_CHART_LOADS = 2
@@ -532,7 +544,7 @@ class _RefreshReload:
 class _ChartLoadTask:
     request: _ChartLoadRequest
     thread: QThread
-    worker: "_FetchWorker | _OlderHistoryWorker"
+    worker: "_FetchWorker | _OlderHistoryWorker | _LiveRefreshWorker"
     cancellation_event: threading.Event
     # An older-history load for the displayed request, not a chart load.
     older: bool = False
@@ -636,6 +648,39 @@ def _route_for_symbol(
     yahoo_route: _DataRoute,
 ) -> _DataRoute:
     return yahoo_route if _is_yahoo_futures_symbol(symbol) else selected_route
+
+
+def _chart_colors(theme: Theme) -> ChartColors:
+    c = theme.colors
+    # Grid lines use the axis color; the theme's grid supplies their alpha.
+    grid_alpha = int(c["grid"][7:9] or "ff", 16)
+    return ChartColors(
+        background=c["background"],
+        foreground=c["foreground"],
+        odd_plot_background=c["background"],
+        hollow_body=c["background"],
+        grid_alpha=(grid_alpha + 0.5) / 255,
+        crosshair=c["crosshair"],
+        candle_up=c["candle_up"],
+        candle_down=c["candle_down"],
+        volume_up=c["volume_up"],
+        volume_down=c["volume_down"],
+        legend_hidden=c["text_disabled"],
+        last_price=c["last_price"],
+    )
+
+
+def _live_refresh_due(symbol: str, endpoint: datetime) -> bool:
+    """
+    Whether a chart of symbol, whose provider returns bars up to endpoint,
+    can have new bars to poll for.
+    """
+    if not _uses_regular_equity_session(symbol):
+        return True
+    local = endpoint.astimezone(MARKET_TIMEZONE)
+    session_open = datetime.combine(local.date(), REGULAR_SESSION_OPEN, tzinfo=MARKET_TIMEZONE)
+    session_close = datetime.combine(local.date(), REGULAR_SESSION_CLOSE, tzinfo=MARKET_TIMEZONE)
+    return local.weekday() < 5 and session_open <= local < session_close + _LIVE_REFRESH_GRACE
 
 
 def _provider_availability_by_name(
@@ -960,6 +1005,109 @@ class _OlderHistoryWorker(QObject):
                     f"{request.timeframe.value} history",
                 )
                 self.error.emit(request, report_error(_LOGGER, exc, context))
+        finally:
+            self.completed.emit()
+
+
+class _LiveRefreshWorker(QObject):
+    """
+    Polls the displayed chart's newest bars: a warm reload of the request,
+    whose provider and cache work is that of any reload, shown from the
+    displayed series' first bar so older history panned in stays on screen.
+
+    finished carries (request, displayed series, series), the series None
+    when the history the chart starts from is no longer fetched coverage
+    (the provider moved it to a new adjustment basis): a normal load then
+    resets or shows it. error carries (request, displayed series)
+    and logs only when log_errors is set. Both are suppressed after
+    cancellation; completed fires exactly once.
+    """
+
+    finished: pyqtSignal = pyqtSignal(object, object, object)
+    error: pyqtSignal = pyqtSignal(object, object)
+    completed: pyqtSignal = pyqtSignal()
+
+    def __init__(
+        self,
+        db_path: str,
+        credential_store: CredentialStore,
+        request: _ChartLoadRequest,
+        displayed: OHLCVSeries,
+        cancellation_event: threading.Event,
+        log_errors: bool,
+    ) -> None:
+        super().__init__()
+        self._db_path = db_path
+        self._credential_store = credential_store
+        self._request = request
+        self._displayed = displayed
+        self._cancellation_event = cancellation_event
+        self._log_errors = log_errors
+
+    def run(self) -> None:
+        request = self._request
+        displayed_start = self._displayed.bars[0].timestamp
+        try:
+            _check_chart_load_cancelled(self._cancellation_event)
+            aggregator = Aggregator(
+                create_provider(request.connection, self._credential_store)
+            )
+            now = datetime.now(tz=timezone.utc)
+            with background_requests(self._cancellation_event), Cache(
+                self._db_path
+            ) as cache:
+                try:
+                    series: OHLCVSeries | None = _fetch_series_with_concurrent_references(
+                        aggregator,
+                        self._db_path,
+                        cache,
+                        request.cache_namespace,
+                        request.symbol,
+                        request.timeframe,
+                        now,
+                        cancellation_event=self._cancellation_event,
+                    )
+                except _BasisReset:
+                    series = None
+                displayed_start_ms = int(displayed_start.timestamp() * 1000)
+                if series is not None and (
+                    not series.bars or series.bars[0].timestamp != displayed_start
+                ):
+                    coverage = cache.get_bar_fetch_coverage(
+                        request.cache_namespace,
+                        request.symbol,
+                        request.timeframe,
+                    )
+                    if coverage is None or coverage[0] > displayed_start_ms:
+                        series = None
+                    else:
+                        history_end = _history_end(request.timeframe, aggregator, now)
+                        series = OHLCVSeries(
+                            request.symbol,
+                            request.timeframe,
+                            cache.get_bars(
+                                request.cache_namespace,
+                                request.symbol,
+                                request.timeframe,
+                                displayed_start_ms,
+                                int(history_end.timestamp() * 1000),
+                            ),
+                        )
+            _check_chart_load_cancelled(self._cancellation_event)
+            if series is not None:
+                series_arrays(series)
+            self.finished.emit(request, self._displayed, series)
+        except _ChartLoadCancelled:
+            pass
+        except Exception as exc:
+            if not self._cancellation_event.is_set():
+                if self._log_errors:
+                    context = ErrorContext(
+                        f"Refreshing the newest {request.symbol} "
+                        f"{request.timeframe.value} bars",
+                    )
+                    report_error(_LOGGER, exc, context)
+                self.error.emit(request, self._displayed)
         finally:
             self.completed.emit()
 
@@ -2616,15 +2764,11 @@ class MainWindow(QMainWindow):
         # ------------------------------------------------------------------
         # UI
         # ------------------------------------------------------------------
+        theme = self._start_theme()
         frame = QFrame()
         frame.setObjectName("appFrame")
         frame_border_width = 3 if self._uses_custom_window_chrome else 5
-        frame.setStyleSheet(
-            "QFrame#appFrame {"
-            " background: #ffffff;"
-            f" border: {frame_border_width}px solid #9d978d;"
-            "}"
-        )
+        frame.setProperty("customChrome", self._uses_custom_window_chrome)
 
         # Top-level layout: app header above the watchlist/chart workspace.
         root_layout = QVBoxLayout(frame)
@@ -2674,8 +2818,12 @@ class MainWindow(QMainWindow):
             on_add=self._on_add_extension,
             on_drawing_tool=self._on_drawing_tool_selected,
             drawing_tools=self._drawing_tool_entries(),
+            colors=_chart_colors(theme),
         )
 
+        self._chart.plot_manager.set_last_price_visible(
+            self._cache.get_show_last_price_line()
+        )
         chart_layout.addWidget(self._symbol_bar)
         chart_layout.addWidget(self._chart)
         main_layout.addWidget(chart_area)
@@ -2776,6 +2924,11 @@ class MainWindow(QMainWindow):
         self._snapshot_timer.setInterval(_SNAPSHOT_REFRESH_MS)
         self._snapshot_timer.timeout.connect(self._refresh_watchlist_snapshots)
         self._snapshot_timer.timeout.connect(self._refresh_level1)
+        self._live_refresh_timer = QTimer(self)
+        self._live_refresh_timer.setInterval(_LIVE_REFRESH_MS)
+        self._live_refresh_timer.timeout.connect(self._refresh_live_bars)
+        # Whether the last poll failed; only the first failure is logged.
+        self._live_refresh_failing = False
 
         # Most recently loaded series — used to convert bar index to timestamp
         # when the user clicks a bar (finplot's x-axis is indexed, not time-based).
@@ -2812,11 +2965,33 @@ class MainWindow(QMainWindow):
                 )
         self._load()
         self._snapshot_timer.start()
+        self._live_refresh_timer.start()
         self._refresh_watchlist_snapshots()
 
     # ------------------------------------------------------------------
     # Symbol and timeframe loading
     # ------------------------------------------------------------------
+
+    def _start_theme(self) -> Theme:
+        """
+        Apply the saved theme to the application (the stylesheet, and a
+        palette for dark themes). Themes skipped at load, and a saved theme
+        that no longer exists, are announced with the extension notices.
+        Keeps the names the settings dialog offers.
+        """
+        themes, notices = load_themes(USER_THEMES_DIR)
+        saved = self._cache.get_theme()
+        theme = themes.get(saved)
+        if theme is None:
+            notices.append(f'Theme "{saved}" was not found. Using Light.')
+            theme = themes["Light"]
+        for notice in notices:
+            queue_notice(notice)
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)
+        apply_theme(app, theme)
+        self._theme_names = list(themes)
+        return theme
 
     def _on_symbol_changed(self, symbol: str) -> None:
         self._state.symbol = symbol
@@ -2840,6 +3015,8 @@ class MainWindow(QMainWindow):
         if self._stopping_data_workers or self._state.symbol is None:
             return
         requested_at = time.monotonic()
+        # A poll failure on the new chart is logged again.
+        self._live_refresh_failing = False
 
         self._end_interaction_sessions()
         self._chart_load_pending = True
@@ -3401,27 +3578,38 @@ class MainWindow(QMainWindow):
         self,
         series: OHLCVSeries,
         history_complete: bool = True,
+        live: bool = False,
     ) -> None:
         """
         Replace the displayed series with one that reaches further back (the
         full history window, or while it loads a longer interim window),
         keeping the view on the same bars (finplot x is bar-index based, so
         the view shifts right by the number of prepended bars).
+
+        A live merge (polled newest bars) also keeps the newest bar in view
+        when it was: the view shifts right by the appended bars. Panels whose
+        y-range auto-fits re-fit, so a new high or volume bar is not clipped.
         """
         previous = self._current_series
+        pm = self._chart.plot_manager
+        price_vb: Any = pm.price_viewbox()
         prepended = 0
+        x_shift = 0.0
         if previous is not None and previous.bars:
             prepended = bisect.bisect_left(
                 [bar.timestamp for bar in series.bars],
                 previous.bars[0].timestamp,
             )
+            x_shift = float(prepended)
+            view = price_vb.viewRect()
+            if live and view.left() <= len(previous.bars) - 1 <= view.right():
+                x_shift += max(0, len(series.bars) - prepended - len(previous.bars))
         if history_complete:
             self._partial_history_request = None
             self._reset_history_refresh()
         self._displayed_history_complete = history_complete
         self._current_series = series
-        pm = self._chart.plot_manager
-        with pm.preserving_viewport(x_shift=float(prepended)):
+        with pm.preserving_viewport(x_shift=x_shift):
             pm.draw_candles(series)
             pm.draw_volume(series)
             render_passes = self._extension_runtime.render_all(
@@ -3433,6 +3621,8 @@ class MainWindow(QMainWindow):
             self._remove_stale_extension_renders(render_passes)
         self._update_extension_notice(render_passes)
         pm.refresh(preserve_view=True)
+        if live:
+            price_vb.refresh_all_y_zoom()
         self._update_bar_correction_notice(series)
         if history_complete:
             route = self._route_for_symbol(series.symbol)
@@ -3558,30 +3748,10 @@ class MainWindow(QMainWindow):
         oldest bar. One at a time, only for a complete, settled chart that no
         other load or symbol refresh is writing.
         """
-        request = self._current_chart_request
-        series = self._current_series
-        if (
-            self._stopping_data_workers
-            or request is None
-            or series is None
-            or not series.bars
-            or series.symbol != request.symbol
-            or series.timeframe != request.timeframe
-            or not self._displayed_history_complete
-            or self._chart_load_pending
-            or self._pending_chart_load is not None
-            or self._held_history_merge is not None
-            or self._held_older_merge is not None
-            or self._older_history_stopped == request
-            or (request.cache_namespace, request.symbol) in self._symbol_refreshes
-            or any(
-                (task.request.cache_namespace, task.request.symbol)
-                == (request.cache_namespace, request.symbol)
-                for task in self._chart_load_tasks.values()
-            )
-            or not self._older_result_applies(request)
-        ):
+        settled = self._settled_chart()
+        if settled is None or self._older_history_stopped == settled[0]:
             return
+        request, series = settled
         cancellation_event = threading.Event()
         worker = _OlderHistoryWorker(
             self._db_path,
@@ -3615,6 +3785,135 @@ class MainWindow(QMainWindow):
             self._history_status_message = "Loading older history..."
             status_bar.showMessage(self._history_status_message)
         thread.start()
+
+    def _settled_chart(self) -> tuple[_ChartLoadRequest, OHLCVSeries] | None:
+        """
+        The displayed request and series when the chart is complete and
+        settled: its series is the request's, and no load, held merge, symbol
+        refresh or task for the symbol is pending or running. Background work
+        on the displayed chart (older history, polls) starts only then.
+        """
+        request = self._current_chart_request
+        series = self._current_series
+        if (
+            self._stopping_data_workers
+            or request is None
+            or series is None
+            or not series.bars
+            or series.symbol != request.symbol
+            or series.timeframe != request.timeframe
+            or not self._displayed_history_complete
+            or self._chart_load_pending
+            or self._pending_chart_load is not None
+            or self._held_history_merge is not None
+            or self._held_older_merge is not None
+            or (request.cache_namespace, request.symbol) in self._symbol_refreshes
+            or any(
+                (task.request.cache_namespace, task.request.symbol)
+                == (request.cache_namespace, request.symbol)
+                for task in self._chart_load_tasks.values()
+            )
+            or not self._older_result_applies(request)
+        ):
+            return None
+        return request, series
+
+    def _refresh_live_bars(self) -> None:
+        """
+        Poll the displayed chart's newest bars while its market can have new
+        ones. Skipped while the chart is not settled or a drag or drawing
+        session resolves bar indexes against it; the next tick tries again.
+        """
+        settled = self._settled_chart()
+        if (
+            settled is None
+            or self._drawing_session is not None
+            or self._extension_runtime.drag_active
+        ):
+            return
+        request, series = settled
+        route = self._route_for_symbol(request.symbol)
+        endpoint = route.aggregator.latest_history_end(
+            request.timeframe,
+            datetime.now(tz=timezone.utc),
+        )
+        if not _live_refresh_due(request.symbol, endpoint):
+            return
+        cancellation_event = threading.Event()
+        worker = _LiveRefreshWorker(
+            self._db_path,
+            self._credential_store,
+            request,
+            series,
+            cancellation_event,
+            log_errors=not self._live_refresh_failing,
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_live_refresh_done)
+        worker.error.connect(self._on_live_refresh_error)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        generation = request.generation
+        thread.finished.connect(
+            lambda: self._on_chart_thread_finished(generation)
+        )
+        self._chart_load_tasks[generation] = _ChartLoadTask(
+            request,
+            thread,
+            worker,
+            cancellation_event,
+        )
+        thread.start()
+
+    def _live_result_applies(
+        self,
+        request: _ChartLoadRequest,
+        displayed: OHLCVSeries,
+    ) -> bool:
+        return self._older_result_applies(request) and self._current_series is displayed
+
+    def _on_live_refresh_done(
+        self,
+        request: _ChartLoadRequest,
+        displayed: OHLCVSeries,
+        series: OHLCVSeries | None,
+    ) -> None:
+        if not self._live_result_applies(request, displayed):
+            return
+        self._live_refresh_failing = False
+        route = self._route_for_symbol(request.symbol)
+        if self._drawing_session is not None or self._extension_runtime.drag_active:
+            # Drag and drawing sessions resolve bar indexes against the
+            # displayed series; the next poll applies.
+            self._symbol_bar.set_data_source(route.display_name, "connected")
+            return
+        if (
+            series is None
+            or not series.bars
+            or series.bars[0].timestamp != displayed.bars[0].timestamp
+        ):
+            # A new adjustment basis reset the history the chart starts
+            # from; a normal load resets or shows it again.
+            self._load()
+            return
+        if series.bars == displayed.bars:
+            self._symbol_bar.set_data_source(route.display_name, "connected")
+            return
+        self._apply_history_merge(series, live=True)
+
+    def _on_live_refresh_error(
+        self,
+        request: _ChartLoadRequest,
+        displayed: OHLCVSeries,
+    ) -> None:
+        if not self._live_result_applies(request, displayed):
+            return
+        # No dialog every poll; the source indicator shows the chart is stale.
+        self._live_refresh_failing = True
+        route = self._route_for_symbol(request.symbol)
+        self._symbol_bar.set_data_source(route.display_name, "error")
 
     def _older_result_applies(self, request: _ChartLoadRequest) -> bool:
         return (
@@ -4543,11 +4842,15 @@ class MainWindow(QMainWindow):
             current_timeframe=self._state.timeframe,
             comparison_service=comparison_service,
             symbol_refresh=self,
+            theme_names=self._theme_names,
         )
         result = dialog.exec()
         if dialog.bars_changed():
             self._reload_extensions()
         if result == QDialog.DialogCode.Accepted:
+            self._chart.plot_manager.set_last_price_visible(
+                self._cache.get_show_last_price_line()
+            )
             self._request_provider_activation(dialog.selected_connection_id())
 
     def _request_provider_activation(self, connection_id: str) -> None:
@@ -4669,6 +4972,8 @@ class MainWindow(QMainWindow):
         self._level1_refresh_pending = False
         if self._snapshot_timer.isActive():
             self._snapshot_timer.stop()
+        if self._live_refresh_timer.isActive():
+            self._live_refresh_timer.stop()
         if self._chart_load_timer.isActive():
             self._chart_load_timer.stop()
         if self._drawing_preview_timer.isActive():
