@@ -3,7 +3,7 @@ app/watchlist.py
 
 Watchlist sidebar — a scrollable list of user-curated symbols.
 
-Clicking a symbol emits symbol_selected so the controller can load it.
+Clicking a symbol or navigating with Up and Down emits symbol_selected.
 Dragging symbols reorders the list and emits the full ordered symbol set.
 Right-clicking a symbol shows a context menu with a Remove option.
 The "+" button at the bottom opens an input dialog to add a new symbol.
@@ -18,7 +18,7 @@ from collections.abc import Callable
 from typing import cast
 
 from PyQt6.QtCore import QEvent, QObject, QPoint, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QDropEvent, QMouseEvent
+from PyQt6.QtGui import QDropEvent, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -100,7 +100,7 @@ class SymbolListWidget(QListWidget):
     def _symbol_for_item(self, item: QListWidgetItem) -> str:
         return cast(str, item.data(Qt.ItemDataRole.UserRole))
 
-    symbol_clicked: pyqtSignal = pyqtSignal(str)
+    symbol_selected: pyqtSignal = pyqtSignal(str)
     remove_requested: pyqtSignal = pyqtSignal(str)
     order_changed: pyqtSignal = pyqtSignal(list)
 
@@ -181,8 +181,17 @@ class SymbolListWidget(QListWidget):
         if after != before:
             self.order_changed.emit(after)
 
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        previous = self.currentItem()
+        super().keyPressEvent(event)
+        if event is None or event.key() not in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            return
+        current = self.currentItem()
+        if current is not None and current is not previous and current.isSelected():
+            self.symbol_selected.emit(self._symbol_for_item(current))
+
     def _handle_item_clicked(self, item: QListWidgetItem) -> None:
-        self.symbol_clicked.emit(self._symbol_for_item(item))
+        self.symbol_selected.emit(self._symbol_for_item(item))
 
     def _show_context_menu(self, pos: QPoint) -> None:
         item = self.itemAt(pos)
@@ -200,7 +209,7 @@ class WatchlistWidget(QWidget):
     Narrow sidebar showing the user's watchlist.
 
     Signals:
-        symbol_selected(str) — emitted when the user clicks a symbol.
+        symbol_selected(str) — emitted on click or Up/Down navigation.
     """
 
     symbol_selected: pyqtSignal = pyqtSignal(str)
@@ -237,7 +246,7 @@ class WatchlistWidget(QWidget):
         layout.addWidget(header)
 
         self._list = SymbolListWidget(symbols, self)
-        self._list.symbol_clicked.connect(self.symbol_selected.emit)
+        self._list.symbol_selected.connect(self.symbol_selected.emit)
         self._list.remove_requested.connect(self._on_remove)
         self._list.order_changed.connect(self._on_reorder)
         layout.addWidget(self._list)

@@ -381,7 +381,7 @@ def _assert_loads_complete_cleanly(
         assert plot_manager._candle_plot is not None
         assert plot_manager._bar_index is not None
         assert len(plot_manager._bar_index) == len(expected_bars)
-        assert window._symbol_bar._source_dot.toolTip() == (
+        assert window._data_source_status._source_dot.toolTip() == (
             "Yahoo Finance: Last data request succeeded"
         )
         status_bar = window.statusBar()

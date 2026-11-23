@@ -14,9 +14,20 @@ QFrame#appFrame[customChrome="true"] {
     background: $header_background;
     border-bottom: 1px solid $header_border;
 }
-QLabel#appHeaderShortcuts {
-    color: $header_value;
+QLabel#level1Quote,
+QStatusBar,
+QStatusBar QLabel {
     font-size: 12px;
+}
+QLabel#level1Quote {
+    color: $header_value;
+}
+QStatusBar,
+QStatusBar QLabel {
+    color: $foreground;
+}
+QStatusBar QLabel#marketClock {
+    padding-left: 6px;
 }
 
 /* Window chrome */
@@ -65,7 +76,6 @@ QPushButton#timeframeButton:!checked {
 }
 QLabel#dataSourceStatusLabel {
     color: $text_secondary;
-    font-size: 12px;
 }
 QToolButton#applicationSettingsButton {
     background: transparent;

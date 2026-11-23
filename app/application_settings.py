@@ -269,6 +269,9 @@ class ApplicationSettingsDialog(QDialog):
             None if choice is None else BasisChangeChoice(choice)
         )
         self._cache.set_show_last_price_line(self._show_last_price_line.isChecked())
+        self._cache.set_chart_event_visibility(
+            self._show_past_earnings.isChecked(), self._show_dividends.isChecked(),
+        )
         if self._theme.currentText() != self._initial_theme:
             self._cache.set_theme(self._theme.currentText())
         super().accept()
@@ -361,6 +364,15 @@ class ApplicationSettingsDialog(QDialog):
         )
         self._show_last_price_line.setChecked(self._cache.get_show_last_price_line())
         form.addRow("Last price line", self._show_last_price_line)
+        earnings, dividends = self._cache.get_chart_event_visibility()
+        self._show_past_earnings = QCheckBox("Show past earnings on chart", tab)
+        self._show_past_earnings.setObjectName("showPastEarnings")
+        self._show_past_earnings.setChecked(earnings)
+        form.addRow(self._show_past_earnings)
+        self._show_dividends = QCheckBox("Show dividends on chart", tab)
+        self._show_dividends.setObjectName("showDividends")
+        self._show_dividends.setChecked(dividends)
+        form.addRow(self._show_dividends)
         self._basis_change_choice = QComboBox(tab)
         self._basis_change_choice.setObjectName("basisChangeChoice")
         self._basis_change_choice.setToolTip(

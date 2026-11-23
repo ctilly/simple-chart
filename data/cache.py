@@ -1516,6 +1516,34 @@ class Cache:
                 (_SHOW_LAST_PRICE_LINE_SETTING, "1" if show else "0"),
             )
 
+    def get_chart_event_visibility(self) -> tuple[bool, bool]:
+        enabled = {
+            row[0]
+            for row in self._conn.execute(
+                """
+                SELECT setting_key FROM application_settings
+                WHERE setting_key IN ('show_past_earnings', 'show_dividends')
+                  AND setting_value = '1'
+                """
+            )
+        }
+        return "show_past_earnings" in enabled, "show_dividends" in enabled
+
+    def set_chart_event_visibility(self, earnings: bool, dividends: bool) -> None:
+        with self._conn:
+            self._conn.executemany(
+                """
+                INSERT INTO application_settings (setting_key, setting_value)
+                VALUES (?, ?)
+                ON CONFLICT(setting_key) DO UPDATE SET
+                    setting_value = excluded.setting_value
+                """,
+                (
+                    ("show_past_earnings", "1" if earnings else "0"),
+                    ("show_dividends", "1" if dividends else "0"),
+                ),
+            )
+
     def get_theme(self) -> str:
         """The saved theme name; Light until one is chosen."""
         row = self._conn.execute(

@@ -90,6 +90,16 @@ def _no_live_polling(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(controller.MainWindow, "_refresh_live_bars", lambda _window: None)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_earnings_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    from yfinance import Ticker
+
+    def empty_calendar(_ticker: Ticker) -> dict[str, object]:
+        return {}
+
+    monkeypatch.setattr(Ticker, "get_calendar", empty_calendar)
+
+
 _BASE_STYLE: list[str] = []
 
 

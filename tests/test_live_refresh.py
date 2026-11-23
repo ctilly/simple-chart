@@ -159,7 +159,7 @@ def _price_range(window: MainWindow) -> tuple[float, float]:
 
 
 def _source_status(window: MainWindow) -> str:
-    return window._symbol_bar._source_dot.toolTip()
+    return window._data_source_status._source_dot.toolTip()
 
 
 # ----------------------------------------------------------------------

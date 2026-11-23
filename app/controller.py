@@ -46,7 +46,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
@@ -65,6 +65,9 @@ from PyQt6.QtWidgets import (
 from app.extension_config import ExtensionConfigDialog
 from app.application_settings import ApplicationSettingsDialog
 from app.bar_comparison import BarComparisonService
+from app.data_source_status import DataSourceStatus
+from app.chart_events import CHART_EVENT_PREFIX, chart_event_markers
+from app.earnings_worker import EarningsWorker, HistoricalEventDates
 from app.data_quality import (
     SymbolRefreshPlan,
     SymbolRefreshState,
@@ -86,8 +89,10 @@ from app.extension_runtime import (
 from app.extension_store import ChartExtensionStore
 from app.header_bar import AppHeader
 from app.load_timing import LoadTimingLog
+from app.market_status_bar import MarketStatusBar
 from app.state import ChartExtensionState, State
 from app.symbol_bar import SymbolBar
+from app.symbol_details import SymbolDetails
 from app.theme import Theme, apply_theme, load_themes
 from app.watchlist import WatchlistWidget
 from app.window_chrome import (
@@ -2786,6 +2791,10 @@ class MainWindow(QMainWindow):
             )
 
         self._app_header = AppHeader()
+        self._symbol_details = SymbolDetails(self)
+        self._symbol_details.idle.connect(self._maybe_finalize_close)
+        self._app_header.details_requested.connect(self._open_symbol_details)
+        self._details_quote: tuple[_Level1Request, Level1Quote] | None = None
         root_layout.addWidget(self._app_header)
 
         main_layout = QHBoxLayout()
@@ -2811,6 +2820,17 @@ class MainWindow(QMainWindow):
         chart_layout.setSpacing(0)
 
         self._symbol_bar = SymbolBar()
+        self._data_source_status = DataSourceStatus()
+        self._market_status_bar = MarketStatusBar(self._data_source_status, frame)
+        root_layout.addWidget(self._market_status_bar)
+        self._earnings_symbol: str | None = None
+        self._chart_event_visibility = (False, False)
+        self._chart_event_dates: HistoricalEventDates = ((), ())
+        self._earnings_cancelled: threading.Event | None = None
+        self._earnings_generation = 0
+        self._earnings_pending: tuple[str, int] | None = None
+        self._earnings_thread: QThread | None = None
+        self._earnings_worker: EarningsWorker | None = None
         self._chart      = ChartWidget(
             on_toggle=self._on_extension_toggled,
             on_configure=self._on_extension_configure,
@@ -2840,10 +2860,12 @@ class MainWindow(QMainWindow):
         self._chart.interactions.on_drag_cancel(self._on_drag_cancel)
         self._chart.on_cancel(self._on_cancel_shortcut)
         self._chart.on_commit(self._on_commit_shortcut)
+        self._chart.on_symbol_entry(self._on_chart_symbol_entry)
         self._chart.older_history_wanted.connect(self._on_older_history_wanted)
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
+        self._symbol_bar.search_idle.connect(self._maybe_finalize_close)
         self._symbol_bar.timeframe_changed.connect(self._on_timeframe_changed)
         self._symbol_bar.settings_requested.connect(self._on_application_settings)
 
@@ -2972,6 +2994,10 @@ class MainWindow(QMainWindow):
     # Symbol and timeframe loading
     # ------------------------------------------------------------------
 
+    def statusBar(self) -> MarketStatusBar:
+        # Keep the footer inside the themed frame while retaining status messages.
+        return self._market_status_bar
+
     def _start_theme(self) -> Theme:
         """
         Apply the saved theme to the application (the stylesheet, and a
@@ -2992,6 +3018,102 @@ class MainWindow(QMainWindow):
         apply_theme(app, theme)
         self._theme_names = list(themes)
         return theme
+
+    def _select_earnings_symbol(self, symbol: str) -> None:
+        visibility = self._cache.get_chart_event_visibility()
+        if symbol == self._earnings_symbol and visibility == self._chart_event_visibility:
+            return
+        if symbol != self._earnings_symbol:
+            self._chart_event_dates = ((), ())
+            self._app_header.set_earnings_date("—")
+        self._earnings_symbol = symbol
+        self._chart_event_visibility = visibility
+        self._earnings_generation += 1
+        if self._earnings_cancelled is not None:
+            self._earnings_cancelled.set()
+        self._earnings_pending = (symbol, self._earnings_generation)
+        self._start_pending_earnings()
+
+    def _start_pending_earnings(self) -> None:
+        if self._earnings_thread is not None or self._earnings_pending is None:
+            return
+        symbol, generation = self._earnings_pending
+        self._earnings_pending = None
+        thread = QThread()
+        cancelled = threading.Event()
+        worker = EarningsWorker(
+            self._yahoo_route.aggregator, symbol, generation,
+            self._chart_event_visibility, cancelled,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result.connect(self._on_earnings_result)
+        worker.history_result.connect(self._on_chart_event_result)
+        worker.completed.connect(thread.quit)
+        worker.completed.connect(worker.deleteLater)
+        thread.finished.connect(self._on_earnings_finished)
+        self._earnings_thread = thread
+        self._earnings_worker = worker
+        self._earnings_cancelled = cancelled
+        thread.start()
+
+    def _on_earnings_result(
+        self, generation: int, dates: tuple[date, date] | None,
+    ) -> None:
+        if (
+            self._stopping_data_workers
+            or generation != self._earnings_generation
+            or dates is None
+        ):
+            return
+        first, last = dates
+        label = first.strftime("%b %d").replace(" 0", " ")
+        if first != last:
+            end = (
+                str(last.day) if first.month == last.month and first.year == last.year
+                else last.strftime("%b %d").replace(" 0", " ")
+            )
+            label = f"{label}–{end}"
+        days_until = (first - datetime.now(MARKET_TIMEZONE).date()).days
+        self._app_header.set_earnings_date(label, highlight=0 <= days_until <= 5)
+
+    def _on_chart_event_result(self, generation: int, dates: HistoricalEventDates) -> None:
+        if self._stopping_data_workers or generation != self._earnings_generation:
+            return
+        self._chart_event_dates = dates
+        self._refresh_chart_event_markers()
+
+    def _refresh_chart_event_markers(self) -> set[str]:
+        series = self._current_series
+        markers = (
+            chart_event_markers(series, self._chart_event_dates, self._chart_event_visibility)
+            if series is not None and not self._chart_load_pending
+            and series.symbol == self._earnings_symbol else []
+        )
+        plot = self._chart.plot_manager
+        active = {marker.key for marker in markers}
+        for marker in markers:
+            plot.update_marker(marker)
+        for key in plot.active_marker_keys():
+            if key.startswith(CHART_EVENT_PREFIX) and key not in active:
+                plot.remove_marker(key)
+        return active
+
+    def _on_earnings_finished(self) -> None:
+        thread = self._earnings_thread
+        assert thread is not None
+        thread.deleteLater()
+        self._earnings_thread = None
+        self._earnings_worker = None
+        self._earnings_cancelled = None
+        self._start_pending_earnings()
+        self._maybe_finalize_close()
+
+    def _on_chart_symbol_entry(self, first_character: str) -> bool:
+        if self._closing or self._drawing_session is not None or self._extension_runtime.drag_active:
+            return False
+        self._symbol_bar.begin_chart_entry(first_character)
+        return True
 
     def _on_symbol_changed(self, symbol: str) -> None:
         self._state.symbol = symbol
@@ -3023,11 +3145,15 @@ class MainWindow(QMainWindow):
         self._chart.clear_all()
         self._chart.legend.clear_all()
         self._app_header.set_symbol(self._state.symbol)
+        if self._details_quote is not None and not self._is_current_level1_request(self._details_quote[0]):
+            self._symbol_details.retain_quote()
+            self._details_quote = None
+        self._select_earnings_symbol(self._state.symbol)
         quote_refreshed = self._level1_symbol != self._state.symbol
         if quote_refreshed:
             self._refresh_level1()
         route = self._route_for_symbol(self._state.symbol)
-        self._symbol_bar.set_data_source(route.display_name, "pending")
+        self._data_source_status.set_data_source(route.display_name, "pending")
 
         request = self._make_chart_load_request(
             self._state.symbol,
@@ -3509,7 +3635,7 @@ class MainWindow(QMainWindow):
         # The recent chart stays usable, so report without a dialog. Indicators
         # that need full history stay hidden; the next load resumes the fetch.
         route = self._route_for_symbol(request.symbol)
-        self._symbol_bar.set_data_source(route.display_name, "error")
+        self._data_source_status.set_data_source(route.display_name, "error")
         status_bar = self.statusBar()
         if status_bar is not None:
             self._history_status_message = (
@@ -3626,7 +3752,7 @@ class MainWindow(QMainWindow):
         self._update_bar_correction_notice(series)
         if history_complete:
             route = self._route_for_symbol(series.symbol)
-            self._symbol_bar.set_data_source(route.display_name, "connected")
+            self._data_source_status.set_data_source(route.display_name, "connected")
             self._clear_history_status_message()
             self._resolve_basis_changes(route, series.symbol)
             QTimer.singleShot(0, self._check_older_history)
@@ -3689,7 +3815,7 @@ class MainWindow(QMainWindow):
         self._current_series = series
         self._chart_load_pending = False
         route = self._route_for_symbol(series.symbol)
-        self._symbol_bar.set_data_source(
+        self._data_source_status.set_data_source(
             route.display_name,
             "connected" if history_complete else "history",
         )
@@ -3704,7 +3830,7 @@ class MainWindow(QMainWindow):
             if status_bar is not None:
                 self._history_status_message = "Loading indicators..."
                 status_bar.showMessage(self._history_status_message)
-        self._symbol_bar.set_symbol(series.symbol)
+        self._symbol_bar.set_symbol(series.symbol, preserve_edit=True)
         self._watchlist.set_active_symbol(series.symbol)
         request = self._current_chart_request
         if (
@@ -3887,7 +4013,7 @@ class MainWindow(QMainWindow):
         if self._drawing_session is not None or self._extension_runtime.drag_active:
             # Drag and drawing sessions resolve bar indexes against the
             # displayed series; the next poll applies.
-            self._symbol_bar.set_data_source(route.display_name, "connected")
+            self._data_source_status.set_data_source(route.display_name, "connected")
             return
         if (
             series is None
@@ -3899,7 +4025,7 @@ class MainWindow(QMainWindow):
             self._load()
             return
         if series.bars == displayed.bars:
-            self._symbol_bar.set_data_source(route.display_name, "connected")
+            self._data_source_status.set_data_source(route.display_name, "connected")
             return
         self._apply_history_merge(series, live=True)
 
@@ -3913,7 +4039,7 @@ class MainWindow(QMainWindow):
         # No dialog every poll; the source indicator shows the chart is stale.
         self._live_refresh_failing = True
         route = self._route_for_symbol(request.symbol)
-        self._symbol_bar.set_data_source(route.display_name, "error")
+        self._data_source_status.set_data_source(route.display_name, "error")
 
     def _older_result_applies(self, request: _ChartLoadRequest) -> bool:
         return (
@@ -4066,7 +4192,7 @@ class MainWindow(QMainWindow):
     def _on_fetch_error(self, message: str) -> None:
         if self._state.symbol is not None:
             route = self._route_for_symbol(self._state.symbol)
-            self._symbol_bar.set_data_source(route.display_name, "error")
+            self._data_source_status.set_data_source(route.display_name, "error")
         show_warning(self, "Load Error", message)
 
     # ------------------------------------------------------------------
@@ -4781,6 +4907,7 @@ class MainWindow(QMainWindow):
             for render_pass in render_passes
             for marker in render_pass.render.markers
         }
+        active_marker_keys.update(self._refresh_chart_event_markers())
         pm = self._chart.plot_manager
         for series_key in pm.active_series_keys():
             if series_key not in active_series_keys:
@@ -4851,6 +4978,9 @@ class MainWindow(QMainWindow):
             self._chart.plot_manager.set_last_price_visible(
                 self._cache.get_show_last_price_line()
             )
+            if self._state.symbol is not None:
+                self._select_earnings_symbol(self._state.symbol)
+                self._refresh_chart_event_markers()
             self._request_provider_activation(dialog.selected_connection_id())
 
     def _request_provider_activation(self, connection_id: str) -> None:
@@ -4968,6 +5098,12 @@ class MainWindow(QMainWindow):
 
     def _stop_data_workers(self) -> None:
         self._stopping_data_workers = True
+        self._market_status_bar.stop_clock()
+        self._symbol_details.stop()
+        self._symbol_bar.stop_search()
+        self._earnings_pending = None
+        if self._earnings_cancelled is not None:
+            self._earnings_cancelled.set()
         self._snapshot_refresh_pending = False
         self._level1_refresh_pending = False
         if self._snapshot_timer.isActive():
@@ -5031,7 +5167,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_watchlist_symbol_selected(self, symbol: str) -> None:
-        """User clicked a symbol in the watchlist — load it."""
+        """Load a symbol selected by mouse or keyboard in the watchlist."""
         self._state.symbol = symbol
         self._symbol_bar.set_symbol(symbol)
         self._load()
@@ -5209,6 +5345,16 @@ class MainWindow(QMainWindow):
         ):
             return
         self._app_header.set_quote(quote)
+        self._details_quote = (request, quote)
+        self._symbol_details.update_quote(quote)
+
+    def _open_symbol_details(self) -> None:
+        symbol = self._state.symbol
+        if symbol is None or self._stopping_data_workers:
+            return
+        latest = self._details_quote
+        quote = latest[1] if latest is not None and self._is_current_level1_request(latest[0]) else None
+        self._symbol_details.show(symbol, quote)
 
     def _on_level1_error(self, request: _Level1Request, message: str) -> None:
         if not self._is_current_level1_request(request):
@@ -5282,6 +5428,9 @@ class MainWindow(QMainWindow):
             or self._snapshot_thread is not None
             or self._level1_thread is not None
             or self._validation_thread is not None
+            or self._earnings_thread is not None
+            or self._symbol_details.busy
+            or self._symbol_bar.search_busy
         ):
             return
         self._close_finalize_scheduled = True
@@ -5296,6 +5445,9 @@ class MainWindow(QMainWindow):
             or self._snapshot_thread is not None
             or self._level1_thread is not None
             or self._validation_thread is not None
+            or self._earnings_thread is not None
+            or self._symbol_details.busy
+            or self._symbol_bar.search_busy
         ):
             return
         self._pending_route = None

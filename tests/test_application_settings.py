@@ -106,8 +106,8 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
         assert "background:" in dialog.styleSheet()
         assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
         assert title_bar is not None
-        assert "background:" in title_bar.styleSheet()
-        assert "border-bottom: 1px solid" in title_bar.styleSheet()
+        assert "QFrame#dialogTitleBar" in dialog.styleSheet()
+        assert "border-bottom: 1px solid" in dialog.styleSheet()
         assert dialog.isSizeGripEnabled()
         assert size_grip is not None
 
@@ -253,8 +253,8 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
         assert "background:" in dialog.styleSheet()
         assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
         assert title_bar is not None
-        assert "background:" in title_bar.styleSheet()
-        assert "border-bottom: 1px solid" in title_bar.styleSheet()
+        assert "QFrame#dialogTitleBar" in dialog.styleSheet()
+        assert "border-bottom: 1px solid" in dialog.styleSheet()
         assert [feed.itemText(index) for index in range(feed.count())] == [
             "IEX (real-time)",
             "SIP (15-minute delayed)",

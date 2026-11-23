@@ -464,6 +464,10 @@ def test_main_window_wires_custom_chrome_only_on_wayland(
     frame = window.findChild(QFrame, "appFrame")
     title_bar = window.findChild(MainWindowTitleBar)
     assert frame is not None
+    footer = window.statusBar()
+    assert footer.parentWidget() is frame
+    assert footer.geometry().bottom() == frame.contentsRect().bottom()
+    assert frame.rect().bottom() - footer.geometry().bottom() == frame.frameWidth()
     assert bool(
         window.windowFlags() & Qt.WindowType.FramelessWindowHint
     ) is custom_chrome

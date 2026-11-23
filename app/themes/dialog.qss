@@ -1,0 +1,25 @@
+/* Shared shell for application dialogs. Colors come from the dialog palette. */
+QDialog#$object_name {
+    background: $window;
+    color: $text;
+    border: ${frame_width}px solid $border;
+}
+QDialog#$object_name QLabel {
+    color: $text;
+}
+QFrame#dialogTitleBar {
+    background: $title;
+    border-bottom: 1px solid $divider;
+}
+QLabel#dialogTitle {
+    font-weight: bold;
+}
+QToolButton#dialogCloseButton {
+    color: $text;
+    background: $title;
+    border: 1px solid $divider;
+    border-radius: 3px;
+}
+QToolButton#dialogCloseButton:hover {
+    background: $hover;
+}

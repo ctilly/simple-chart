@@ -19,7 +19,7 @@ shadowing the yfinance package on import.
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Never, cast
 
 import pandas as pd
@@ -38,6 +38,7 @@ from data.provider.base import (
     ProviderUnreachableError,
     UnsupportedTimeframeError,
 )
+from data.session import MARKET_TIMEZONE
 
 
 yf.config.debug.hide_exceptions = False
@@ -152,6 +153,55 @@ class YFinanceProvider(DataProvider):
     def fetch_company_name(self, symbol: str) -> str | None:
         quote = self.fetch_level1(symbol)
         return None if quote is None else quote.company_name
+
+    def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
+        normalized = symbol.strip().upper()
+        if not normalized:
+            return None
+        try:
+            calendar = yf.Ticker(normalized).get_calendar()
+        except Exception as exc:
+            _LOGGER.debug("Yahoo earnings request failed: %s", describe(exc))
+            return None
+        dates = calendar.get("Earnings Date") if isinstance(calendar, dict) else None
+        if not isinstance(dates, list):
+            return None
+        today = datetime.now(MARKET_TIMEZONE).date()
+        upcoming = [
+            value for value in dates
+            if isinstance(value, date) and not isinstance(value, datetime)
+            and value >= today
+        ]
+        return (min(upcoming), max(upcoming)) if upcoming else None
+
+    def fetch_past_earnings(self, symbol: str) -> tuple[date, ...]:
+        try:
+            rows = yf.Ticker(symbol).get_earnings_dates(limit=25)
+        except Exception as exc:
+            _LOGGER.debug("Yahoo historical earnings request failed: %s", describe(exc))
+            return ()
+        if rows is None or "Reported EPS" not in rows:
+            return ()
+        today = datetime.now(MARKET_TIMEZONE).date()
+        reported = rows.loc[rows["Reported EPS"].notna()]
+        return tuple(sorted({
+            event_day
+            for stamp in reported.index
+            if isinstance(stamp, pd.Timestamp)
+            and stamp.tzinfo is not None
+            and (event_day := stamp.tz_convert(MARKET_TIMEZONE).date()) < today
+        }))
+
+    def fetch_dividend_dates(self, symbol: str) -> tuple[date, ...]:
+        try:
+            dividends = yf.Ticker(symbol).get_dividends(period="5y")
+        except Exception as exc:
+            _LOGGER.debug("Yahoo dividends request failed: %s", describe(exc))
+            return ()
+        return tuple(sorted({
+            stamp.date() for stamp in dividends.index
+            if isinstance(stamp, pd.Timestamp)
+        }))
 
     def earliest_history_start(
         self,

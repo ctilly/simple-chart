@@ -34,7 +34,7 @@ from typing import Any, cast
 import finplot as fplt
 import pyqtgraph as pg
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtGui import QKeyEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import QVBoxLayout, QWidget
 
 from chart.interactions import ChartInteractions
@@ -70,6 +70,22 @@ class _FinplotMaster(pg.GraphicsLayoutWidget):  # type: ignore[misc]
     finplot's mouse-move handler accesses master.axs on every cursor
     movement, so we must provide it.
     """
+
+    symbol_entry: Callable[[str], bool] | None = None
+
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:
+        if event is not None and self.symbol_entry is not None:
+            char = event.text()
+            allowed = Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.KeypadModifier
+            if (
+                not event.modifiers() & ~allowed
+                and len(char) == 1 and char.isascii()
+                and (char.isalnum() or char == "^")
+                and self.symbol_entry(char)
+            ):
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     @property
     def axs(self) -> list[pg.PlotItem]:
@@ -406,3 +422,6 @@ class ChartWidget(QWidget):
 
     def on_commit(self, callback: Callable[[], None]) -> None:
         self._commit_cb = callback
+
+    def on_symbol_entry(self, callback: Callable[[str], bool]) -> None:
+        self._master.symbol_entry = callback

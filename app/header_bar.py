@@ -9,26 +9,25 @@ cross-platform identity band inside the Qt content area.
 
 The left side is a Level 1 quote strip for the active chart symbol: company
 name, last price, change, bid/ask with lot sizes, session OHLV, and previous
-close. The right side keeps the keyboard shortcut hints.
+close, followed by the next earnings date.
 """
 
-from PyQt6.QtCore import Qt
+from html import escape
+
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 
 from app.theme import active_colors
 from data.models import Level1Quote
 
 
-_SHORTCUT_MESSAGES: list[str] = [
-    "<b>Ctrl+r</b>: Reset Chart View",
-    "<b>Esc</b>: Cancel Drawing",
-]
-
 _GAP = "&nbsp;&nbsp;&nbsp;"
 
 
 class AppHeader(QFrame):
-    """Level 1 quote strip and application shortcut hints."""
+    """Level 1 quote strip and upcoming earnings."""
+
+    details_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -40,41 +39,66 @@ class AppHeader(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(10, 0, 10, 0)
-        layout.setSpacing(12)
-
         self._quote_label = QLabel()
+        self._quote_label.setObjectName("level1Quote")
         self._quote_label.setTextFormat(Qt.TextFormat.RichText)
-        self._quote_label.setStyleSheet("font-size: 12px;")
+        self._quote_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self._quote_label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._quote_label.setOpenExternalLinks(False)
+        self._quote_label.linkActivated.connect(self._activate_link)
+        self._quote_label.setToolTip(
+            "Next earnings source: Yahoo Finance. Dates may change."
+        )
         layout.addWidget(self._quote_label)
-
+        self._quote_html = ""
+        self.set_earnings_date("—")
         layout.addStretch(1)
 
-        shortcuts = QLabel("&nbsp;&nbsp;&nbsp;".join(_SHORTCUT_MESSAGES))
-        shortcuts.setTextFormat(Qt.TextFormat.RichText)
-        shortcuts.setObjectName("appHeaderShortcuts")
-        layout.addWidget(shortcuts)
+    def set_earnings_date(self, date_text: str, *, highlight: bool = False) -> None:
+        if highlight:
+            date_text = (
+                '<span style="background-color: #ffdc58; color: #251c00;">'
+                f"{date_text}</span>"
+            )
+        self._earnings_html = _field("Next earnings", date_text)
+        self._render_quote_strip()
 
     def set_symbol(self, symbol: str) -> None:
         """Show the bare symbol while its quote is being fetched."""
-        self._quote_label.setText(
-            f'<span style="color: {active_colors()["header_symbol"]}; font-weight: bold;">{symbol}</span>'
-        )
+        self._quote_html = _details_link(symbol, None)
+        self._render_quote_strip()
 
     def set_quote(self, quote: Level1Quote) -> None:
         """Render the full Level 1 strip for the active symbol."""
-        self._quote_label.setText(_level1_html(quote))
+        self._quote_html = _level1_html(quote)
+        self._render_quote_strip()
+
+    def _render_quote_strip(self) -> None:
+        self._quote_label.setText(self._quote_html + self._earnings_html)
+
+    def _activate_link(self, link: str) -> None:
+        if link == "symbol-details":
+            self.details_requested.emit()
+
+
+def _details_link(symbol: str, name: str | None) -> str:
+    colors = active_colors()
+    text = (
+        f'<span style="color: {colors["header_symbol"]}; font-weight: bold;">{escape(symbol)}</span>'
+    )
+    if name:
+        text += (
+            f'{_GAP}<span style="color: {colors["header_name"]};">{escape(name)}</span>'
+        )
+    return f'<a href="symbol-details" style="text-decoration: none;">{text}</a>'
 
 
 def _level1_html(quote: Level1Quote) -> str:
     colors = active_colors()
-    parts: list[str] = [
-        f'<span style="color: {colors["header_symbol"]}; font-weight: bold;">{quote.symbol}</span>'
-    ]
-    if quote.company_name is not None:
-        parts.append(
-            f'&nbsp;&nbsp;&nbsp;<span style="color: {colors["header_name"]};">{quote.company_name}</span>'
-        )
-
+    parts = [_details_link(quote.symbol, quote.company_name)]
     parts.append(
         f'{_GAP}<span style="color: {colors["header_value"]}; font-weight: bold;">'
         f"{_price(quote.last_price)}</span>"

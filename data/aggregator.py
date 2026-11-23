@@ -103,6 +103,15 @@ class Aggregator:
     def fetch_company_name(self, symbol: str) -> str | None:
         return self._provider.fetch_company_name(symbol)
 
+    def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
+        return self._provider.fetch_upcoming_earnings(symbol)
+
+    def fetch_past_earnings(self, symbol: str) -> tuple[date, ...]:
+        return self._provider.fetch_past_earnings(symbol)
+
+    def fetch_dividend_dates(self, symbol: str) -> tuple[date, ...]:
+        return self._provider.fetch_dividend_dates(symbol)
+
     def earliest_history_start(
         self,
         timeframe: Timeframe,

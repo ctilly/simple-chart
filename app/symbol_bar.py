@@ -16,22 +16,21 @@ shows the last successfully loaded symbol.
 """
 
 from pathlib import Path
-from typing import Literal
 
-from PyQt6.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFocusEvent, QIcon
+from PyQt6.QtCore import QModelIndex, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFocusEvent, QIcon, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
+    QCompleter,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QPushButton,
-    QSizePolicy,
     QToolButton,
     QWidget,
 )
 
-from app.theme import active_colors
+from app.symbol_search import SymbolSearch
 from data.models import Timeframe
+from data.provider.symbol_search import SymbolMatch
 
 
 # Display labels for each timeframe button, in the order they appear.
@@ -46,14 +45,6 @@ _TIMEFRAME_LABELS: list[tuple[Timeframe, str]] = [
 ]
 
 _SETTINGS_ICON_PATH = Path(__file__).resolve().parent.parent / "assets" / "settings.svg"
-_SOURCE_STATUS_COLOR_KEYS: dict[str, str] = {
-    "pending": "pending",
-    "connected": "success",
-    "history": "warning",
-    "error": "error",
-}
-SourceStatus = Literal["pending", "connected", "history", "error"]
-
 # MIN1 is intentionally excluded — it is an internal base timeframe
 # used by the aggregator, not a user-chartable timeframe.
 
@@ -64,11 +55,31 @@ class _SymbolInput(QLineEdit):
     replaces the displayed symbol instead of appending to it.
     """
 
+    focus_departed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._select_on_focus = QTimer(self)
+        self._select_on_focus.setSingleShot(True)
+        self._select_on_focus.timeout.connect(self.selectAll)
+
     def focusInEvent(self, a0: QFocusEvent | None) -> None:
         super().focusInEvent(a0)
         # Deferred: a focusing mouse click would otherwise clear the
         # selection when it places the text cursor after this event.
-        QTimer.singleShot(0, self.selectAll)
+        if a0 is not None and a0.reason() != Qt.FocusReason.PopupFocusReason:
+            self._select_on_focus.start(0)
+
+    def focusOutEvent(self, event: QFocusEvent | None) -> None:
+        super().focusOutEvent(event)
+        if event is not None and event.reason() != Qt.FocusReason.PopupFocusReason:
+            self.focus_departed.emit()
+
+    def begin_chart_entry(self, first_character: str) -> None:
+        self.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._select_on_focus.stop()
+        self.setText(first_character)
+        self.setModified(True)
 
 
 class SymbolBar(QWidget):
@@ -79,12 +90,24 @@ class SymbolBar(QWidget):
     symbol_changed:    pyqtSignal = pyqtSignal(str)
     timeframe_changed: pyqtSignal = pyqtSignal(object)   # emits Timeframe
     settings_requested: pyqtSignal = pyqtSignal()
+    search_idle: pyqtSignal = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._active_timeframe: Timeframe = Timeframe.DAILY
         self._tf_buttons: dict[Timeframe, QPushButton] = {}
         self._build()
+        self._search = SymbolSearch(self)
+        self._search.results.connect(self._show_search_results)
+        self._search.idle.connect(self.search_idle.emit)
+        self._result_model = QStandardItemModel(self)
+        self._completer = QCompleter(self._result_model, self)
+        self._completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self._completer.setCompletionRole(Qt.ItemDataRole.UserRole.value)
+        self._completer.setWidget(self._symbol_input)
+        self._completer.activated[str].connect(self._submit_symbol)
+        self._symbol_input.textEdited.connect(self._on_search_edit)
+        self._symbol_input.focus_departed.connect(self.stop_search)
 
     def _build(self) -> None:
         self.setObjectName("symbolBar")
@@ -95,8 +118,8 @@ class SymbolBar(QWidget):
 
         # Symbol input
         self._symbol_input = _SymbolInput()
-        self._symbol_input.setPlaceholderText("Symbol (e.g. QQQ)")
-        self._symbol_input.setMaximumWidth(140)
+        self._symbol_input.setPlaceholderText("Symbol or company name")
+        self._symbol_input.setMaximumWidth(184)
         self._symbol_input.setObjectName("symbolInput")
         self._symbol_input.returnPressed.connect(self._on_symbol_submitted)
         layout.addWidget(self._symbol_input)
@@ -113,29 +136,6 @@ class SymbolBar(QWidget):
 
         layout.addStretch()
 
-        self._source_status = QWidget(self)
-        self._source_status.setObjectName("dataSourceStatus")
-        self._source_status.setSizePolicy(
-            QSizePolicy.Policy.Fixed,
-            QSizePolicy.Policy.Preferred,
-        )
-        source_layout = QHBoxLayout(self._source_status)
-        source_layout.setContentsMargins(0, 0, 8, 0)
-        source_layout.setSpacing(4)
-
-        self._source_dot = QLabel(self._source_status)
-        self._source_dot.setObjectName("dataSourceStatusDot")
-        self._source_dot.setFixedSize(8, 8)
-        source_layout.addWidget(self._source_dot)
-
-        self._source_label = QLabel(self._source_status)
-        self._source_label.setObjectName("dataSourceStatusLabel")
-        self._source_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        )
-        source_layout.addWidget(self._source_label)
-        layout.addWidget(self._source_status)
-
         settings_button = QToolButton(self)
         settings_button.setObjectName("applicationSettingsButton")
         settings_button.setIcon(QIcon(str(_SETTINGS_ICON_PATH)))
@@ -147,28 +147,49 @@ class SymbolBar(QWidget):
 
         self.setLayout(layout)
         self._highlight(self._active_timeframe)
-        self.set_data_source("Yahoo Finance", "pending")
 
-    def set_symbol(self, symbol: str) -> None:
-        """Update the symbol field (called after a successful load)."""
+    def set_symbol(self, symbol: str, *, preserve_edit: bool = False) -> None:
+        """Update the field from the chart or an explicit symbol selection."""
+        if preserve_edit and self._symbol_input.hasFocus() and self._symbol_input.isModified():
+            return
+        self.stop_search()
         self._symbol_input.setText(symbol.upper())
 
-    def set_data_source(self, label: str, status: SourceStatus) -> None:
-        color = active_colors()[_SOURCE_STATUS_COLOR_KEYS[status]]
-        self._source_dot.setStyleSheet(
-            f"background: {color}; border: none; border-radius: 4px;"
-        )
-        self._source_label.setText(label)
-        self._source_status.updateGeometry()
-        status_text = {
-            "pending": "Waiting for a data response",
-            "connected": "Last data request succeeded",
-            "history": "Loading indicators...",
-            "error": "Last data request failed",
-        }[status]
-        tooltip = f"{label}: {status_text}"
-        self._source_dot.setToolTip(tooltip)
-        self._source_label.setToolTip(tooltip)
+    def begin_chart_entry(self, first_character: str) -> None:
+        self._symbol_input.begin_chart_entry(first_character)
+        self._on_search_edit(first_character)
+
+    @property
+    def search_busy(self) -> bool:
+        return self._search.busy
+
+    def stop_search(self) -> None:
+        self._search.cancel()
+        self._clear_suggestions()
+
+    def _clear_suggestions(self) -> None:
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.hide()
+        self._result_model.clear()
+
+    def _on_search_edit(self, text: str) -> None:
+        self._clear_suggestions()
+        self._search.edit(text)
+
+    def _show_search_results(self, matches: tuple[SymbolMatch, ...]) -> None:
+        if not matches or not self._symbol_input.hasFocus():
+            return
+        for match in matches:
+            label = "  ·  ".join(part for part in (match.symbol, match.name, match.exchange) if part)
+            item = QStandardItem(label)
+            item.setData(match.symbol, Qt.ItemDataRole.UserRole)
+            self._result_model.appendRow(item)
+        field = self._symbol_input
+        self._completer.complete(QRect(0, 0, max(400, field.width()), field.height()))
+        popup = self._completer.popup()
+        if popup is not None:
+            popup.setCurrentIndex(QModelIndex())
 
     # ------------------------------------------------------------------
     # Private
@@ -176,8 +197,18 @@ class SymbolBar(QWidget):
 
     def _on_symbol_submitted(self) -> None:
         text = self._symbol_input.text().strip().upper()
-        if text:
-            self.symbol_changed.emit(text)
+        if not text:
+            return
+        popup = self._completer.popup()
+        if popup is not None and popup.isVisible() and popup.currentIndex().isValid():
+            return
+        self._submit_symbol(text)
+
+    def _submit_symbol(self, symbol: str) -> None:
+        self.stop_search()
+        self._symbol_input.setText(symbol)
+        self._symbol_input.setModified(False)
+        self.symbol_changed.emit(symbol)
 
     def _on_timeframe_clicked(self, tf: Timeframe) -> None:
         if tf == self._active_timeframe:

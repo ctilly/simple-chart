@@ -1,6 +1,8 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
+from string import Template
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QMouseEvent, QPalette
@@ -36,6 +38,9 @@ class _DialogColors:
 
 
 _FRAME_WIDTH = 2
+_DIALOG_STYLESHEET = Template(
+    (Path(__file__).with_name("themes") / "dialog.qss").read_text(encoding="utf-8")
+)
 
 
 class DialogTitleBar(QFrame):
@@ -46,28 +51,8 @@ class DialogTitleBar(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        colors = _dialog_colors(self)
         self.setObjectName("dialogTitleBar")
         self.setCursor(Qt.CursorShape.SizeAllCursor)
-        self.setStyleSheet(
-            "QFrame#dialogTitleBar {"
-            f" background: {colors.title};"
-            f" border-bottom: 1px solid {colors.divider};"
-            "}"
-            "QLabel {"
-            f" color: {colors.text};"
-            " font-weight: bold;"
-            "}"
-            "QToolButton {"
-            f" color: {colors.text};"
-            f" background: {colors.title};"
-            f" border: 1px solid {colors.divider};"
-            " border-radius: 3px;"
-            "}"
-            "QToolButton:hover {"
-            f" background: {colors.hover};"
-            "}"
-        )
         row = QHBoxLayout(self)
         row.setContentsMargins(8, 4, 5, 4)
         row.setSpacing(4)
@@ -114,14 +99,9 @@ def build_dialog_content(
     )
     dialog.setObjectName(object_name)
     dialog.setStyleSheet(
-        f"QDialog#{object_name} {{"
-        f" background: {colors.window};"
-        f" color: {colors.text};"
-        f" border: {_FRAME_WIDTH}px solid {colors.border};"
-        "}"
-        f"QDialog#{object_name} QLabel {{"
-        f" color: {colors.text};"
-        "}"
+        _DIALOG_STYLESHEET.substitute(
+            asdict(colors), object_name=object_name, frame_width=_FRAME_WIDTH,
+        )
     )
 
     outer = QVBoxLayout(dialog)

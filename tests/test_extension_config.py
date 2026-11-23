@@ -31,7 +31,7 @@ def test_session_lifecycle_group_disables_age_off_until_persistence_enabled(qtbo
     assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
     assert title_bar is not None
-    assert "border-bottom: 1px solid" in title_bar.styleSheet()
+    assert "border-bottom: 1px solid" in dialog.styleSheet()
 
     group = _session_lifecycle_group(dialog)
     persist = group.findChild(QCheckBox)

@@ -75,7 +75,7 @@ def test_saved_dark_theme_reaches_the_stylesheet_palette_and_chart(
         window = _window_with_theme(qtbot, tmp_path, monkeypatch, "Dark")
         _show(qtbot, window, Timeframe.DAILY)
         assert active_colors()["background"] == "#16181d"
-        assert active_colors()["success"] in window._symbol_bar._source_dot.styleSheet()
+        assert active_colors()["success"] in window._data_source_status._source_dot.styleSheet()
         assert "#16181d" in app.styleSheet()
         app.setStyleSheet("")  # a stylesheet hides the base style's name
         assert app.style().objectName() == "fusion"

@@ -321,3 +321,39 @@ def test_fetch_level1_failure_is_logged_at_debug_without_exception_text(
     assert [r.levelno for r in records] == [logging.DEBUG]
     assert "RuntimeError" in records[0].getMessage()
     assert "sentinel-text" not in caplog.text
+
+
+def test_fetch_upcoming_earnings_handles_dates_and_unavailable_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = datetime.now(UTC).date()
+    first = today + timedelta(days=2)
+    last = first + timedelta(days=2)
+    seen_symbols: list[str] = []
+    calendar: dict[str, object] = {
+        "Earnings Date": [last, "invalid", first, today - timedelta(days=2)],
+    }
+
+    class Ticker:
+        def __init__(self, symbol: str) -> None:
+            seen_symbols.append(symbol)
+
+        def get_calendar(self) -> dict[str, object]:
+            return calendar
+
+    monkeypatch.setattr("data.provider.yfinance_provider.yf.Ticker", Ticker)
+    provider = YFinanceProvider()
+    assert provider.fetch_upcoming_earnings(" aapl ") == (first, last)
+    assert seen_symbols == ["AAPL"]
+    calendar["Earnings Date"] = [first]
+    assert provider.fetch_upcoming_earnings("AAPL") == (first, first)
+    calendar["Earnings Date"] = None
+    assert provider.fetch_upcoming_earnings("SPY") is None
+    calendar.clear()
+    assert provider.fetch_upcoming_earnings("SPY") is None
+
+    def unavailable(_ticker: Ticker) -> dict[str, object]:
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(Ticker, "get_calendar", unavailable)
+    assert provider.fetch_upcoming_earnings("AAPL") is None

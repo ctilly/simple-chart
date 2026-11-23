@@ -22,8 +22,9 @@ from zoneinfo import ZoneInfo
 
 import finplot as fplt
 import pytest
-from PyQt6.QtCore import QDate
+from PyQt6.QtCore import QDate, QPoint, Qt
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDialog,
@@ -36,8 +37,14 @@ from PyQt6.QtWidgets import (
 import app.controller as controller_module
 import app.data_quality as data_quality_module
 import app.extension_runtime as extension_runtime_module
+import app.market_status_bar as market_status_bar_module
+import app.symbol_details as symbol_details_module
+import app.symbol_search as symbol_search_module
+from data.provider.symbol_details import Holding, NewsArticle, SymbolProfile
+from data.provider.symbol_search import SymbolMatch
 from app.application_settings import ApplicationSettingsDialog
 from app.controller import MainWindow
+from app.watchlist import SymbolListWidget
 from chart.window import ChartWidget
 from app.data_quality import DataQualityTab
 from data.aggregator import Aggregator
@@ -2064,3 +2071,464 @@ def test_rewind_error_stops_the_refresh_and_lifts_the_barrier(
     assert warnings == []
     assert _status(tab) == stopped
     assert _banner_state(tab) == "failed"
+
+
+def test_symbol_box_search_selects_a_listing_and_keeps_direct_ticker_entry(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "symbol-search.db", monkeypatch, provider)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    queries: list[str] = []
+
+    def search(query: str) -> tuple[SymbolMatch, ...]:
+        queries.append(query)
+        if query in {"Ali", "Slow"}:
+            first_started.set()
+            release_first.wait(10)
+            return (SymbolMatch("OLD", "Old result", "NYSE"),)
+        return (
+            SymbolMatch("BABA", "Alibaba Group", "NYSE"),
+            SymbolMatch("9988.HK", "Alibaba Group", "Hong Kong"),
+        )
+
+    monkeypatch.setattr(symbol_search_module, "search_symbols", search)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    bar = window._symbol_bar
+    field = bar.findChild(QLineEdit, "symbolInput")
+    assert field is not None
+    assert field.placeholderText() == "Symbol or company name"
+    popup = bar._completer.popup()
+    assert popup is not None
+    generation = window._chart_load_generation
+    field.setFocus()
+    qtbot.waitUntil(field.hasSelectedText)
+    try:
+        qtbot.keyClicks(field, "Ali")
+        qtbot.waitUntil(first_started.is_set)
+        qtbot.keyClicks(field, "baba")
+        release_first.set()
+        qtbot.waitUntil(popup.isVisible)
+        assert queries == ["Ali", "Alibaba"]
+        model = popup.model()
+        assert model is not None
+        assert model.rowCount() == 2
+        assert "Alibaba Group" in model.index(0, 0).data()
+        assert "Hong Kong" in model.index(1, 0).data()
+        assert window._chart_load_generation == generation
+        qtbot.keyClick(popup, Qt.Key.Key_Down)
+        qtbot.keyClick(popup, Qt.Key.Key_Down)
+        qtbot.keyClick(popup, Qt.Key.Key_Return)
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == "9988.HK"
+        assert window._chart_load_generation == generation + 1
+        field.setFocus()
+        field.selectAll()
+        qtbot.keyClicks(field, "BABA")
+        qtbot.keyClick(field, Qt.Key.Key_Return)
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == "BABA"
+        assert window._chart_load_generation == generation + 2
+        assert queries == ["Ali", "Alibaba"]
+        field.setFocus()
+        field.selectAll()
+        qtbot.keyClicks(field, "Alibaba")
+        qtbot.waitUntil(popup.isVisible)
+        result_rect = popup.visualRect(model.index(0, 0))
+        qtbot.mouseClick(popup.viewport(), Qt.MouseButton.LeftButton, pos=result_rect.center())
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == "BABA"
+        assert window._chart_load_generation == generation + 3
+        field.setFocus()
+        field.selectAll()
+        qtbot.keyClicks(field, "BABA")
+        qtbot.waitUntil(popup.isVisible)
+        qtbot.keyClick(popup, Qt.Key.Key_Down)
+        qtbot.keyClick(popup, Qt.Key.Key_Down)
+        qtbot.keyClick(popup, Qt.Key.Key_Return)
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == "9988.HK"
+        assert window._chart_load_generation == generation + 4
+        field.setFocus()
+        field.selectAll()
+        qtbot.keyClicks(field, "IBM")
+        qtbot.waitUntil(popup.isVisible)
+        qtbot.keyClick(popup, Qt.Key.Key_Return)
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == "IBM"
+        assert window._chart_load_generation == generation + 5
+        first_started.clear()
+        release_first.clear()
+        field.selectAll()
+        qtbot.keyClicks(field, "Slow")
+        qtbot.waitUntil(first_started.is_set)
+        window.close()
+        assert not window._close_finalized
+        assert not popup.isVisible()
+    finally:
+        release_first.set()
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_typing_on_plot_reuses_symbol_field_and_loads_once(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "chart-typing.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    plot = window._chart._master
+    symbol_input = window._symbol_bar.findChild(QLineEdit, "symbolInput")
+    assert symbol_input is not None
+    qtbot.mouseClick(plot.viewport(), Qt.MouseButton.LeftButton)
+    assert plot.hasFocus()
+    window._on_timeframe_changed(Timeframe.WEEKLY)
+    generation = window._chart_load_generation
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(window._extension_runtime), "drag_active", property(lambda _runtime: True))
+        qtbot.keyClick(plot, Qt.Key.Key_Z)
+        assert plot.hasFocus()
+        assert symbol_input.text() == _SYMBOL
+
+    qtbot.keyClick(plot, Qt.Key.Key_G, Qt.KeyboardModifier.ControlModifier)
+    assert symbol_input.text() == _SYMBOL
+    qtbot.keyClick(plot, Qt.Key.Key_G)
+    assert symbol_input.hasFocus()
+    assert symbol_input.text().upper() == "G"
+    _wait_terminal(qtbot, window)
+    assert symbol_input.text().upper() == "G"
+    qtbot.keyClicks(symbol_input, "OOG")
+    assert symbol_input.text().upper() == "GOOG"
+    assert window._chart_load_generation == generation
+    qtbot.keyClick(symbol_input, Qt.Key.Key_Return)
+    _wait_terminal(qtbot, window)
+    assert window._loaded_symbol == "GOOG"
+    assert window._chart_load_generation == generation + 1
+
+
+def test_watchlist_arrow_keys_load_the_selected_chart(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "watchlist.db", monkeypatch, provider)
+    symbols = window._watchlist.findChild(SymbolListWidget)
+    assert symbols is not None
+    for symbol in (_SYMBOL, _OTHER_SYMBOL):
+        window._watchlist.add_symbol(symbol)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    symbols.setFocus()
+
+    window._watchlist.set_active_symbol(_OTHER_SYMBOL)
+    assert window._loaded_symbol == _SYMBOL
+    assert window._pending_chart_load is None
+    window._watchlist.set_active_symbol(_SYMBOL)
+    qtbot.keyClick(symbols, Qt.Key.Key_Down)
+    _wait_terminal(qtbot, window)
+    assert window._loaded_symbol == _OTHER_SYMBOL
+    qtbot.keyClick(symbols, Qt.Key.Key_Up)
+    _wait_terminal(qtbot, window)
+    assert window._loaded_symbol == _SYMBOL
+
+
+def test_symbol_details_retargets_without_showing_late_news(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "details.db", monkeypatch, provider)
+    slow_news = threading.Event()
+    release_news = threading.Event()
+
+    def news(symbol: str) -> tuple[NewsArticle, ...]:
+        if symbol == _SYMBOL:
+            slow_news.set()
+            release_news.wait(10)
+            return (NewsArticle("Old headline", None, None, None),)
+        return (NewsArticle("QQQ headline", "Publisher", None, None),)
+
+    def profile(symbol: str) -> SymbolProfile:
+        if symbol == "QQQ":
+            return SymbolProfile(
+                is_etf=True, name="QQQ fund", expense_ratio=0.0018,
+                holdings=(Holding("TEST", "Test holding", 0.12),),
+            )
+        return SymbolProfile(name="Test stock", float_shares=1234)
+
+    monkeypatch.setattr(symbol_details_module, "fetch_news", news)
+    monkeypatch.setattr(symbol_details_module, "fetch_profile", profile)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    banner = window._app_header.findChild(QLabel, "level1Quote")
+    assert banner is not None
+    request = controller_module._Level1Request(
+        _SYMBOL, window._level1_symbol_generation, window._quote_route_identity(_SYMBOL),
+    )
+    quote = controller_module.Level1Quote(
+        _SYMBOL, "Name & Co", 100, 1, 1, 99, 2, 101, 3, 100, 102, 98, 550, 99,
+    )
+    window._on_level1(request, quote)
+    assert 'href="symbol-details"' in banner.text()
+    assert "Name &amp; Co" in banner.text()
+    try:
+        qtbot.mouseClick(banner, Qt.MouseButton.LeftButton, pos=QPoint(7, banner.height() // 2))
+        dialog = window._symbol_details.dialog
+        assert dialog is not None
+        assert not dialog.isModal()
+        assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
+        title = dialog.findChild(QLabel, "dialogTitle")
+        assert title is not None and title.text() == "Symbol Details"
+        assert dialog.symbol == _SYMBOL
+        assert dialog._quote_values[0].text() == "100.00"
+        qtbot.waitUntil(slow_news.is_set)
+        qtbot.waitUntil(lambda: "1,234" in dialog._profile.toPlainText())
+        window._on_symbol_changed("QQQ")
+        assert dialog.symbol == _SYMBOL
+        assert dialog._quote_status.text() == "Last received Level 1 quote"
+        banner.linkActivated.emit("symbol-details")
+        assert dialog.symbol == "QQQ"
+        assert dialog._quote_values[0].text() == "—"
+        qtbot.waitUntil(lambda: "Top holdings (1)" in dialog._profile.toPlainText())
+        assert "0.18%" in dialog._profile.toPlainText()
+        assert "Next U.S. witching date" in dialog._profile.toPlainText()
+        assert "Next scheduled effective date" in dialog._profile.toPlainText()
+        release_news.set()
+        qtbot.waitUntil(lambda: not window._symbol_details.busy)
+        assert "QQQ headline" in dialog._news.toPlainText()
+        assert "Old headline" not in dialog._news.toPlainText()
+        dialog.close()
+        slow_news.clear()
+        release_news.clear()
+        window._on_symbol_changed(_SYMBOL)
+        banner.linkActivated.emit("symbol-details")
+        qtbot.waitUntil(slow_news.is_set)
+        window.close()
+        assert not dialog.isVisible()
+        assert not window._close_finalized
+    finally:
+        release_news.set()
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_chart_event_settings_persist_and_update_markers_independently(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "events.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    series = window._current_series
+    assert series is not None
+    event_day = series.bars[-2].timestamp.date()
+    monkeypatch.setattr(
+        provider, "fetch_past_earnings", lambda _symbol: (event_day,), raising=False,
+    )
+    monkeypatch.setattr(
+        provider, "fetch_dividend_dates", lambda _symbol: (event_day,), raising=False,
+    )
+    plot = window._chart.plot_manager
+
+    def set_options(earnings: bool, dividends: bool) -> None:
+        def use_settings(dialog: ApplicationSettingsDialog) -> int:
+            for name, checked in (
+                ("showPastEarnings", earnings), ("showDividends", dividends),
+            ):
+                checkbox = dialog.findChild(QCheckBox, name)
+                assert checkbox is not None
+                checkbox.setChecked(checked)
+            dialog.accept()
+            return dialog.result()
+
+        monkeypatch.setattr(ApplicationSettingsDialog, "exec", use_settings)
+        window._on_application_settings()
+        _wait_terminal(qtbot, window)
+        qtbot.waitUntil(lambda: window._earnings_thread is None)
+
+    assert plot.active_marker_keys() == []
+    set_options(True, True)
+    assert window._cache.get_chart_event_visibility() == (True, True)
+    assert len(plot.active_marker_keys()) == 1
+    key = plot.active_marker_keys()[0]
+    assert plot._markers[key].toPlainText() == "E D"
+    window._reload_extensions(draw_bars=False)
+    assert plot.active_marker_keys() == [key]
+    window._on_timeframe_changed(Timeframe.WEEKLY)
+    _wait_terminal(qtbot, window)
+    weekly_key, = plot.active_marker_keys()
+    assert plot._markers[weekly_key].toPlainText() == "E D"
+    window._on_timeframe_changed(Timeframe.MIN5)
+    _wait_terminal(qtbot, window)
+    assert plot.active_marker_keys() == [key]
+    set_options(False, True)
+    assert window._cache.get_chart_event_visibility() == (False, True)
+    assert plot._markers[key].toPlainText() == "D"
+    set_options(False, False)
+    assert plot.active_marker_keys() == []
+
+
+def test_late_historical_event_lookup_cannot_mark_new_symbol(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "event-switch.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    series = window._current_series
+    assert series is not None
+    event_day = series.bars[-2].timestamp.date()
+    started = threading.Event()
+    release = threading.Event()
+
+    def fetch_events(symbol: str) -> tuple[date, ...]:
+        if symbol == _SYMBOL:
+            started.set()
+            release.wait(10)
+            return (event_day,)
+        return ()
+
+    monkeypatch.setattr(provider, "fetch_past_earnings", fetch_events, raising=False)
+    window._cache.set_chart_event_visibility(True, False)
+    try:
+        window._on_symbol_changed(_SYMBOL)
+        qtbot.waitUntil(started.is_set)
+        window._on_symbol_changed(_OTHER_SYMBOL)
+        _wait_terminal(qtbot, window)
+        release.set()
+        qtbot.waitUntil(lambda: window._earnings_thread is None)
+        assert window._loaded_symbol == _OTHER_SYMBOL
+        assert window._chart.plot_manager.active_marker_keys() == []
+    finally:
+        release.set()
+
+
+def test_market_clock_stays_visible_during_status_messages(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(market_status_bar_module, "datetime", _FixedDateTime)
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "clock.db", monkeypatch, provider)
+    window.resize(1200, 800)
+    window.show()
+    status = window.statusBar()
+    assert isinstance(status, market_status_bar_module.MarketStatusBar)
+    clock = status.findChild(QLabel, "marketClock")
+    shortcuts = status.findChild(QLabel, "chartShortcutHints")
+    message = status.findChild(QLabel, "marketStatusMessage")
+    assert clock is not None
+    assert shortcuts is not None
+    assert message is not None
+    source = window._data_source_status
+    assert clock.geometry().right() < shortcuts.geometry().left()
+    assert shortcuts.geometry().right() < source.geometry().left()
+    content = shortcuts.parentWidget()
+    assert content is not None
+    assert abs(shortcuts.geometry().center().x() - content.rect().center().x()) <= 4
+
+    monkeypatch.setattr(_FixedDateTime, "frozen", datetime(2026, 12, 1, 19, 23, tzinfo=UTC))
+    qtbot.waitUntil(lambda: clock.text() == "14:23 ET")
+    status.showMessage("<b>Temporary status</b>", 200)
+    assert message.isVisible() and message.text() == "<b>Temporary status</b>"
+    assert message.textFormat() == Qt.TextFormat.PlainText
+    assert clock.isVisible() and source.isVisible()
+    assert not shortcuts.isVisible()
+    assert clock.contentsRect().left() >= 6
+    font = clock.font()
+    assert font.pixelSize() == 12
+    for label in (shortcuts, message, source._source_label):
+        other = label.font()
+        assert other.pixelSize() == font.pixelSize()
+        assert other.family() == font.family()
+        assert other.weight() == font.weight()
+        assert other.style() == font.style()
+    qtbot.waitUntil(shortcuts.isVisible)
+    assert not message.isVisible()
+
+    monkeypatch.setattr(_FixedDateTime, "frozen", datetime(2026, 7, 1, 18, 24, tzinfo=UTC))
+    qtbot.waitUntil(lambda: clock.text() == "14:24 ET")
+    window.close()
+    assert not status._clock_timer.isActive()
+    qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_upcoming_earnings_discards_old_selection_and_drains_on_close(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    second_release = threading.Event()
+    calls: list[str] = []
+
+    def earnings(symbol: str) -> tuple[date, date] | None:
+        calls.append(symbol)
+        if symbol == "AAPL":
+            first_started.set()
+            first_release.wait(15)
+            return date(2030, 1, 2), date(2030, 1, 2)
+        second_started.set()
+        second_release.wait(15)
+        return None
+
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", earnings, raising=False)
+    window, _ = _window(qtbot, tmp_path / "earnings.db", monkeypatch, provider)
+    window.show()
+    try:
+        window._on_symbol_changed("AAPL")
+        qtbot.waitUntil(first_started.is_set)
+        window._on_watchlist_symbol_selected("MSFT")
+        _wait_terminal(qtbot, window)
+        assert not second_started.is_set()
+        status = window.statusBar()
+        assert status is not None
+        shortcuts = status.findChild(QLabel, "chartShortcutHints")
+        quote_label = window._app_header.findChild(QLabel, "level1Quote")
+        assert shortcuts is not None
+        assert quote_label is not None
+        assert "Next earnings" in quote_label.text()
+        source_label = window._data_source_status._source_label
+        assert quote_label.font().pixelSize() == 12
+        assert shortcuts.font().pixelSize() == quote_label.font().pixelSize()
+        assert source_label.font().pixelSize() == quote_label.font().pixelSize()
+        status.showMessage("Temporary status")
+        assert window._data_source_status.isVisible()
+        assert quote_label.isVisible()
+        assert not shortcuts.isVisible()
+        status.clearMessage()
+        assert shortcuts.isVisible()
+        assert shortcuts.geometry().right() < window._data_source_status.geometry().left()
+        first_release.set()
+        qtbot.waitUntil(second_started.is_set)
+        assert quote_label.text().endswith(">—</span>")
+        window._on_timeframe_changed(Timeframe.WEEKLY)
+        assert window._earnings_pending is None
+        window.close()
+        assert not window._close_finalized
+        second_release.set()
+        qtbot.waitUntil(lambda: window._close_finalized)
+        assert calls == ["AAPL", "MSFT"]
+    finally:
+        first_release.set()
+        second_release.set()
+        if not window._close_finalized:
+            window.close()
+            qtbot.waitUntil(lambda: window._close_finalized)
+
+
+@pytest.mark.parametrize(("days_until", "highlighted"), [(-1, False), (0, True), (5, True), (6, False)])
+def test_upcoming_earnings_highlights_dates_within_five_days(
+    qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    days_until: int, highlighted: bool,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(qtbot, tmp_path / "earnings.db", monkeypatch, provider)
+    today = _NOW.astimezone(ZoneInfo("America/New_York")).date()
+    first = today + timedelta(days=days_until)
+    window._on_earnings_result(window._earnings_generation, (first, first))
+    label = window._app_header.findChild(QLabel, "level1Quote")
+    assert label is not None
+    assert ("background-color: #ffdc58" in label.text()) is highlighted

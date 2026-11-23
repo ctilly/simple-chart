@@ -111,7 +111,7 @@ def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
     assert window._current_series is recent
     assert window._terminal_chart_generation != request.generation
     assert _sma_keys(window) == []
-    assert window._symbol_bar._source_dot.toolTip().endswith(": Loading indicators...")
+    assert window._data_source_status._source_dot.toolTip().endswith(": Loading indicators...")
     status_bar = window.statusBar()
     assert status_bar is not None
     assert status_bar.currentMessage() == "Loading indicators..."
@@ -125,7 +125,7 @@ def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
     assert window._terminal_chart_generation == request.generation
     assert _view(window) == [(left + 200.0, right + 200.0) for left, right in before]
     assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
-    assert "succeeded" in window._symbol_bar._source_dot.toolTip()
+    assert "succeeded" in window._data_source_status._source_dot.toolTip()
     assert warnings == []
 
 
@@ -157,7 +157,7 @@ def test_backfill_error_after_recent_render_shows_status_not_dialog(
 
     assert warnings == []
     assert window._terminal_chart_generation == request.generation
-    assert "failed" in window._symbol_bar._source_dot.toolTip()
+    assert "failed" in window._data_source_status._source_dot.toolTip()
     status_bar = window.statusBar()
     assert status_bar is not None
     assert "older history" in status_bar.currentMessage().lower()

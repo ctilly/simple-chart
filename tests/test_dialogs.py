@@ -77,7 +77,7 @@ def test_dialog_shell_derives_colors_from_inherited_palette(qtbot: Any) -> None:
     title_bar = dialog.findChild(QFrame, "dialogTitleBar")
     message = dialog.findChild(QLabel, "applicationMessageText")
     assert title_bar is not None
-    assert "#f1f3f4" in title_bar.styleSheet()
+    assert "#f1f3f4" in dialog.styleSheet()
     assert message is not None
     assert "QDialog#applicationMessageDialog QLabel" in dialog.styleSheet()
 

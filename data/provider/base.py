@@ -23,7 +23,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
@@ -164,6 +164,15 @@ class DataProvider(ABC):
     def fetch_company_name(self, symbol: str) -> str | None:
         """Return a company name when this provider supplies asset reference data."""
         return None
+
+    def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
+        return None
+
+    def fetch_past_earnings(self, symbol: str) -> tuple[date, ...]:
+        return ()
+
+    def fetch_dividend_dates(self, symbol: str) -> tuple[date, ...]:
+        return ()
 
     def earliest_history_start(
         self,
