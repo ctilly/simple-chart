@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "simplechart"
 version = "0.1.0"
 description = "A desktop stock charting application for swing traders"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 
 dependencies = [
     "PyQt6>=6.6",
@@ -72,7 +72,7 @@ targets = [
 # ------------------------------------------------------------------
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true   # finplot has no type stubs
 
@@ -81,7 +81,7 @@ ignore_missing_imports = true   # finplot has no type stubs
 # ------------------------------------------------------------------
 
 [tool.ruff]
-target-version = "py313"
+target-version = "py314"
 
 
 # ------------------------------------------------------------------
@@ -94,7 +94,7 @@ target-version = "py313"
 
 [tool.pyright]
 typeCheckingMode = "standard"
-pythonVersion = "3.13"
+pythonVersion = "3.14"
 # PyQt6's auto-generated stubs use placeholder parameter names (a0, a1, ev)
 # in Qt event/override methods. Our overrides use readable names, which the
 # rule flags as Liskov-incompatible — purely a stub-convention artifact, not

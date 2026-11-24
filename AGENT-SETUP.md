@@ -7,7 +7,7 @@ This repository is installed from source, not packaged as a native installer.
 1. Clone the repository.
 2. Read `README.md`.
 3. Read `pyproject.toml`.
-4. Create a Python 3.13 virtual environment.
+4. Create a Python 3.14 virtual environment.
 5. Install with `python -m pip install -e .` for normal app use, or
    `python -m pip install -e ".[dev]"` if you will build extensions, run tests,
    type-check, or compile kernels.

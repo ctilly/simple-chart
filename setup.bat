@@ -195,7 +195,7 @@ pause
 exit /b 1
 
 REM ======================================================================
-REM Step 4: Create a Python 3.13 virtual environment.
+REM Step 4: Create a Python 3.14 virtual environment.
 REM
 REM Quote handling: if UV_EXE is the bare string "uv" (resolved via PATH)
 REM we must NOT wrap it in quotes. If UV_EXE is a full path (which may
@@ -204,8 +204,8 @@ REM quotes.
 REM ======================================================================
 :create_venv
 echo.
-echo  [i] Step 4 of 5: Setting up Python 3.13...
-echo      (If Python 3.13 isn't already on your computer, uv will
+echo  [i] Step 4 of 5: Setting up Python 3.14...
+echo      (If Python 3.14 isn't already on your computer, uv will
 echo      download it now. This can take a minute or two.
 echo      uv's output is shown below.)
 echo.
@@ -213,9 +213,9 @@ echo  --- begin uv venv output ---------------------------------------
 echo.
 
 if "!UV_EXE!"=="uv" (
-    uv venv --python 3.13
+    uv venv --python 3.14
 ) else (
-    "!UV_EXE!" venv --python 3.13
+    "!UV_EXE!" venv --python 3.14
 )
 set "VENV_RC=!errorlevel!"
 
@@ -226,7 +226,7 @@ echo.
 if !VENV_RC! neq 0 (
     echo  [X] ERROR: Failed to create the virtual environment.
     echo.
-    echo      'uv' could not set up Python 3.13. This may indicate
+    echo      'uv' could not set up Python 3.14. This may indicate
     echo      a network issue while downloading Python, or a disk
     echo      permissions problem in this folder.
     echo.
@@ -234,7 +234,7 @@ if !VENV_RC! neq 0 (
     exit /b 1
 )
 
-echo  [OK] Python 3.13 is ready.
+echo  [OK] Python 3.14 is ready.
 echo.
 
 REM ======================================================================

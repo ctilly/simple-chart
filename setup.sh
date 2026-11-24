@@ -127,13 +127,13 @@ fi
 ok "Using uv at: $UV_EXE"
 echo ""
 
-status "Step 3 of 5: Setting up Python 3.13..."
-echo "      If Python 3.13 is not already installed, uv will download it."
+status "Step 3 of 5: Setting up Python 3.14..."
+echo "      If Python 3.14 is not already installed, uv will download it."
 echo ""
 echo "  --- begin uv venv output ---------------------------------------"
 echo ""
 
-if ! "$UV_EXE" venv --python 3.13; then
+if ! "$UV_EXE" venv --python 3.14; then
     echo ""
     echo "  --- end uv venv output -----------------------------------------"
     fail "Failed to create the virtual environment."
@@ -145,7 +145,7 @@ fi
 
 echo ""
 echo "  --- end uv venv output -----------------------------------------"
-ok "Python 3.13 is ready."
+ok "Python 3.14 is ready."
 echo ""
 
 status "Step 4 of 5: Installing Simple Chart and dependencies..."

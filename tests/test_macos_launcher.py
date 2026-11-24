@@ -135,7 +135,7 @@ def test_setup_wires_macos_installer_after_package_install(tmp_path: Path) -> No
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0
     assert (tmp_path / "setup-calls").read_text().splitlines() == [
-        "venv --python 3.13", "pip install -e .", "scripts/install_macos_app.py",
+        "venv --python 3.14", "pip install -e .", "scripts/install_macos_app.py",
     ]
     assert "Double-click Simple Chart" in result.stdout
     failure = subprocess.run(["sh", "setup.sh"], cwd=tmp_path,

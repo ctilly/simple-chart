@@ -24,14 +24,14 @@ Included drawing tools:
 For usage guidance, see the [Simple Chart Help Guide](docs/help.md).
 
 The app runs locally from this source repository on Linux, MacOS, and Windows.
-It uses Python 3.13, and was built natively on Linux and seems to work well on
+It uses Python 3.14, and was built natively on Linux and seems to work well on
 both MacOS and Windows.
 
 ## Quick Start
 
 The setup process has four basic steps:
 
-1. Create a virtual environment with Python 3.13.
+1. Create a virtual environment with Python 3.14.
 2. Clone this repository.
 3. Install the app into the virtual environment.
 4. Launch Simple Chart.
@@ -42,7 +42,7 @@ Manual setup commands are also included below.
 
 ## Linux Setup
 
-For Linux, `setup.sh` installs `uv`, creates a Python 3.13 virtual environment, and installs
+For Linux, `setup.sh` installs `uv`, creates a Python 3.14 virtual environment, and installs
 Simple Chart in that environment.
 
 From the project folder, run:
@@ -62,7 +62,7 @@ simplechart
 ## MacOS
 
 For macOS, the easiest path is the included `setup.sh` file. It
-installs `uv` if needed, creates a Python 3.13 virtual environment, and installs
+installs `uv` if needed, creates a Python 3.14 virtual environment, and installs
 Simple Chart in that environment.
 
 On macOS, setup also creates **Simple Chart.app** on your desktop with the app icon. Double-click it to launch the app. 
@@ -81,7 +81,7 @@ To "install" the app:
 ## Windows Setup
 
 For Windows, the easiest path is the included `setup.bat` file. It installs
-`uv` if needed, creates a Python 3.13 virtual environment, and installs Simple
+`uv` if needed, creates a Python 3.14 virtual environment, and installs Simple
 Chart in that environment, then creates a desktop shortcut with the app icon.
 
 1. Clone or download this repository.
@@ -99,19 +99,19 @@ to refresh the environment and shortcut.
 
 Use this path if you prefer managing the environment yourself.
 
-First, create and activate a Python 3.13 virtual environment.
+First, create and activate a Python 3.14 virtual environment.
 
 macOS and Linux:
 
 ```bash
-python3.13 -m venv .venv
+python3.14 -m venv .venv
 . .venv/bin/activate
 ```
 
 Windows PowerShell:
 
 ```powershell
-py -3.13 -m venv .venv
+py -3.14 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
@@ -123,13 +123,13 @@ python -m pip install -e .
 simplechart
 ```
 
-If `python3.13` or `py -3.13` is not available, install Python 3.13 first or use
+If `python3.14` or `py -3.14` is not available, install Python 3.14 first or use
 a Python version manager such as `pyenv` or `uv`.
 
 With `uv`, the setup can be as short as:
 
 ```bash
-uv venv --python 3.13
+uv venv --python 3.14
 uv pip install -e .
 ```
 
@@ -219,13 +219,13 @@ On Windows, you can also launch directly without activating:
 
 ### Wrong Python version
 
-Simple Chart requires Python 3.13. Check the active Python version:
+Simple Chart requires Python 3.14. Check the active Python version:
 
 ```bash
 python --version
 ```
 
-If the version is not 3.13, create a new virtual environment using Python 3.13
+If the version is not 3.14, create a new virtual environment using Python 3.14
 and reinstall the app.
 
 ### The chart window does not open

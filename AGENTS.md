@@ -9,7 +9,7 @@ Desktop stock charting application. Swing trading focus; no transaction manageme
 
 ## Stack
 
-- Python 3.13+
+- Python 3.14+
 - finplot (pyqtgraph) for charting
 - yfinance for development data, Alpaca API for production
 - SQLite for the local cache
