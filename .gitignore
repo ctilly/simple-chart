@@ -45,6 +45,7 @@ notes/
 tmp/
 __.git-backup
 docs/prompts/prompt_language.txt
+docs/agentic-projects
 To_Do.md
 
 # Claude Code project settings (local only)
