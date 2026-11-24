@@ -10,6 +10,7 @@ import tools.poly_line  # noqa: F401
 from tools.poly_line import PolyLineTool
 from tools.poly_line.session_store import PolyLineStore
 from simplechart.api import ChartExtensionAddMode
+from provider_support import startup_registry
 
 
 def test_poly_line_declares_toolbar_and_icon() -> None:
@@ -22,7 +23,7 @@ def test_poly_line_declares_toolbar_and_icon() -> None:
 def test_clicks_add_vertices_until_enter_commits(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = PolyLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -45,7 +46,7 @@ def test_clicks_add_vertices_until_enter_commits(tmp_path: Path) -> None:
 def test_enter_with_single_vertex_cancels(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = PolyLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -63,7 +64,7 @@ def test_enter_with_single_vertex_cancels(tmp_path: Path) -> None:
 def test_fifteenth_click_auto_commits(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series(count=17)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = PolyLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")

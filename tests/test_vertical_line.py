@@ -10,6 +10,7 @@ import tools.vertical_line  # noqa: F401
 from tools.vertical_line import VerticalLineIndicator
 from tools.vertical_line.session_store import VerticalLineStore
 from simplechart.api import ChoiceParam, ChartExtensionAddMode, FloatParam
+from provider_support import startup_registry
 
 
 def test_vertical_line_declares_toolbar_add_mode() -> None:
@@ -26,7 +27,7 @@ def test_vertical_line_one_click_commit_renders_line(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -53,7 +54,7 @@ def test_vertical_line_renders_same_timestamp_on_intraday_series(tmp_path: Path)
     daily = _daily_series()
     intraday = _intraday_series(daily.bars[2].timestamp)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -77,7 +78,7 @@ def test_vertical_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = VerticalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")

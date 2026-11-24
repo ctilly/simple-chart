@@ -37,7 +37,7 @@ import pytest
 
 
 _ROOT = Path(__file__).resolve().parent.parent
-_SCANNED = ("main.py", "app", "chart", "data", "simplechart", "tools", "indicators")
+_SCANNED = ("main.py", "app", "chart", "data", "simplechart", "tools", "indicators", "providers")
 
 # (path, function) -> why that function may format an exception value.
 _ALLOWLIST: dict[tuple[str, str], str] = {

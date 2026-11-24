@@ -5,7 +5,7 @@ Simple Chart entry point.
 
 Run with:
     python main.py
-    python main.py --provider alpaca-paper
+    python main.py --provider CONNECTION_ID
     python main.py --db /path/to/db    # custom database location
 
 The SQLite database defaults to ~/.simplechart/simplechart.db, which
@@ -16,12 +16,16 @@ persistent across reinstalls.
 import argparse
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication
 
-from simplechart.output_safety import install
+from simplechart.bootstrap import bootstrap
+
+if TYPE_CHECKING:
+    from data.provider.registry import ProviderRegistry
 
 
 _DEFAULT_DB = Path.home() / ".simplechart" / "simplechart.db"
@@ -32,7 +36,7 @@ _ICON_THEME_NAME = "simplechart"
 _DESKTOP_FILE_ID = "io.simplechart.SimpleChart"
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(registry: "ProviderRegistry") -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple Chart — stock charting app")
     parser.add_argument(
         "--db",
@@ -42,11 +46,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        choices=("yfinance", "alpaca-paper", "alpaca-live"),
         default=None,
         help="Override the saved active provider connection",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.provider is not None and args.provider not in registry.connection_ids:
+        parser.error("The supplied provider connection is not registered.")
+    return args
 
 
 def _load_app_icon() -> QIcon:
@@ -103,12 +109,10 @@ def _build_fallback_icon(size: int = 256) -> QIcon:
 
 
 def main() -> None:
-    # Output safety must be in place before the application, its libraries
-    # and plugins are imported.
-    install()
+    provider_registry = bootstrap()
     from app.controller import MainWindow
 
-    args = _parse_args()
+    args = _parse_args(provider_registry)
 
     # Ensure the database directory exists before SQLite tries to open the file.
     args.db.parent.mkdir(parents=True, exist_ok=True)
@@ -123,6 +127,7 @@ def main() -> None:
     window = MainWindow(
         db_path=str(args.db),
         provider_connection_id=args.provider,
+        provider_registry=provider_registry,
     )
     window.setWindowIcon(app_icon)
     window.show()

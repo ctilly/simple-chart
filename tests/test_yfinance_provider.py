@@ -7,7 +7,7 @@ from yfinance.exceptions import YFPricesMissingError
 
 from data.models import Timeframe
 from data.provider.base import HistoryUnavailableError
-from data.provider.yfinance_provider import (
+from providers.yahoo.implementation import (
     YFinanceProvider,
     _level1_from_info,
     _rows_to_bars,
@@ -29,7 +29,7 @@ def test_fetch_bars_propagates_yahoo_history_errors(
             raise RuntimeError("Yahoo request failed")
 
     monkeypatch.setattr(
-        "data.provider.yfinance_provider.yf.Ticker",
+        "providers.yahoo.implementation.yf.Ticker",
         lambda symbol: FailingTicker(),
     )
     end = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
@@ -57,7 +57,7 @@ def test_fetch_bars_translates_exact_missing_prices_error(
             )
 
     monkeypatch.setattr(
-        "data.provider.yfinance_provider.yf.Ticker",
+        "providers.yahoo.implementation.yf.Ticker",
         lambda symbol: MissingPricesTicker(),
     )
     start = datetime(2026, 11, 4, 13, 51, tzinfo=UTC)
@@ -312,12 +312,12 @@ def test_fetch_level1_failure_is_logged_at_debug_without_exception_text(
         def info(self) -> dict[str, object]:
             raise RuntimeError("sentinel-text")
 
-    monkeypatch.setattr("data.provider.yfinance_provider.yf.Ticker", _FailingTicker)
-    caplog.set_level(logging.DEBUG, logger="data.provider.yfinance_provider")
+    monkeypatch.setattr("providers.yahoo.implementation.yf.Ticker", _FailingTicker)
+    caplog.set_level(logging.DEBUG, logger="providers.yahoo.implementation")
 
     assert YFinanceProvider().fetch_level1("SPY") is None
 
-    records = [r for r in caplog.records if r.name == "data.provider.yfinance_provider"]
+    records = [r for r in caplog.records if r.name == "providers.yahoo.implementation"]
     assert [r.levelno for r in records] == [logging.DEBUG]
     assert "RuntimeError" in records[0].getMessage()
     assert "sentinel-text" not in caplog.text
@@ -341,7 +341,7 @@ def test_fetch_upcoming_earnings_handles_dates_and_unavailable_data(
         def get_calendar(self) -> dict[str, object]:
             return calendar
 
-    monkeypatch.setattr("data.provider.yfinance_provider.yf.Ticker", Ticker)
+    monkeypatch.setattr("providers.yahoo.implementation.yf.Ticker", Ticker)
     provider = YFinanceProvider()
     assert provider.fetch_upcoming_earnings(" aapl ") == (first, last)
     assert seen_symbols == ["AAPL"]

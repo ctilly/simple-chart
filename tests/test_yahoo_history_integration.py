@@ -15,9 +15,10 @@ from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Timeframe
 from data.provider.base import HistoryUnavailableError
-from data.provider.config import yfinance_connection
+from provider_support import yfinance_connection, startup_registry
 from data.provider.credentials import UnavailableCredentialStore
-from data.provider.yfinance_provider import YFinanceProvider, _fetch_fast_info_snapshot
+from data.provider.registry import ProviderRegistry
+from providers.yahoo.implementation import YFinanceProvider, _fetch_fast_info_snapshot
 
 
 class _TimezoneCache:
@@ -79,6 +80,13 @@ class _YahooTransport:
             result["indicators"] = {"quote": [{
                 "open": [], "high": [], "low": [], "close": [], "volume": [],
             }]}
+            # Yahoo sends trading periods with every intraday chart, and
+            # yfinance 1.8 reads them to drop unrequested pre/post bars.
+            session = datetime(2026, 10, 28, 13, 30, tzinfo=UTC).timestamp()
+            result["meta"]["tradingPeriods"] = [[{
+                "timezone": "EDT", "gmtoffset": -14400,
+                "start": int(session), "end": int(session) + 23400,
+            }]]
         return _Response(payload)
 
 
@@ -101,8 +109,6 @@ def yahoo_transport(monkeypatch: pytest.MonkeyPatch) -> Iterator[_YahooTransport
     monkeypatch.setattr(YfData, "get", get)
     monkeypatch.setattr(YfData, "cache_get", get)
     monkeypatch.setattr("yfinance.cache.get_tz_cache", _TimezoneCache)
-    for name in ("_DFS", "_ERRORS", "_TRACEBACKS", "_ISINS"):
-        monkeypatch.setattr(yf.shared, name, {})
     try:
         yield transport
     finally:
@@ -175,7 +181,7 @@ def test_real_yahoo_transport_failure_preserves_cache_coverage(
     elif coverage_case == "tail":
         coverage = (int(start.timestamp() * 1000),
                     int((start + timedelta(hours=1)).timestamp() * 1000))
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         has_bars = coverage is not None or coverage_case == "bars_without_coverage"
         if has_bars:
             cache.put_bars(namespace, "SPY", Timeframe.MIN5, [existing])
@@ -196,13 +202,14 @@ def test_real_yahoo_transport_failure_preserves_cache_coverage(
 
 
 def test_fetch_worker_real_yahoo_failure_emits_error_without_coverage(
+    provider_registry: ProviderRegistry,
     yahoo_transport: _YahooTransport,
     tmp_path: Path,
 ) -> None:
     yahoo_transport.fail_history = True
     db_path = str(tmp_path / "test.db")
     request = _ChartLoadRequest(1, "SPY", Timeframe.MIN5, yfinance_connection())
-    worker = _FetchWorker(db_path, UnavailableCredentialStore("not needed"), request)
+    worker = _FetchWorker(db_path, UnavailableCredentialStore("not needed"), request, provider_factory=provider_registry.create_provider, registry=provider_registry)
     errors: list[str] = []
     successes: list[object] = []
     worker.error.connect(lambda identity, message: errors.append(message))
@@ -210,7 +217,7 @@ def test_fetch_worker_real_yahoo_failure_emits_error_without_coverage(
     worker.run()
     assert errors == ["Loading SPY 5m history failed. Details were logged."]
     assert successes == []
-    with Cache(db_path) as cache:
+    with Cache(db_path, registry=provider_registry) as cache:
         for timeframe in (Timeframe.DAILY, Timeframe.MIN5):
             assert cache.get_bar_fetch_coverage(
                 request.cache_namespace, "SPY", timeframe,
@@ -251,7 +258,7 @@ def test_real_yahoo_empty_and_missing_prices_preserve_cache_policy(
     )
     namespace = yfinance_connection().cache_namespace
     bar = Bar(start, 100.0, 101.0, 99.0, 100.5, 1000)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         if cached_tail:
             cache.put_bars(namespace, symbol, Timeframe.MIN5, [bar])
             cache.extend_bar_fetch_coverage(
@@ -302,16 +309,16 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import yfinance as yf
 yf.config.debug.hide_exceptions = True
-from data.provider import create_provider
-from data.provider.config import yfinance_connection
+from data.provider.registry import FALLBACK_PROVIDER, discover_providers
 from data.provider.credentials import UnavailableCredentialStore
-assert "data.provider.yfinance_provider" not in sys.modules
+registry = discover_providers("providers")
+assert "providers.yahoo.implementation" not in sys.modules
 assert yf.config.debug.hide_exceptions is True
 store = UnavailableCredentialStore("not needed")
-create_provider(yfinance_connection(), store)
+registry.create_provider(registry.build_connection(FALLBACK_PROVIDER), store)
 assert yf.config.debug.hide_exceptions is False
 yf.config.debug.hide_exceptions = True
-create_provider(yfinance_connection(), store)
+registry.create_provider(registry.build_connection(FALLBACK_PROVIDER), store)
 assert yf.config.debug.hide_exceptions is True
 '''
     result = subprocess.run(

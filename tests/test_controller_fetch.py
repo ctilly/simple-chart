@@ -1,11 +1,11 @@
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.controller import (
-    _DataRoute,
     _Level1Worker,
     _Level1Request,
     _ProviderValidationWorker,
@@ -19,8 +19,6 @@ from app.controller import (
     _history_end,
     _history_start,
     _resolve_company_name,
-    _route_for_symbol,
-    _validate_provider_connection,
 )
 from app.header_bar import _level1_html
 from data.aggregator import Aggregator
@@ -28,7 +26,11 @@ from data.cache import Cache
 from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, HistoryUnavailableError
-from data.provider.config import alpaca_paper_connection, yfinance_connection
+from data.provider.routing import CapabilityRouter, DataRoute
+from data.provider.spec import Capability
+from provider_support import alpaca_paper_connection, yfinance_connection, startup_registry
+from providers.alpaca import MarketDataFeed
+from providers.alpaca.implementation import AlpacaProvider
 from data.session import (
     bucket_start as _bucket_start,
     expected_last_session_bar_start as _expected_last_session_bar_start,
@@ -84,11 +86,6 @@ class FakeProvider(DataProvider):
 class SnapshotProvider(FakeProvider):
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         return {symbol: _snapshot(symbol) for symbol in symbols}
-
-
-class ValidProvider(FakeProvider):
-    def fetch_level1(self, symbol: str) -> Level1Quote | None:
-        return _quote(symbol)
 
 
 class QuoteWithoutNameProvider(FakeProvider):
@@ -250,7 +247,7 @@ def test_intraday_fetch_also_caches_daily_reference_bars(tmp_path: Path) -> None
     provider = FakeProvider()
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         series = _fetch_series_with_concurrent_references(
             aggregator,
             str(tmp_path / "test.db"),
@@ -281,7 +278,7 @@ def test_daily_fetch_does_not_request_extra_reference_bars(tmp_path: Path) -> No
     provider = FakeProvider()
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         series = _fetch_series_with_concurrent_references(
             aggregator,
             str(tmp_path / "test.db"),
@@ -298,12 +295,13 @@ def test_daily_fetch_does_not_request_extra_reference_bars(tmp_path: Path) -> No
 
 
 def test_futures_symbols_always_route_to_yahoo() -> None:
-    selected = _DataRoute(Aggregator(FakeProvider()), alpaca_paper_connection())
-    yahoo = _DataRoute(Aggregator(FakeProvider()), yfinance_connection())
+    selected = DataRoute(Aggregator(FakeProvider()), alpaca_paper_connection(), startup_registry())
+    yahoo = DataRoute(Aggregator(FakeProvider()), yfinance_connection(), startup_registry())
+    router = CapabilityRouter(selected, yahoo)
 
-    assert _route_for_symbol(" ES=F ", selected, yahoo) is yahoo
-    assert _route_for_symbol("gc=f", selected, yahoo) is yahoo
-    assert _route_for_symbol("AAPL", selected, yahoo) is selected
+    assert router.route(Capability.BARS, " ES=F ") is yahoo
+    assert router.route(Capability.BARS, "gc=f") is yahoo
+    assert router.route(Capability.BARS, "AAPL") is selected
 
 
 def test_history_start_requests_deep_daily_data() -> None:
@@ -342,7 +340,7 @@ def test_delayed_provider_fetch_and_coverage_stop_at_delayed_endpoint(
     delayed_end = now - timedelta(minutes=16)
     provider = DelayedHistoryProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_series_with_concurrent_references(
             Aggregator(provider),
             str(tmp_path / "test.db"),
@@ -374,7 +372,7 @@ def test_delayed_intraday_coverage_floors_provider_safe_endpoint(
     aggregator = Aggregator(provider)
     history_start = now - timedelta(days=10)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             aggregator,
             cache,
@@ -409,7 +407,7 @@ def test_complete_premarket_equity_cache_skips_daily_and_intraday_tails(
     prior_settled = datetime(2026, 11, 3, 21, 5, tzinfo=timezone.utc)
     provider = EmptyFiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "IWM",
@@ -463,7 +461,7 @@ def test_delayed_endpoint_controls_premarket_cache_eligibility(
     prior_settled = datetime(2026, 11, 3, 21, 5, tzinfo=timezone.utc)
     provider = DelayedFiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "AAPL",
@@ -522,7 +520,7 @@ def test_premarket_equity_cache_missing_prior_session_fetches_from_newest_bars(
     )
     provider = FiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "IWM",
@@ -588,7 +586,7 @@ def test_unknown_or_non_equity_symbols_retain_tail_refresh(
     prior_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
     provider = EmptyFiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             symbol,
@@ -625,7 +623,7 @@ def test_weekly_tail_refresh_is_not_session_suppressed(tmp_path: Path) -> None:
     week_start = datetime(2026, 11, 2, 5, 0, tzinfo=timezone.utc)
     provider = EmptyProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "AAPL",
@@ -668,7 +666,7 @@ def test_empty_existing_cache_tail_preserves_native_coverage(
         int(coverage_end.timestamp() * 1000),
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -711,7 +709,7 @@ def test_postclose_load_finalizes_partial_last_intraday_bar(
     request_end = datetime(2026, 11, 3, 21, 30, tzinfo=timezone.utc)
     provider = StaticFiveMinuteProvider([_priced_bar(last_bar_start, 110.0)])
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -758,7 +756,7 @@ def test_postclose_load_finalizes_partial_daily_reference(
     request_end = datetime(2026, 11, 3, 22, 0, tzinfo=timezone.utc)
     provider = StaticDailyProvider(_priced_bar(daily_start, 110.0))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -812,7 +810,7 @@ def test_empty_cold_daily_postclose_load_retries_from_session_start(
     second_end = datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)
     provider = EmptyFiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             Aggregator(provider),
             cache,
@@ -847,7 +845,7 @@ def test_lagging_daily_postclose_load_retries_missing_session_bar(
     second_end = datetime(2026, 11, 2, 22, 0, tzinfo=timezone.utc)
     provider = StaticDailyProvider(_bar_at(friday_start))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         for request_end in (first_end, second_end):
             _fetch_and_cache_bars(
                 Aggregator(provider),
@@ -874,7 +872,7 @@ def test_close_boundary_does_not_settle_partial_intraday_bar(
     request_end = datetime(2026, 11, 3, 21, 2, tzinfo=timezone.utc)
     provider = StaticFiveMinuteProvider([_priced_bar(last_bar_start, 110.0)])
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -912,7 +910,7 @@ def test_daily_close_boundary_does_not_write_settled_watermark(
     session_close = datetime(2026, 11, 3, 21, 0, tzinfo=timezone.utc)
     provider = StaticDailyProvider(_priced_bar(daily_start, 110.0))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -957,7 +955,7 @@ def test_daily_bar_refreshes_again_after_settlement_delay(
     next_day = datetime(2026, 11, 4, 5, 0, tzinfo=timezone.utc)
     provider = RevisingFiveMinuteProvider(daily_start)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         for request_end in (first_end, second_end):
             _fetch_and_cache_bars(
                 Aggregator(provider),
@@ -1007,7 +1005,7 @@ def test_existing_coverage_without_bars_uses_bounded_tail_start(
     request_end = datetime(2026, 11, 4, 14, 8, 54, tzinfo=timezone.utc)
     provider = EmptyFiveMinuteProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.extend_bar_fetch_coverage(
             "alpaca:iex",
             "AAPL",
@@ -1082,7 +1080,7 @@ def test_weekday_closure_empty_tail_is_safe_and_retryable(
         int(prior_close.timestamp() * 1000),
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -1134,7 +1132,7 @@ def test_typed_history_unavailable_is_suppressed_only_for_cached_tail(
         int(coverage_end.timestamp() * 1000),
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "AAPL",
@@ -1168,7 +1166,7 @@ def test_typed_history_unavailable_is_suppressed_only_for_cached_tail(
     ]
     assert coverage == original_coverage
 
-    with Cache(str(tmp_path / "cold.db")) as cache:
+    with Cache(str(tmp_path / "cold.db"), registry=startup_registry()) as cache:
         with pytest.raises(HistoryUnavailableError):
             _fetch_and_cache_bars(
                 Aggregator(HistoryUnavailableFiveMinuteProvider()),
@@ -1190,7 +1188,7 @@ def test_repeat_intraday_refresh_overlaps_the_cached_bar_and_covers_completed_bo
     provider = FiveMinuteProvider()
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             aggregator,
             cache,
@@ -1235,7 +1233,7 @@ def test_preopen_subminute_endpoint_persists_only_completed_coverage(
     request_end = datetime(2026, 11, 4, 8, 59, 50, tzinfo=timezone.utc)
     history_start = request_end - timedelta(days=10)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             Aggregator(EmptyFiveMinuteProvider()),
             cache,
@@ -1267,7 +1265,7 @@ def test_boundary_crossing_finalizes_previous_forming_bar(
     history_start = first_end - timedelta(days=10)
     provider = RevisingFiveMinuteProvider(bar_start)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             Aggregator(provider),
             cache,
@@ -1315,7 +1313,7 @@ def test_repeat_intraday_load_refreshes_each_branch_from_its_cached_bar(
     provider = FakeProvider()
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_series_with_concurrent_references(
             aggregator,
             str(tmp_path / "test.db"),
@@ -1351,7 +1349,7 @@ def test_existing_bars_without_coverage_are_refetched_then_refreshed(
     cached_at = datetime(2025, 1, 8, 5, 0, tzinfo=timezone.utc)
     provider = EmptyProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:iex",
             "AAPL",
@@ -1399,7 +1397,7 @@ def test_stale_cache_refetches_only_provider_safe_window(tmp_path: Path) -> None
     stale_at = now - timedelta(days=100)
     provider = EmptyProvider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "AAPL",
@@ -1440,7 +1438,7 @@ def test_failed_fetch_does_not_advance_coverage(tmp_path: Path) -> None:
     now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
     start = now - timedelta(days=55)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(RuntimeError, match="Provider request failed"):
             _fetch_and_cache_bars(
                 Aggregator(FailingProvider()),
@@ -1468,7 +1466,7 @@ def test_fetch_coverage_is_independent_for_each_provider_namespace(
     provider = EmptyProvider()
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         for namespace in ("yfinance", "alpaca:iex"):
             _fetch_and_cache_bars(
                 aggregator,
@@ -1505,27 +1503,36 @@ def test_snapshot_worker_merges_provider_batches() -> None:
     assert received == [(request, {"AAPL": _snapshot("AAPL"), "ES=F": _snapshot("ES=F")})]
 
 
-def test_provider_validation_exercises_market_data_snapshot() -> None:
+@pytest.fixture
+def validation_provider(monkeypatch: pytest.MonkeyPatch) -> AlpacaProvider:
+    provider = AlpacaProvider("test-key", "test-secret", MarketDataFeed.IEX, client=Mock())
+    monkeypatch.setattr(provider, "fetch_level1", Mock(return_value=None))
+    return provider
+
+
+def test_provider_validation_exercises_market_data_snapshot(
+    validation_provider: AlpacaProvider, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
 
-    class RecordingProvider(ValidProvider):
-        def fetch_level1(self, symbol: str) -> Level1Quote | None:
-            calls.append(symbol)
-            return super().fetch_level1(symbol)
+    def fetch_level1(symbol: str) -> Level1Quote:
+        calls.append(symbol)
+        return _quote(symbol)
 
-    _validate_provider_connection(RecordingProvider())
+    monkeypatch.setattr(validation_provider, "fetch_level1", fetch_level1)
+    validation_provider.check_connection()
 
     assert calls == ["SPY"]
 
 
-def test_provider_validation_rejects_missing_market_data() -> None:
+def test_provider_validation_rejects_missing_market_data(validation_provider: AlpacaProvider) -> None:
     with pytest.raises(UserFacingError, match="market-data snapshot"):
-        _validate_provider_connection(FakeProvider())
+        validation_provider.check_connection()
 
 
-def test_provider_validation_shows_the_missing_snapshot_message() -> None:
+def test_provider_validation_shows_the_missing_snapshot_message(validation_provider: AlpacaProvider) -> None:
     errors: list[str] = []
-    worker = _ProviderValidationWorker(FakeProvider(), "Alpaca Paper")
+    worker = _ProviderValidationWorker(validation_provider, "Alpaca Paper")
     worker.error.connect(errors.append)
 
     worker.run()
@@ -1538,7 +1545,7 @@ def test_company_name_resolution_uses_fresh_provider_neutral_cache(
 ) -> None:
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
     provider = ReferenceProvider("New Name")
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_asset_reference(
             "AAPL",
             "Cached Name",
@@ -1562,7 +1569,7 @@ def test_company_name_resolution_refreshes_stale_name_from_yahoo(
 ) -> None:
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
     provider = ReferenceProvider(" Meta Platforms, Inc. ")
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_asset_reference(
             "META",
             "Facebook, Inc.",
@@ -1590,7 +1597,7 @@ def test_company_name_resolution_keeps_stale_name_when_refresh_fails(
 ) -> None:
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
     provider = ReferenceProvider(None)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_asset_reference(
             "AAPL",
             "Apple Inc.",
@@ -1613,7 +1620,7 @@ def test_asset_reference_refresh_retries_missing_name_after_one_hour(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 8, 30, 15, 0, tzinfo=timezone.utc)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         assert not _asset_reference_refresh_due(
             cache,
             "UNKNOWN",
@@ -1635,7 +1642,7 @@ def test_level1_worker_merges_yahoo_name_into_alpaca_quote(
     market_provider = QuoteWithoutNameProvider()
     reference_provider = ReferenceProvider("Apple Inc.")
     received: list[Level1Quote | None] = []
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         worker = _Level1Worker(
             Aggregator(market_provider),
             Aggregator(reference_provider),
@@ -1643,6 +1650,7 @@ def test_level1_worker_merges_yahoo_name_into_alpaca_quote(
             _Level1Request("AAPL", 0, _QuoteRouteIdentity(yfinance_connection(), 0)),
             True,
             now,
+            registry=startup_registry(),
         )
         worker.finished.connect(lambda request, quote: received.append(quote))
 
@@ -1665,7 +1673,7 @@ def test_level1_worker_reuses_name_already_returned_by_yahoo_quote(
     provider = YahooQuoteProvider("Apple Inc.")
     aggregator = Aggregator(provider)
     received: list[Level1Quote | None] = []
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         worker = _Level1Worker(
             aggregator,
             aggregator,
@@ -1673,6 +1681,7 @@ def test_level1_worker_reuses_name_already_returned_by_yahoo_quote(
             _Level1Request("AAPL", 0, _QuoteRouteIdentity(yfinance_connection(), 0)),
             True,
             now,
+            registry=startup_registry(),
         )
         worker.finished.connect(lambda request, quote: received.append(quote))
 

@@ -20,6 +20,7 @@ from data.cache import Cache
 from data.models import Timeframe
 from realistic_errors import SECRET, assert_secret_absent, unknown_error
 from simplechart.output_safety import SafeFormatter
+from provider_support import startup_registry
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -780,11 +781,12 @@ def test_fatal_exit_keeps_committed_data_and_written_load_timing(
             from app.load_timing import LoadTimingLog
             from data.cache import Cache
             from data.models import Bar, Timeframe
+            from data.provider.registry import ProviderRegistry
 
 
             class FatalDuringLoad:
-                def __init__(self, db_path, provider_connection_id):
-                    self._cache = Cache(db_path)
+                def __init__(self, db_path: str, provider_connection_id: str | None, *, provider_registry: ProviderRegistry) -> None:
+                    self._cache = Cache(db_path, registry=provider_registry)
                     self._cache.put_bars("yfinance", "TEST", Timeframe.DAILY, [
                         Bar(datetime(2026, 11, day, tzinfo=UTC), 10.0, 11.0, 9.0, 10.5, 1000)
                         for day in (2, 3, 4)
@@ -824,7 +826,7 @@ def test_fatal_exit_keeps_committed_data_and_written_load_timing(
     # SQLite recovers the WAL on the next open; nothing deleted it.
     assert Path(f"{db_path}-wal").stat().st_size > 0
     assert Path(f"{db_path}-shm").exists()
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         bars = cache.get_bars(
             "yfinance",
             "TEST",

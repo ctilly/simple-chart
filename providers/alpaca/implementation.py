@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 import logging
@@ -11,8 +13,7 @@ from alpaca.common.exceptions import APIError
 from alpaca.data.enums import Adjustment, DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockSnapshotRequest
-from alpaca.data.timeframe import TimeFrame as AlpacaTimeFrame
-from alpaca.data.timeframe import TimeFrameUnit
+from alpaca.data.timeframe import TimeFrame as AlpacaTimeFrame, TimeFrameUnit
 from requests import PreparedRequest, Response, Session  # type: ignore[import-untyped]
 from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from requests.exceptions import (  # type: ignore[import-untyped]
@@ -24,6 +25,7 @@ from requests.exceptions import (  # type: ignore[import-untyped]
 from data.errors import http_status
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import (
+    MissingMarketDataSnapshotError,
     DataProvider,
     MarketDataEntitlementError,
     ProviderCredentialsMalformedError,
@@ -34,9 +36,8 @@ from data.provider.base import (
     UnsupportedTimeframeError,
     background_request_cancellation,
 )
-from data.provider.config import MarketDataFeed
 from data.session import is_regular_session_timestamp as _is_regular_session
-
+from providers.alpaca import MarketDataFeed
 
 _DELAYED_SIP_SAFE_LAG = timedelta(minutes=16)
 _SIP_ENTITLEMENT_ERROR_CODE = 40310000
@@ -53,14 +54,14 @@ _BACKGROUND_RESERVE = 7
 # One history request returns about 40 calendar days of intraday bars; 30-day
 # chunks keep each chunk to a single page.
 _INTRADAY_HISTORY_PAGE_SPAN = timedelta(days=30)
-_RETRY_STATUS_CODES = frozenset(DEFAULT_RETRY_EXCEPTION_CODES)
 # Longest a background caller sleeps before re-checking cancellation and
 # waiting foreground callers.
 _BACKGROUND_POLL_SECONDS = 0.05
 
 _LOGGER = logging.getLogger(__name__)
 
-_TIMEFRAME_MAP: dict[Timeframe, AlpacaTimeFrame] = {
+
+_TIMEFRAME_MAP = {
     Timeframe.MIN1: AlpacaTimeFrame(1, TimeFrameUnit.Minute),
     Timeframe.MIN5: AlpacaTimeFrame(5, TimeFrameUnit.Minute),
     Timeframe.MIN15: AlpacaTimeFrame(15, TimeFrameUnit.Minute),
@@ -68,21 +69,6 @@ _TIMEFRAME_MAP: dict[Timeframe, AlpacaTimeFrame] = {
     Timeframe.DAILY: AlpacaTimeFrame(1, TimeFrameUnit.Day),
     Timeframe.WEEKLY: AlpacaTimeFrame(1, TimeFrameUnit.Week),
 }
-
-_BAR_FEED_MAP: dict[MarketDataFeed, DataFeed] = {
-    MarketDataFeed.IEX: DataFeed.IEX,
-    MarketDataFeed.DELAYED_SIP: DataFeed.SIP,
-    MarketDataFeed.SIP: DataFeed.SIP,
-}
-
-_SNAPSHOT_FEED_MAP: dict[MarketDataFeed, DataFeed] = {
-    MarketDataFeed.IEX: DataFeed.IEX,
-    MarketDataFeed.DELAYED_SIP: DataFeed.DELAYED_SIP,
-    MarketDataFeed.SIP: DataFeed.SIP,
-}
-
-# What a client call raises for a failed request: alpaca-py wraps HTTP error
-# statuses in APIError and lets requests' transport errors through.
 _REQUEST_ERRORS = (APIError, RequestsConnectionError, Timeout, InvalidHeader)
 
 
@@ -245,7 +231,7 @@ class _DefaultTimeoutHTTPAdapter(HTTPAdapter):  # type: ignore[misc]
                 proxies=proxies,
             ),
         )
-        if response.status_code in _RETRY_STATUS_CODES:
+        if response.status_code in DEFAULT_RETRY_EXCEPTION_CODES:
             count = _RETRY_STATUS_COUNTER.record()
             _LOGGER.warning(
                 "Alpaca returned HTTP %d; alpaca-py waits and retries unless its "
@@ -280,8 +266,10 @@ class AlpacaProvider(DataProvider):
         # The connection's name, for the neutral errors this provider raises.
         self._display_name = display_name
         self._configured_feed = feed
-        self._bar_feed = _BAR_FEED_MAP[feed]
-        self._snapshot_feed = _SNAPSHOT_FEED_MAP[feed]
+        self._snapshot_feed = DataFeed(feed.value)
+        self._bar_feed = (
+            DataFeed.SIP if feed == MarketDataFeed.DELAYED_SIP else self._snapshot_feed
+        )
         # requests.Session is not thread-safe, so each thread that uses this
         # provider gets its own SDK client. The factory closure keeps the
         # credentials out of instance attributes.
@@ -356,6 +344,10 @@ class AlpacaProvider(DataProvider):
             if converted is not None:
                 result[symbol] = converted
         return result
+
+    def check_connection(self) -> None:
+        if self.fetch_level1("SPY") is None:
+            raise MissingMarketDataSnapshotError()
 
     def fetch_level1(self, symbol: str) -> Level1Quote | None:
         normalized = symbol.strip().upper()

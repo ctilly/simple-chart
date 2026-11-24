@@ -21,8 +21,8 @@ Data fetch strategy:
   4. Build an OHLCVSeries from the requested cached range.
 
 Threading:
-  Data fetches (network calls to yfinance or Alpaca) run in a background
-  QThread to keep the UI responsive. The chart shows a loading state
+  Provider requests run in a background QThread to keep the UI responsive.
+  The chart shows a loading state
   while the fetch is in progress. Results are delivered back to the main
   thread via Qt signals.
 
@@ -46,10 +46,10 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
-from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtBoundSignal, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QCloseEvent, QCursor, QGuiApplication
 from PyQt6.QtWidgets import (
     QApplication,
@@ -64,10 +64,10 @@ from PyQt6.QtWidgets import (
 
 from app.extension_config import ExtensionConfigDialog
 from app.application_settings import ApplicationSettingsDialog
-from app.bar_comparison import BarComparisonService
+from app.bar_comparison import BarComparisonService, ProviderFactory
 from app.data_source_status import DataSourceStatus
 from app.chart_events import CHART_EVENT_PREFIX, chart_event_markers
-from app.earnings_worker import EarningsWorker, HistoricalEventDates
+from app.earnings import EarningsFeed
 from app.data_quality import (
     SymbolRefreshPlan,
     SymbolRefreshState,
@@ -111,7 +111,6 @@ from data.adjustment import (
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.calendar import bars_for_n_days
-from data.errors import UserFacingError
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.timestamps import ms_to_datetime
 from data.session import (
@@ -131,8 +130,6 @@ from data.session import (
 from data.provider import (
     ProviderAvailability,
     ProviderConfigurationError,
-    create_provider,
-    provider_availability,
 )
 from data.provider.base import (
     DataProvider,
@@ -141,12 +138,15 @@ from data.provider.base import (
     UnsupportedTimeframeError,
     background_requests,
 )
-from data.provider.config import ProviderConnection, YFINANCE_CONNECTION_ID
+from data.provider.config import ProviderConnection
 from data.provider.credentials import (
     CredentialStore,
     CredentialStoreAccess,
     initialize_keyring_credential_store,
 )
+from data.provider.registry import ProviderRegistry
+from data.provider.routing import CapabilityRouter, DataRoute as _DataRoute
+from data.provider.spec import Capability
 from simplechart.extensions._guard import (
     call_extension,
     is_disabled,
@@ -175,9 +175,6 @@ from simplechart.api import (
     all_extensions,
     series_arrays,
 )
-from simplechart.plugins import load_plugins
-
-load_plugins()
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -453,26 +450,9 @@ def _needs_history_backfill(
 
 
 @dataclass(frozen=True)
-class _DataRoute:
-    aggregator: Aggregator
-    connection: ProviderConnection
-
-    @property
-    def cache_namespace(self) -> str:
-        return self.connection.cache_namespace
-
-    @property
-    def display_name(self) -> str:
-        feed = self.connection.feed
-        if feed is None:
-            return self.connection.display_name
-        return f"{self.connection.display_name} / {feed.display_name}"
-
-
-@dataclass(frozen=True)
 class _StartupRoutes:
     selected: _DataRoute
-    yahoo: _DataRoute
+    fallback: _DataRoute
     fallback_reason: str | None
 
 
@@ -576,10 +556,6 @@ def _refreshed_off_screen_text(symbol: str, rewound_at: datetime) -> str:
     )
 
 
-def _is_yahoo_futures_symbol(symbol: str) -> bool:
-    return symbol.strip().upper().endswith("=F")
-
-
 def _completed_coverage_end(
     symbol: str,
     timeframe: Timeframe,
@@ -647,14 +623,6 @@ def _cached_tail_refresh_start(
     return max(history_start, min(coverage_overlap, newest_overlap))
 
 
-def _route_for_symbol(
-    symbol: str,
-    selected_route: _DataRoute,
-    yahoo_route: _DataRoute,
-) -> _DataRoute:
-    return yahoo_route if _is_yahoo_futures_symbol(symbol) else selected_route
-
-
 def _chart_colors(theme: Theme) -> ChartColors:
     c = theme.colors
     # Grid lines use the axis color; the theme's grid supplies their alpha.
@@ -691,9 +659,10 @@ def _live_refresh_due(symbol: str, endpoint: datetime) -> bool:
 def _provider_availability_by_name(
     connections: Iterable[ProviderConnection],
     credential_access: CredentialStoreAccess,
+    registry: ProviderRegistry,
 ) -> dict[str, ProviderAvailability]:
     return {
-        connection.provider_name: provider_availability(
+        connection.provider_name: registry.provider_availability(
             connection.provider_name,
             credential_access,
         )
@@ -706,29 +675,31 @@ def _build_startup_routes(
     connection_id: str,
     credential_store: CredentialStore,
     availability_by_name: Mapping[str, ProviderAvailability],
+    registry: ProviderRegistry,
 ) -> _StartupRoutes:
     selected_connection = cache.get_provider_connection(connection_id)
     if selected_connection is None:
         raise ValueError(f"Unknown provider connection: {connection_id}")
 
-    yahoo_connection = cache.get_provider_connection(YFINANCE_CONNECTION_ID)
-    if yahoo_connection is None:
-        raise RuntimeError("The Yahoo Finance connection is not configured.")
-    yahoo_availability = availability_by_name.get(yahoo_connection.provider_name)
-    if yahoo_availability is None or not yahoo_availability.available:
+    fallback_connection = cache.get_provider_connection(registry.fallback_connection_id)
+    if fallback_connection is None:
+        raise RuntimeError(f"The {registry.fallback_provider.display_name} connection is not configured.")
+    fallback_availability = availability_by_name.get(fallback_connection.provider_name)
+    if fallback_availability is None or not fallback_availability.available:
         reason = (
             "Provider availability was not checked."
-            if yahoo_availability is None
-            else yahoo_availability.reason
+            if fallback_availability is None
+            else fallback_availability.reason
         )
-        raise ProviderConfigurationError(f"Yahoo Finance is unavailable: {reason}")
+        raise ProviderConfigurationError(f"{fallback_connection.display_name} is unavailable: {reason}")
 
-    yahoo_route = _DataRoute(
-        Aggregator(create_provider(yahoo_connection, credential_store)),
-        yahoo_connection,
+    fallback_route = _DataRoute(
+        Aggregator(registry.create_provider(fallback_connection, credential_store)),
+        fallback_connection,
+        registry,
     )
-    if selected_connection.connection_id == YFINANCE_CONNECTION_ID:
-        return _StartupRoutes(yahoo_route, yahoo_route, None)
+    if selected_connection.connection_id == registry.fallback_connection_id:
+        return _StartupRoutes(fallback_route, fallback_route, None)
 
     selected_availability = availability_by_name.get(
         selected_connection.provider_name
@@ -740,24 +711,24 @@ def _build_startup_routes(
             else selected_availability.reason
         )
         return _StartupRoutes(
-            yahoo_route,
-            yahoo_route,
+            fallback_route,
+            fallback_route,
             f"{selected_connection.display_name} is unavailable: {reason}",
         )
 
     try:
-        selected_provider = create_provider(selected_connection, credential_store)
+        selected_provider = registry.create_provider(selected_connection, credential_store)
     except ProviderConfigurationError as exc:
         # The configuration message names the provider itself.
         context = ErrorContext(f"Connecting to {selected_connection.display_name}")
         return _StartupRoutes(
-            yahoo_route,
-            yahoo_route,
+            fallback_route,
+            fallback_route,
             report_error(_LOGGER, exc, context),
         )
     return _StartupRoutes(
-        _DataRoute(Aggregator(selected_provider), selected_connection),
-        yahoo_route,
+        _DataRoute(Aggregator(selected_provider), selected_connection, registry),
+        fallback_route,
         None,
     )
 
@@ -786,10 +757,15 @@ class _FetchWorker(QObject):
         request: _ChartLoadRequest,
         cancellation_event: threading.Event | None = None,
         load_timing: LoadTimingLog | None = None,
+        *,
+        provider_factory: ProviderFactory,
+        registry: ProviderRegistry,
     ) -> None:
         super().__init__()
         self._db_path = db_path
+        self._registry = registry
         self._credential_store = credential_store
+        self._provider_factory = provider_factory
         self._request = request
         self._cancellation_event = cancellation_event or threading.Event()
         self._load_timing = load_timing or LoadTimingLog(None)
@@ -826,14 +802,14 @@ class _FetchWorker(QObject):
         try:
             self._record_step("worker started")
             _check_chart_load_cancelled(self._cancellation_event)
-            provider = create_provider(
+            provider = self._provider_factory(
                 self._request.connection,
                 self._credential_store,
             )
             self._record_step("provider ready")
             aggregator = Aggregator(provider)
             now = datetime.now(tz=timezone.utc)
-            with Cache(self._db_path) as cache:
+            with Cache(self._db_path, registry=self._registry) as cache:
                 try:
                     series = self._fetch_chart_series(aggregator, cache, now)
                 except _BasisReset:
@@ -965,10 +941,15 @@ class _OlderHistoryWorker(QObject):
         displayed_end: datetime,
         bars_wanted: int,
         cancellation_event: threading.Event,
+        *,
+        provider_factory: ProviderFactory,
+        registry: ProviderRegistry,
     ) -> None:
         super().__init__()
         self._db_path = db_path
+        self._registry = registry
         self._credential_store = credential_store
+        self._provider_factory = provider_factory
         self._request = request
         self._displayed_start = displayed_start
         self._displayed_end = displayed_end
@@ -980,10 +961,10 @@ class _OlderHistoryWorker(QObject):
         try:
             _check_chart_load_cancelled(self._cancellation_event)
             aggregator = Aggregator(
-                create_provider(request.connection, self._credential_store)
+                self._provider_factory(request.connection, self._credential_store)
             )
             with background_requests(self._cancellation_event), Cache(
-                self._db_path
+                self._db_path, registry=self._registry
             ) as cache:
                 series, outcome = _fetch_older_history(
                     aggregator,
@@ -1040,10 +1021,15 @@ class _LiveRefreshWorker(QObject):
         displayed: OHLCVSeries,
         cancellation_event: threading.Event,
         log_errors: bool,
+        *,
+        provider_factory: ProviderFactory,
+        registry: ProviderRegistry,
     ) -> None:
         super().__init__()
         self._db_path = db_path
+        self._registry = registry
         self._credential_store = credential_store
+        self._provider_factory = provider_factory
         self._request = request
         self._displayed = displayed
         self._cancellation_event = cancellation_event
@@ -1055,11 +1041,11 @@ class _LiveRefreshWorker(QObject):
         try:
             _check_chart_load_cancelled(self._cancellation_event)
             aggregator = Aggregator(
-                create_provider(request.connection, self._credential_store)
+                self._provider_factory(request.connection, self._credential_store)
             )
             now = datetime.now(tz=timezone.utc)
             with background_requests(self._cancellation_event), Cache(
-                self._db_path
+                self._db_path, registry=self._registry
             ) as cache:
                 try:
                     series: OHLCVSeries | None = _fetch_series_with_concurrent_references(
@@ -1397,17 +1383,22 @@ class _Level1Worker(QObject):
     def __init__(
         self,
         aggregator: Aggregator,
-        reference_aggregator: Aggregator,
+        company_name_aggregator: Aggregator,
         db_path: str,
         request: _Level1Request,
         refresh_reference: bool,
         now: datetime,
         cancellation_event: threading.Event | None = None,
+        *,
+        registry: ProviderRegistry,
+        company_name_source: str | None = None,
     ) -> None:
         super().__init__()
         self._aggregator = aggregator
-        self._reference_aggregator = reference_aggregator
+        self._company_name_aggregator = company_name_aggregator
+        self._company_name_source = company_name_source
         self._db_path = db_path
+        self._registry = registry
         self._request = request
         self._refresh_reference = refresh_reference
         self._now = now
@@ -1416,23 +1407,25 @@ class _Level1Worker(QObject):
     def run(self) -> None:
         try:
             _check_data_worker_cancelled(self._cancellation_event)
-            with Cache(self._db_path) as cache:
+            with Cache(self._db_path, registry=self._registry) as cache:
                 _check_data_worker_cancelled(self._cancellation_event)
                 quote = self._aggregator.fetch_level1(self._request.symbol)
                 _check_data_worker_cancelled(self._cancellation_event)
                 if quote is not None:
                     known_reference_name = (
                         quote.company_name
-                        if self._aggregator is self._reference_aggregator
+                        if self._aggregator is self._company_name_aggregator
                         else None
                     )
                     company_name = _resolve_company_name(
                         cache,
-                        self._reference_aggregator,
+                        self._company_name_aggregator,
                         self._request.symbol,
                         self._now,
                         self._refresh_reference,
                         known_reference_name,
+                        source=self._company_name_source,
+                        cancellation_event=self._cancellation_event,
                     )
                     _check_data_worker_cancelled(self._cancellation_event)
                     if company_name != quote.company_name:
@@ -1468,7 +1461,7 @@ class _ProviderValidationWorker(QObject):
     def run(self) -> None:
         try:
             _check_data_worker_cancelled(self._cancellation_event)
-            _validate_provider_connection(self._provider)
+            self._provider.check_connection()
             _check_data_worker_cancelled(self._cancellation_event)
             self.finished.emit()
         except _DataWorkerCancelled:
@@ -1492,26 +1485,18 @@ def _check_data_worker_cancelled(
         raise _DataWorkerCancelled
 
 
-class _MissingSnapshotError(UserFacingError, RuntimeError):
-    pass
-
-
-def _validate_provider_connection(provider: DataProvider) -> None:
-    if provider.fetch_level1("SPY") is None:
-        raise _MissingSnapshotError(
-            "The provider returned no SPY market-data snapshot."
-        )
-
-
 def _resolve_company_name(
     cache: Cache,
-    reference_aggregator: Aggregator,
+    company_name_aggregator: Aggregator,
     symbol: str,
     now: datetime,
     refresh_reference: bool,
     known_reference_name: str | None = None,
+    *,
+    source: str | None = None,
+    cancellation_event: threading.Event | None = None,
 ) -> str | None:
-    reference = cache.get_asset_reference(symbol)
+    reference = cache.get_asset_reference(symbol, source=source)
     if (
         reference is not None
         and reference.refreshed_at >= now - _ASSET_REFERENCE_MAX_AGE
@@ -1527,10 +1512,11 @@ def _resolve_company_name(
     company_name = _normalized_company_name(known_reference_name)
     if company_name is None:
         company_name = _normalized_company_name(
-            reference_aggregator.fetch_company_name(symbol)
+            company_name_aggregator.fetch_company_name(symbol)
         )
+    _check_data_worker_cancelled(cancellation_event)
     if company_name is not None:
-        cache.put_asset_reference(symbol, company_name, now)
+        cache.put_asset_reference(symbol, company_name, now, source=source)
         return company_name
     return None if reference is None else reference.company_name
 
@@ -1540,8 +1526,10 @@ def _asset_reference_refresh_due(
     symbol: str,
     now: datetime,
     last_attempt: datetime | None,
+    *,
+    source: str | None = None,
 ) -> bool:
-    reference = cache.get_asset_reference(symbol)
+    reference = cache.get_asset_reference(symbol, source=source)
     if (
         reference is not None
         and reference.refreshed_at >= now - _ASSET_REFERENCE_MAX_AGE
@@ -1653,7 +1641,7 @@ def _fetch_series_with_concurrent_references(
         )
 
     def refresh_references() -> None:
-        with Cache(db_path) as reference_cache:
+        with Cache(db_path, registry=cache.registry) as reference_cache:
             _refresh_daily_references(
                 aggregator,
                 reference_cache,
@@ -2672,6 +2660,16 @@ def _fetch_bar_range_chunked(
     _check_chart_load_cancelled(cancellation_event)
 
 
+class _BackgroundComponent(Protocol):
+    @property
+    def busy(self) -> bool: ...
+
+    @property
+    def idle(self) -> pyqtBoundSignal: ...
+
+    def stop(self) -> None: ...
+
+
 class MainWindow(QMainWindow):
     """
     The application's main window.
@@ -2695,6 +2693,8 @@ class MainWindow(QMainWindow):
         self,
         db_path: str,
         provider_connection_id: str | None = None,
+        *,
+        provider_registry: ProviderRegistry,
     ) -> None:
         super().__init__()
         self._uses_custom_window_chrome = is_wayland_platform(
@@ -2709,7 +2709,8 @@ class MainWindow(QMainWindow):
         # Data layer
         # ------------------------------------------------------------------
         self._db_path = db_path
-        self._cache = Cache(db_path)
+        self._provider_registry = provider_registry
+        self._cache = Cache(db_path, registry=provider_registry)
         self._load_timing = LoadTimingLog.from_environment(
             Path(db_path).parent / "diagnostics",
             os.environ,
@@ -2719,23 +2720,28 @@ class MainWindow(QMainWindow):
             if provider_connection_id is not None
             else self._cache.get_active_provider_connection_id()
         )
-        connection = self._cache.get_provider_connection(connection_id)
-        if connection is None:
-            raise ValueError(f"Unknown provider connection: {connection_id}")
-        self._credential_access = initialize_keyring_credential_store()
+        if (
+            provider_connection_id is None
+            and self._cache.get_provider_connection(connection_id) is None
+        ):
+            connection_id = provider_registry.fallback_connection_id
+        self._credential_access = initialize_keyring_credential_store(
+            registry=provider_registry,
+        )
         self._credential_store = self._credential_access.store
         self._provider_availability = _provider_availability_by_name(
             self._cache.get_provider_connections(),
             self._credential_access,
+            provider_registry,
         )
         startup_routes = _build_startup_routes(
             self._cache,
-            connection.connection_id,
+            connection_id,
             self._credential_store,
             self._provider_availability,
+            provider_registry,
         )
-        self._selected_route = startup_routes.selected
-        self._yahoo_route = startup_routes.yahoo
+        self._router = CapabilityRouter(startup_routes.selected, startup_routes.fallback)
         self._startup_provider_fallback_reason = startup_routes.fallback_reason
 
         # ------------------------------------------------------------------
@@ -2791,8 +2797,7 @@ class MainWindow(QMainWindow):
             )
 
         self._app_header = AppHeader()
-        self._symbol_details = SymbolDetails(self)
-        self._symbol_details.idle.connect(self._maybe_finalize_close)
+        self._symbol_details = SymbolDetails(self._router, self)
         self._app_header.details_requested.connect(self._open_symbol_details)
         self._details_quote: tuple[_Level1Request, Level1Quote] | None = None
         root_layout.addWidget(self._app_header)
@@ -2819,18 +2824,20 @@ class MainWindow(QMainWindow):
         chart_layout.setContentsMargins(0, 0, 0, 0)
         chart_layout.setSpacing(0)
 
-        self._symbol_bar = SymbolBar()
-        self._data_source_status = DataSourceStatus()
+        self._symbol_bar = SymbolBar(self._router)
+        self._data_source_status = DataSourceStatus(
+            fallback_display_name=provider_registry.fallback_provider.display_name,
+        )
         self._market_status_bar = MarketStatusBar(self._data_source_status, frame)
         root_layout.addWidget(self._market_status_bar)
-        self._earnings_symbol: str | None = None
-        self._chart_event_visibility = (False, False)
-        self._chart_event_dates: HistoricalEventDates = ((), ())
-        self._earnings_cancelled: threading.Event | None = None
-        self._earnings_generation = 0
-        self._earnings_pending: tuple[str, int] | None = None
-        self._earnings_thread: QThread | None = None
-        self._earnings_worker: EarningsWorker | None = None
+        self._earnings = EarningsFeed(self._router, self)
+        self._earnings.upcoming_changed.connect(self._set_upcoming_earnings)
+        self._earnings.history_changed.connect(self._refresh_chart_event_markers)
+        self._background_components: tuple[_BackgroundComponent, ...] = (
+            self._symbol_details, self._symbol_bar.search, self._earnings,
+        )
+        for component in self._background_components:
+            component.idle.connect(self._maybe_finalize_close)
         self._chart      = ChartWidget(
             on_toggle=self._on_extension_toggled,
             on_configure=self._on_extension_configure,
@@ -2865,7 +2872,6 @@ class MainWindow(QMainWindow):
 
         # Wire symbol bar signals.
         self._symbol_bar.symbol_changed.connect(self._on_symbol_changed)
-        self._symbol_bar.search_idle.connect(self._maybe_finalize_close)
         self._symbol_bar.timeframe_changed.connect(self._on_timeframe_changed)
         self._symbol_bar.settings_requested.connect(self._on_application_settings)
 
@@ -2938,7 +2944,8 @@ class MainWindow(QMainWindow):
         self._snapshot_cancellation_event: threading.Event | None = None
         self._level1_cancellation_event: threading.Event | None = None
         self._validation_cancellation_event: threading.Event | None = None
-        self._asset_reference_refresh_attempts: dict[str, datetime] = {}
+        self._asset_reference_refresh_attempts: dict[tuple[ProviderConnection, str], datetime] = {}
+        self._level1_reference_attempt: tuple[tuple[ProviderConnection, str], datetime] | None = None
         self._validation_thread: QThread | None = None
         self._validation_worker: _ProviderValidationWorker | None = None
         self._pending_route: _DataRoute | None = None
@@ -2982,8 +2989,8 @@ class MainWindow(QMainWindow):
             status_bar = self.statusBar()
             if status_bar is not None:
                 status_bar.showMessage(
-                    f"{self._startup_provider_fallback_reason} Using Yahoo "
-                    "Finance for this session.",
+                    f"{self._startup_provider_fallback_reason} Using "
+                    f"{provider_registry.fallback_provider.display_name} for this session.",
                 )
         self._load()
         self._snapshot_timer.start()
@@ -3020,75 +3027,19 @@ class MainWindow(QMainWindow):
         return theme
 
     def _select_earnings_symbol(self, symbol: str) -> None:
-        visibility = self._cache.get_chart_event_visibility()
-        if symbol == self._earnings_symbol and visibility == self._chart_event_visibility:
-            return
-        if symbol != self._earnings_symbol:
-            self._chart_event_dates = ((), ())
-            self._app_header.set_earnings_date("—")
-        self._earnings_symbol = symbol
-        self._chart_event_visibility = visibility
-        self._earnings_generation += 1
-        if self._earnings_cancelled is not None:
-            self._earnings_cancelled.set()
-        self._earnings_pending = (symbol, self._earnings_generation)
-        self._start_pending_earnings()
+        self._earnings.select(symbol, self._cache.get_chart_event_visibility())
 
-    def _start_pending_earnings(self) -> None:
-        if self._earnings_thread is not None or self._earnings_pending is None:
-            return
-        symbol, generation = self._earnings_pending
-        self._earnings_pending = None
-        thread = QThread()
-        cancelled = threading.Event()
-        worker = EarningsWorker(
-            self._yahoo_route.aggregator, symbol, generation,
-            self._chart_event_visibility, cancelled,
-        )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.result.connect(self._on_earnings_result)
-        worker.history_result.connect(self._on_chart_event_result)
-        worker.completed.connect(thread.quit)
-        worker.completed.connect(worker.deleteLater)
-        thread.finished.connect(self._on_earnings_finished)
-        self._earnings_thread = thread
-        self._earnings_worker = worker
-        self._earnings_cancelled = cancelled
-        thread.start()
-
-    def _on_earnings_result(
-        self, generation: int, dates: tuple[date, date] | None,
-    ) -> None:
-        if (
-            self._stopping_data_workers
-            or generation != self._earnings_generation
-            or dates is None
-        ):
-            return
-        first, last = dates
-        label = first.strftime("%b %d").replace(" 0", " ")
-        if first != last:
-            end = (
-                str(last.day) if first.month == last.month and first.year == last.year
-                else last.strftime("%b %d").replace(" 0", " ")
-            )
-            label = f"{label}–{end}"
-        days_until = (first - datetime.now(MARKET_TIMEZONE).date()).days
-        self._app_header.set_earnings_date(label, highlight=0 <= days_until <= 5)
-
-    def _on_chart_event_result(self, generation: int, dates: HistoricalEventDates) -> None:
-        if self._stopping_data_workers or generation != self._earnings_generation:
-            return
-        self._chart_event_dates = dates
-        self._refresh_chart_event_markers()
+    @pyqtSlot(str, bool, str)
+    def _set_upcoming_earnings(self, label: str, highlight: bool, source: str) -> None:
+        self._app_header.set_earnings_source(source)
+        self._app_header.set_earnings_date(label, highlight=highlight)
 
     def _refresh_chart_event_markers(self) -> set[str]:
         series = self._current_series
         markers = (
-            chart_event_markers(series, self._chart_event_dates, self._chart_event_visibility)
+            chart_event_markers(series, self._earnings.history, self._earnings.visibility)
             if series is not None and not self._chart_load_pending
-            and series.symbol == self._earnings_symbol else []
+            and series.symbol == self._earnings.symbol else []
         )
         plot = self._chart.plot_manager
         active = {marker.key for marker in markers}
@@ -3098,16 +3049,6 @@ class MainWindow(QMainWindow):
             if key.startswith(CHART_EVENT_PREFIX) and key not in active:
                 plot.remove_marker(key)
         return active
-
-    def _on_earnings_finished(self) -> None:
-        thread = self._earnings_thread
-        assert thread is not None
-        thread.deleteLater()
-        self._earnings_thread = None
-        self._earnings_worker = None
-        self._earnings_cancelled = None
-        self._start_pending_earnings()
-        self._maybe_finalize_close()
 
     def _on_chart_symbol_entry(self, first_character: str) -> bool:
         if self._closing or self._drawing_session is not None or self._extension_runtime.drag_active:
@@ -3123,8 +3064,12 @@ class MainWindow(QMainWindow):
         self._state.timeframe = tf
         self._load()
 
+    @property
+    def _selected_route(self) -> _DataRoute:
+        return self._router.selected_route
+
     def _route_for_symbol(self, symbol: str) -> _DataRoute:
-        return _route_for_symbol(symbol, self._selected_route, self._yahoo_route)
+        return self._router.route(Capability.BARS, symbol)
 
     def _load(self, history_start: datetime | None = None) -> None:
         """
@@ -3271,6 +3216,8 @@ class MainWindow(QMainWindow):
             request=request,
             cancellation_event=cancellation_event,
             load_timing=self._load_timing,
+            provider_factory=self._provider_registry.create_provider,
+            registry=self._provider_registry,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -3394,7 +3341,7 @@ class MainWindow(QMainWindow):
         route = next(
             (
                 route
-                for route in (self._selected_route, self._yahoo_route)
+                for route in (self._route_for_symbol(symbol), self._router.fallback_route)
                 if route.cache_namespace == cache_namespace
             ),
             None,
@@ -3887,6 +3834,8 @@ class MainWindow(QMainWindow):
             series.bars[-1].timestamp,
             bars_wanted,
             cancellation_event,
+            provider_factory=self._provider_registry.create_provider,
+            registry=self._provider_registry,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -3973,6 +3922,8 @@ class MainWindow(QMainWindow):
             series,
             cancellation_event,
             log_errors=not self._live_refresh_failing,
+            provider_factory=self._provider_registry.create_provider,
+            registry=self._provider_registry,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -4952,6 +4903,8 @@ class MainWindow(QMainWindow):
             self._credential_store,
             self._cache.get_provider_connections(),
             self._provider_availability,
+            provider_factory=self._provider_registry.create_provider,
+            registry=self._provider_registry,
             preferred_connection_id=(
                 self._selected_route.connection.connection_id
             ),
@@ -4981,7 +4934,14 @@ class MainWindow(QMainWindow):
             if self._state.symbol is not None:
                 self._select_earnings_symbol(self._state.symbol)
                 self._refresh_chart_event_markers()
-            self._request_provider_activation(dialog.selected_connection_id())
+            connection_id = dialog.selected_connection_id()
+            stored_id = self._cache.get_active_provider_connection_id()
+            if (
+                connection_id != self._provider_registry.fallback_connection_id
+                or self._cache.get_provider_connection(stored_id) is not None
+                or dialog.source_was_selected()
+            ):
+                self._request_provider_activation(connection_id)
 
     def _request_provider_activation(self, connection_id: str) -> None:
         if (
@@ -4994,8 +4954,8 @@ class MainWindow(QMainWindow):
         if connection is None:
             raise RuntimeError(f"Unknown provider connection: {connection_id}")
 
-        if connection.connection_id == YFINANCE_CONNECTION_ID:
-            self._commit_provider_route(self._yahoo_route)
+        if connection.connection_id == self._provider_registry.fallback_connection_id:
+            self._commit_provider_route(self._router.fallback_route)
             return
 
         availability = self._provider_availability.get(connection.provider_name)
@@ -5014,7 +4974,7 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            provider = create_provider(connection, self._credential_store)
+            provider = self._provider_registry.create_provider(connection, self._credential_store)
         except Exception as exc:
             context = ErrorContext(f"Configuring {connection.display_name}")
             message = report_error(_LOGGER, exc, context)
@@ -5025,7 +4985,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._pending_route = _DataRoute(Aggregator(provider), connection)
+        self._pending_route = _DataRoute(Aggregator(provider), connection, self._provider_registry)
         cancellation_event = threading.Event()
         worker = _ProviderValidationWorker(
             provider,
@@ -5078,8 +5038,22 @@ class MainWindow(QMainWindow):
     def _commit_provider_route(self, route: _DataRoute) -> None:
         if self._closing or self._stopping_data_workers:
             return
+        symbol = self._state.symbol
+        if symbol is not None:
+            previous_quote = self._router.route(Capability.LEVEL1, symbol)
+            previous_name = self._router.route(Capability.COMPANY_NAME, symbol)
         self._quote_route_generation += 1
-        self._selected_route = route
+        self._router.selected_route = route
+        if symbol is not None:
+            quote_route = self._router.route(Capability.LEVEL1, symbol)
+            name_route = self._router.route(Capability.COMPANY_NAME, symbol)
+            if quote_route is not previous_quote or name_route is not previous_name:
+                self._level1_symbol_generation += 1
+                if self._level1_cancellation_event is not None:
+                    self._level1_cancellation_event.set()
+            if name_route is not previous_name:
+                self._symbol_details.clear_company_name(symbol)
+        self._symbol_details.refresh_routes()
         self._cache.set_active_provider_connection_id(route.connection.connection_id)
         status_bar = self.statusBar()
         if status_bar is not None:
@@ -5099,11 +5073,9 @@ class MainWindow(QMainWindow):
     def _stop_data_workers(self) -> None:
         self._stopping_data_workers = True
         self._market_status_bar.stop_clock()
-        self._symbol_details.stop()
+        for component in self._background_components:
+            component.stop()
         self._symbol_bar.stop_search()
-        self._earnings_pending = None
-        if self._earnings_cancelled is not None:
-            self._earnings_cancelled.set()
         self._snapshot_refresh_pending = False
         self._level1_refresh_pending = False
         if self._snapshot_timer.isActive():
@@ -5190,17 +5162,20 @@ class MainWindow(QMainWindow):
         """Persist reordered watchlist symbols."""
         self._cache.reorder_watchlist(symbols)
 
-    def _quote_route_identity(self, symbol: str) -> _QuoteRouteIdentity:
+    def _quote_route_identity(
+        self, symbol: str, capability: Capability = Capability.LEVEL1,
+    ) -> _QuoteRouteIdentity:
+        route = self._router.route(capability, symbol)
         return _QuoteRouteIdentity(
-            self._route_for_symbol(symbol).connection,
-            0 if _is_yahoo_futures_symbol(symbol) else self._quote_route_generation,
+            route.connection,
+            0 if route is self._router.fallback_route else self._quote_route_generation,
         )
 
     def _make_snapshot_request(self) -> _SnapshotRequest:
         return _SnapshotRequest(
             self._watchlist_membership_revision,
             tuple(
-                (symbol, self._quote_route_identity(symbol))
+                (symbol, self._quote_route_identity(symbol, Capability.SNAPSHOTS))
                 for symbol in sorted(self._watchlist.symbols())
             ),
         )
@@ -5220,7 +5195,7 @@ class MainWindow(QMainWindow):
 
         symbols_by_namespace: dict[str, tuple[Aggregator, list[str]]] = {}
         for symbol in symbols:
-            route = self._route_for_symbol(symbol)
+            route = self._router.route(Capability.SNAPSHOTS, symbol)
             existing = symbols_by_namespace.get(route.cache_namespace)
             if existing is None:
                 symbols_by_namespace[route.cache_namespace] = (
@@ -5271,7 +5246,7 @@ class MainWindow(QMainWindow):
                 symbol: snapshot.change_percent
                 for symbol, snapshot in snapshots.items()
                 if symbol in current_symbols
-                and routes.get(symbol) == self._quote_route_identity(symbol)
+                and routes.get(symbol) == self._quote_route_identity(symbol, Capability.SNAPSHOTS)
             }
         )
 
@@ -5292,26 +5267,27 @@ class MainWindow(QMainWindow):
                 self._level1_refresh_pending = True
             return
         self._level1_refresh_pending = False
-        route = self._route_for_symbol(symbol)
+        route = self._router.route(Capability.LEVEL1, symbol)
+        company_name_route = self._router.route(Capability.COMPANY_NAME, symbol)
+        company_name_source = company_name_route.connection.provider_name
         now = datetime.now(tz=timezone.utc)
-        last_attempt = self._asset_reference_refresh_attempts.get(symbol)
+        reference_key = (company_name_route.connection, symbol)
+        last_attempt = self._asset_reference_refresh_attempts.get(reference_key)
         refresh_reference = _asset_reference_refresh_due(
-            self._cache,
-            symbol,
-            now,
-            last_attempt,
+            self._cache, symbol, now, last_attempt, source=company_name_source,
         )
-        if refresh_reference:
-            self._asset_reference_refresh_attempts[symbol] = now
+        self._level1_reference_attempt = (reference_key, now) if refresh_reference else None
         cancellation_event = threading.Event()
         worker = _Level1Worker(
             route.aggregator,
-            self._yahoo_route.aggregator,
+            company_name_route.aggregator,
             self._db_path,
             request,
             refresh_reference,
             now,
             cancellation_event,
+            registry=self._provider_registry,
+            company_name_source=company_name_source,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -5399,6 +5375,14 @@ class MainWindow(QMainWindow):
         self._level1_thread = None
         self._level1_worker = None
         self._level1_request = None
+        if (
+            self._level1_reference_attempt is not None
+            and self._level1_cancellation_event is not None
+            and not self._level1_cancellation_event.is_set()
+        ):
+            key, attempted_at = self._level1_reference_attempt
+            self._asset_reference_refresh_attempts[key] = attempted_at
+        self._level1_reference_attempt = None
         self._level1_cancellation_event = None
         if (
             self._level1_refresh_pending
@@ -5420,17 +5404,21 @@ class MainWindow(QMainWindow):
             self._pending_route = None
         self._maybe_finalize_close()
 
-    def _maybe_finalize_close(self) -> None:
-        if not self._closing or self._close_finalized or self._close_finalize_scheduled:
-            return
-        if (
-            self._chart_load_tasks
+    def _data_workers_busy(self) -> bool:
+        return (
+            bool(self._chart_load_tasks)
             or self._snapshot_thread is not None
             or self._level1_thread is not None
             or self._validation_thread is not None
-            or self._earnings_thread is not None
-            or self._symbol_details.busy
-            or self._symbol_bar.search_busy
+            or any(component.busy for component in self._background_components)
+        )
+
+    def _maybe_finalize_close(self) -> None:
+        if (
+            not self._closing
+            or self._close_finalized
+            or self._close_finalize_scheduled
+            or self._data_workers_busy()
         ):
             return
         self._close_finalize_scheduled = True
@@ -5441,13 +5429,7 @@ class MainWindow(QMainWindow):
         if (
             not self._closing
             or self._close_finalized
-            or self._chart_load_tasks
-            or self._snapshot_thread is not None
-            or self._level1_thread is not None
-            or self._validation_thread is not None
-            or self._earnings_thread is not None
-            or self._symbol_details.busy
-            or self._symbol_bar.search_busy
+            or self._data_workers_busy()
         ):
             return
         self._pending_route = None

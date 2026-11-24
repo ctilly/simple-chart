@@ -14,8 +14,8 @@ from requests import PreparedRequest, Response, Session
 from requests.adapters import HTTPAdapter
 
 from data.models import Timeframe
-from data.provider import alpaca_provider
-from data.provider.alpaca_provider import (
+from providers.alpaca import implementation as alpaca_provider
+from providers.alpaca.implementation import (
     AlpacaProvider,
     _create_stock_historical_data_client,
 )
@@ -25,7 +25,7 @@ from data.provider.base import (
     UnsupportedTimeframeError,
     background_requests,
 )
-from data.provider.config import MarketDataFeed
+from providers.alpaca import MarketDataFeed
 
 
 @dataclass

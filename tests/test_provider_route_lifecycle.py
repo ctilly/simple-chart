@@ -3,23 +3,24 @@ from datetime import datetime
 from pathlib import Path
 import threading
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QTimer
 
 import app.controller as controller_module
 from app.controller import MainWindow, _DataRoute
+from data.provider.registry import ProviderRegistry
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ProviderConnection,
-    alpaca_paper_connection,
-    yfinance_connection,
-)
+from data.provider.config import ProviderConnection
+from provider_support import alpaca_paper_connection, yfinance_connection
 from data.provider.credentials import CredentialStore
+from providers.alpaca import MarketDataFeed
+from providers.alpaca.implementation import AlpacaProvider
 
 
 pytestmark = pytest.mark.usefixtures("isolated_credentials")
@@ -89,6 +90,7 @@ class _QuoteProvider(DataProvider):
 
 @pytest.fixture
 def quote_window(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> Iterator[tuple[MainWindow, _QuoteProvider, _QuoteProvider]]:
@@ -104,13 +106,13 @@ def quote_window(
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window._snapshot_timer.stop()
     market = _QuoteProvider(1.0)
     yahoo = _QuoteProvider(20.0)
-    window._selected_route = _DataRoute(Aggregator(market), alpaca_paper_connection())
-    window._yahoo_route = _DataRoute(Aggregator(yahoo), yfinance_connection())
+    window._router.selected_route = _DataRoute(Aggregator(market), alpaca_paper_connection(), provider_registry)
+    window._router.fallback_route = _DataRoute(Aggregator(yahoo), yfinance_connection(), provider_registry)
     for symbol in window._watchlist.symbols():
         window._cache.remove_from_watchlist(symbol)
         window._watchlist.remove_symbol(symbol)
@@ -150,7 +152,7 @@ def test_old_route_snapshot_is_rejected_and_new_route_refreshes_after_completion
     market.release_snapshots.clear()
     window._refresh_watchlist_snapshots()
     qtbot.waitUntil(market.snapshot_started.is_set)
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     market.release_snapshots.set()
     qtbot.waitUntil(lambda: bool(updates))
     assert all(update.get("SPY") != 1.0 for update in updates)
@@ -169,7 +171,7 @@ def test_same_symbol_level1_rejects_old_route_across_switch_away_and_back(
     window._refresh_level1()
     qtbot.waitUntil(market.quote_started.is_set)
     original_route = window._selected_route
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     window._commit_provider_route(original_route)
     market.value = 2.0
     market.release_quotes.set()
@@ -211,7 +213,7 @@ def test_mixed_snapshots_keep_yahoo_futures_across_equity_route_epochs(
     window._refresh_watchlist_snapshots()
     qtbot.waitUntil(market.snapshot_started.is_set)
     original_route = window._selected_route
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     window._commit_provider_route(original_route)
     market.value = 2.0
     market.release_snapshots.set()
@@ -261,7 +263,7 @@ def test_stale_quote_errors_do_not_reach_new_route_status(
     window._refresh_level1()
     qtbot.waitUntil(market.snapshot_started.is_set)
     qtbot.waitUntil(market.quote_started.is_set)
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     market.release_snapshots.set()
     market.release_quotes.set()
     qtbot.waitUntil(lambda: bool(yahoo.snapshot_calls) and bool(yahoo.quote_calls))
@@ -292,7 +294,7 @@ def test_stale_quote_errors_do_not_reach_route_after_switch_away_and_back(
     qtbot.waitUntil(market.quote_started.is_set)
 
     original_route = window._selected_route
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     window._commit_provider_route(original_route)
     market.snapshot_error = False
     market.quote_error = False
@@ -468,22 +470,7 @@ def test_close_drains_chart_quotes_and_validation_while_gui_stays_responsive(
         def native_timeframes(self) -> list[Timeframe]:
             return [Timeframe.DAILY]
 
-    class ValidationProvider(DataProvider):
-        def fetch_bars(
-            self,
-            symbol: str,
-            timeframe: Timeframe,
-            start: datetime,
-            end: datetime,
-        ) -> list[Bar]:
-            return []
-
-        def fetch_snapshots(
-            self,
-            _symbols: list[str],
-        ) -> dict[str, MarketSnapshot]:
-            return {}
-
+    class ValidationProvider(AlpacaProvider):
         def fetch_level1(self, symbol: str) -> Level1Quote | None:
             validation_calls.append(symbol)
             validation_started.set()
@@ -493,11 +480,8 @@ def test_close_drains_chart_quotes_and_validation_while_gui_stays_responsive(
                 raise RuntimeError("validation failed after closing")
             return _quote(symbol, 30.0)
 
-        def native_timeframes(self) -> list[Timeframe]:
-            return [Timeframe.DAILY]
-
     chart_provider = ChartProvider()
-    validation_provider = ValidationProvider()
+    validation_provider = ValidationProvider("test-key", "test-secret", MarketDataFeed.IEX, client=Mock())
 
     def create_test_provider(
         connection: ProviderConnection,
@@ -510,7 +494,7 @@ def test_close_drains_chart_quotes_and_validation_while_gui_stays_responsive(
             else chart_provider
         )
 
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     monkeypatch.setattr(
         controller_module,
         "show_warning",
@@ -752,11 +736,11 @@ def test_level1_cancellation_during_cache_open_skips_provider_call(
     completed: list[bool] = []
 
     class BlockingCache(Cache):
-        def __init__(self, db_path: str) -> None:
+        def __init__(self, db_path: str, *, registry: ProviderRegistry) -> None:
             cache_started.set()
             if not release_cache.wait(timeout=3):
                 raise RuntimeError("test cache was not released")
-            super().__init__(db_path)
+            super().__init__(db_path, registry=registry)
 
     monkeypatch.setattr(controller_module, "Cache", BlockingCache)
     try:
@@ -787,12 +771,12 @@ def test_level1_worker_owns_cache_and_cleans_up_all_terminal_paths(
     release = threading.Event()
 
     class TrackedCache(Cache):
-        def __init__(self, db_path: str) -> None:
+        def __init__(self, db_path: str, *, registry: ProviderRegistry) -> None:
             entered.set()
             release.wait(timeout=3)
             if outcome == "cache_error":
                 raise RuntimeError("cache failed")
-            super().__init__(db_path)
+            super().__init__(db_path, registry=registry)
             opened.append(threading.get_ident())
 
         def close(self) -> None:
@@ -838,7 +822,7 @@ def test_stopping_workers_clears_replacements_and_ignores_late_quote_delivery(
     market.release_quotes.clear()
     window._refresh_level1()
     qtbot.waitUntil(market.quote_started.is_set)
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     market.release_quotes.set()
     window._stop_data_workers()
     qtbot.waitUntil(lambda: window._level1_thread is None)
@@ -887,7 +871,7 @@ def test_level1_futures_identity_stays_valid_when_selected_equity_route_changes(
     yahoo.release_quotes.clear()
     window._refresh_level1()
     qtbot.waitUntil(yahoo.quote_started.is_set)
-    window._commit_provider_route(window._yahoo_route)
+    window._commit_provider_route(window._router.fallback_route)
     yahoo.release_quotes.set()
     qtbot.waitUntil(lambda: window._level1_thread is None)
     assert [quote.symbol for quote in received] == ["ES=F"]

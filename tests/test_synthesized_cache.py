@@ -9,6 +9,7 @@ from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, BarCorrection, Level1Quote, MarketSnapshot, Timeframe
 from data.provider.base import DataProvider, HistoryUnavailableError
+from provider_support import startup_registry
 
 
 _NAMESPACE = "alpaca:iex"
@@ -94,7 +95,7 @@ def test_missing_target_materializes_from_complete_base_without_provider_call(
 ) -> None:
     provider = _Provider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _seed_complete_base(cache)
 
         series = _fetch_series(
@@ -117,7 +118,7 @@ def test_materialization_uses_raw_base_values_not_corrections(tmp_path: Path) ->
     provider = _Provider()
     first = _base_bars()[0]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _seed_complete_base(cache)
         cache.put_bar_correction(
             BarCorrection(
@@ -147,7 +148,7 @@ def test_partial_base_rebuild_preserves_older_usable_target(tmp_path: Path) -> N
     old_target = _bar(_HISTORY_START, 50.0)
     recent_start = datetime(2026, 11, 4, 14, 30, tzinfo=UTC)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -193,7 +194,7 @@ def test_empty_materialization_preserves_existing_target_and_coverage(
     )
     provider = _Provider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(_NAMESPACE, _SYMBOL, Timeframe.MIN65, [existing])
         cache.extend_bar_fetch_coverage(
             _NAMESPACE,
@@ -240,7 +241,7 @@ def test_empty_materialization_without_target_keeps_target_absent(
 ) -> None:
     provider = _Provider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.extend_bar_fetch_coverage(
             _NAMESPACE,
             _SYMBOL,
@@ -313,7 +314,7 @@ def test_materialization_uses_exact_rebuild_and_coverage_bounds(
     aligned_start_ms = int(_HISTORY_START.timestamp() * 1000)
     expected_end_ms = int(_SETTLED_END.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _seed_complete_base(cache)
         series = _fetch_series(
             Aggregator(provider),
@@ -374,7 +375,7 @@ def test_stale_base_fetches_only_incremental_tail_then_materializes(
 
     monkeypatch.setattr(Cache, "replace_materialized_bars", record_replace)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -442,7 +443,7 @@ def test_settled_target_with_partial_base_does_not_fetch_unused_head(
     first_target = _bar(_HISTORY_START + timedelta(days=1), 50.0)
     final_target = _bar(datetime(2026, 11, 4, 20, 55, tzinfo=UTC), 70.0)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -486,7 +487,7 @@ def test_target_newer_than_base_preserves_base_coverage_head(tmp_path: Path) -> 
     target_last = datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
     provider = _Provider(bars=_base_bars())
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -538,7 +539,7 @@ def test_history_unavailable_head_still_materializes_cached_base(
 ) -> None:
     provider = _Provider(HistoryUnavailableError(_SYMBOL, Timeframe.MIN5))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -573,7 +574,7 @@ def test_history_unavailable_returns_existing_target_without_mutation(
     existing = _bar(_SESSION_OPEN, 50.0)
     provider = _Provider(HistoryUnavailableError(_SYMBOL, Timeframe.MIN5))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -598,7 +599,7 @@ def test_settled_target_does_not_hide_missing_history_head(tmp_path: Path) -> No
     existing = _bar(_SESSION_OPEN, 50.0)
     provider = _Provider()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -634,7 +635,7 @@ def test_other_provider_errors_propagate_and_preserve_existing_target(
     existing = _bar(_SESSION_OPEN, 50.0)
     provider = _Provider(RuntimeError("provider failed"))
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -669,7 +670,7 @@ def test_legacy_nonaligned_target_rebuilds_from_cached_base(
     orphan = _bar(_SESSION_OPEN + timedelta(minutes=5), 70.0)
     legacy_end = _SETTLED_END + timedelta(seconds=3)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _seed_complete_base(cache)
         cache.put_bars(
             _NAMESPACE,
@@ -717,7 +718,7 @@ def test_warm_materialization_preserves_unchanged_historical_target(
     provider = _Provider()
     unchanged = _bar(datetime(2026, 11, 3, 14, 30, tzinfo=UTC), 50.0)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _seed_complete_base(cache)
         cache.put_bars(
             _NAMESPACE,
@@ -756,7 +757,7 @@ def test_materialized_bars_and_coverage_roll_back_together(tmp_path: Path) -> No
         int(_SESSION_OPEN.timestamp() * 1000),
     )
 
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,

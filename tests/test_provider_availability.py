@@ -4,11 +4,8 @@ from types import ModuleType
 
 import pytest
 
-from data.provider import (
-    ProviderAvailability,
-    provider_availability,
-    provider_dependency_status,
-)
+from data.provider.registry import ProviderRegistry
+from data.provider import ProviderAvailability
 from data.provider.credentials import (
     CredentialStoreAccess,
     CredentialStoreUnavailableError,
@@ -75,32 +72,32 @@ print('provider registry imported')
     assert result.stdout.strip() == "provider registry imported"
 
 
-def test_provider_dependency_status_identifies_missing_module() -> None:
+def test_provider_dependency_status_identifies_missing_module(provider_registry: ProviderRegistry) -> None:
     def importer(name: str) -> ModuleType:
         raise ModuleNotFoundError(name)
 
-    status = provider_dependency_status("alpaca", importer)
+    status = provider_registry.dependency_status("alpaca", importer)
 
     assert isinstance(status, ProviderAvailability)
     assert not status.available
     assert status.reason == "Required package 'alpaca-py' is not installed."
 
 
-def test_provider_dependency_status_accepts_available_modules() -> None:
+def test_provider_dependency_status_accepts_available_modules(provider_registry: ProviderRegistry) -> None:
     imported: list[str] = []
 
     def importer(name: str) -> ModuleType:
         imported.append(name)
         return ModuleType(name)
 
-    status = provider_dependency_status("alpaca", importer)
+    status = provider_registry.dependency_status("alpaca", importer)
 
     assert status.available
     assert status.reason is None
     assert imported == ["alpaca"]
 
 
-def test_provider_availability_requires_secure_storage_for_alpaca() -> None:
+def test_provider_availability_requires_secure_storage_for_alpaca(provider_registry: ProviderRegistry) -> None:
     reason = "The operating-system credential store is unavailable."
     access = CredentialStoreAccess(
         UnavailableCredentialStore(reason),
@@ -108,7 +105,7 @@ def test_provider_availability_requires_secure_storage_for_alpaca() -> None:
         reason,
     )
 
-    status = provider_availability(
+    status = provider_registry.provider_availability(
         "alpaca",
         access,
         lambda name: ModuleType(name),
@@ -118,7 +115,7 @@ def test_provider_availability_requires_secure_storage_for_alpaca() -> None:
     assert status.reason == reason
 
 
-def test_provider_availability_keeps_yahoo_without_secure_storage() -> None:
+def test_provider_availability_keeps_yahoo_without_secure_storage(provider_registry: ProviderRegistry) -> None:
     reason = "The operating-system credential store is unavailable."
     access = CredentialStoreAccess(
         UnavailableCredentialStore(reason),
@@ -126,7 +123,7 @@ def test_provider_availability_keeps_yahoo_without_secure_storage() -> None:
         reason,
     )
 
-    status = provider_availability(
+    status = provider_registry.provider_availability(
         "yfinance",
         access,
         lambda name: ModuleType(name),
@@ -136,7 +133,7 @@ def test_provider_availability_keeps_yahoo_without_secure_storage() -> None:
     assert status.reason is None
 
 
-def test_provider_availability_reports_missing_package_before_keyring() -> None:
+def test_provider_availability_reports_missing_package_before_keyring(provider_registry: ProviderRegistry) -> None:
     keyring_reason = "The operating-system credential store is unavailable."
     access = CredentialStoreAccess(
         UnavailableCredentialStore(keyring_reason),
@@ -147,16 +144,16 @@ def test_provider_availability_reports_missing_package_before_keyring() -> None:
     def importer(name: str) -> ModuleType:
         raise ModuleNotFoundError(name)
 
-    status = provider_availability("alpaca", access, importer)
+    status = provider_registry.provider_availability("alpaca", access, importer)
 
     assert not status.available
     assert status.reason == "Required package 'alpaca-py' is not installed."
 
 
-def test_keyring_preflight_writes_reads_and_removes_probe() -> None:
+def test_keyring_preflight_writes_reads_and_removes_probe(provider_registry: ProviderRegistry) -> None:
     backend = _ProbeBackend()
 
-    access = initialize_keyring_credential_store(backend)
+    access = initialize_keyring_credential_store(backend, registry=provider_registry)
 
     assert access.available
     assert access.reason is None
@@ -166,11 +163,12 @@ def test_keyring_preflight_writes_reads_and_removes_probe() -> None:
 
 @pytest.mark.parametrize("operation", ["set", "get", "delete"])
 def test_keyring_preflight_failure_returns_non_storing_store(
+    provider_registry: ProviderRegistry,
     operation: str,
 ) -> None:
     backend = _ProbeBackend(operation)
 
-    access = initialize_keyring_credential_store(backend)
+    access = initialize_keyring_credential_store(backend, registry=provider_registry)
 
     assert not access.available
     assert access.reason == "The operating-system credential store is unavailable."
@@ -179,18 +177,19 @@ def test_keyring_preflight_failure_returns_non_storing_store(
     with pytest.raises(CredentialStoreUnavailableError, match="unavailable"):
         access.store.put(
             "alpaca-paper",
-            ProviderCredentials("must-not-persist", "must-not-persist"),
+            ProviderCredentials({"api_key_id": "must-not-persist", "api_secret": "must-not-persist"}),
         )
     assert "must-not-persist" not in repr(backend.passwords)
 
 
 def test_missing_keyring_package_returns_non_storing_store(
+    provider_registry: ProviderRegistry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def importer(name: str) -> ModuleType:
         raise ModuleNotFoundError(name)
 
-    access = initialize_keyring_credential_store(importer=importer)
+    access = initialize_keyring_credential_store(importer=importer, registry=provider_registry)
 
     assert not access.available
     assert access.reason == "Required package 'keyring' is not installed."
@@ -199,7 +198,7 @@ def test_missing_keyring_package_returns_non_storing_store(
 
 
 def test_credential_secret_is_excluded_from_repr() -> None:
-    credentials = ProviderCredentials("visible-key-id", "hidden-api-secret")
+    credentials = ProviderCredentials({"api_key_id": "visible-key-id", "api_secret": "hidden-api-secret"})
 
     assert "visible-key-id" not in repr(credentials)
     assert "hidden-api-secret" not in repr(credentials)
@@ -223,11 +222,12 @@ def _keyring_module(active: object) -> ModuleType:
     return module
 
 
-def test_plaintext_keyring_backend_is_rejected_before_any_write() -> None:
+def test_plaintext_keyring_backend_is_rejected_before_any_write(provider_registry: ProviderRegistry) -> None:
     plaintext = _backend_named("keyrings.alt.file", "PlaintextKeyring")
 
     access = initialize_keyring_credential_store(
         importer=lambda _name: _keyring_module(plaintext),
+        registry=provider_registry,
     )
 
     assert not access.available
@@ -236,10 +236,10 @@ def test_plaintext_keyring_backend_is_rejected_before_any_write() -> None:
     )
     assert plaintext.operations == []
     with pytest.raises(CredentialStoreUnavailableError):
-        access.store.put("alpaca-paper", ProviderCredentials("key", "secret"))
+        access.store.put("alpaca-paper", ProviderCredentials({"api_key_id": "key", "api_secret": "secret"}))
 
 
-def test_chained_keyring_with_a_non_os_backend_is_rejected_before_any_write() -> None:
+def test_chained_keyring_with_a_non_os_backend_is_rejected_before_any_write(provider_registry: ProviderRegistry) -> None:
     os_store = _backend_named("keyring.backends.SecretService", "Keyring")
     plaintext = _backend_named("keyrings.alt.file", "PlaintextKeyring")
     chainer = _backend_named(
@@ -250,6 +250,7 @@ def test_chained_keyring_with_a_non_os_backend_is_rejected_before_any_write() ->
 
     access = initialize_keyring_credential_store(
         importer=lambda _name: _keyring_module(chainer),
+        registry=provider_registry,
     )
 
     assert not access.available
@@ -258,11 +259,12 @@ def test_chained_keyring_with_a_non_os_backend_is_rejected_before_any_write() ->
     assert plaintext.operations == []
 
 
-def test_empty_keyring_chain_is_rejected() -> None:
+def test_empty_keyring_chain_is_rejected(provider_registry: ProviderRegistry) -> None:
     chainer = _backend_named("keyring.backends.chainer", "ChainerBackend", backends=[])
 
     access = initialize_keyring_credential_store(
         importer=lambda _name: _keyring_module(chainer),
+        registry=provider_registry,
     )
 
     assert not access.available
@@ -280,18 +282,19 @@ def test_empty_keyring_chain_is_rejected() -> None:
         ("keyring.backends.Windows", "WinVaultKeyring"),
     ],
 )
-def test_os_keyring_backends_pass_the_preflight(module: str, qualname: str) -> None:
+def test_os_keyring_backends_pass_the_preflight(module: str, qualname: str, provider_registry: ProviderRegistry) -> None:
     backend = _backend_named(module, qualname)
 
     access = initialize_keyring_credential_store(
         importer=lambda _name: _keyring_module(backend),
+        registry=provider_registry,
     )
 
     assert access.available
     assert backend.operations == ["set", "get", "delete"]
 
 
-def test_chain_of_os_keyring_backends_passes_the_preflight() -> None:
+def test_chain_of_os_keyring_backends_passes_the_preflight(provider_registry: ProviderRegistry) -> None:
     secret_service = _backend_named("keyring.backends.SecretService", "Keyring")
     kwallet = _backend_named("keyring.backends.kwallet", "DBusKeyring")
     chainer = _backend_named(
@@ -302,13 +305,14 @@ def test_chain_of_os_keyring_backends_passes_the_preflight() -> None:
 
     access = initialize_keyring_credential_store(
         importer=lambda _name: _keyring_module(chainer),
+        registry=provider_registry,
     )
 
     assert access.available
     assert chainer.operations == ["set", "get", "delete"]
 
 
-def test_keyring_backend_resolution_failure_disables_the_store() -> None:
+def test_keyring_backend_resolution_failure_disables_the_store(provider_registry: ProviderRegistry) -> None:
     # A bad PYTHON_KEYRING_BACKEND or keyringrc.cfg makes get_keyring() raise.
     def failing_get_keyring() -> object:
         raise RuntimeError("backend cannot run here")
@@ -316,7 +320,7 @@ def test_keyring_backend_resolution_failure_disables_the_store() -> None:
     module = ModuleType("keyring")
     module.get_keyring = failing_get_keyring  # type: ignore[attr-defined]
 
-    access = initialize_keyring_credential_store(importer=lambda _name: module)
+    access = initialize_keyring_credential_store(importer=lambda _name: module, registry=provider_registry)
 
     assert not access.available
     assert access.reason == "The operating-system credential store is unavailable."
@@ -324,7 +328,7 @@ def test_keyring_backend_resolution_failure_disables_the_store() -> None:
         access.store.get("alpaca-paper")
 
 
-def test_store_writes_through_the_backend_that_passed_the_preflight() -> None:
+def test_store_writes_through_the_backend_that_passed_the_preflight(provider_registry: ProviderRegistry) -> None:
     checked = _backend_named("keyring.backends.SecretService", "Keyring")
     replaced = _ProbeBackend()
     module = _keyring_module(checked)
@@ -334,8 +338,8 @@ def test_store_writes_through_the_backend_that_passed_the_preflight() -> None:
     module.get_password = replaced.get_password  # type: ignore[attr-defined]
     module.delete_password = replaced.delete_password  # type: ignore[attr-defined]
 
-    access = initialize_keyring_credential_store(importer=lambda _name: module)
-    access.store.put("alpaca-paper", ProviderCredentials("key", "secret"))
+    access = initialize_keyring_credential_store(importer=lambda _name: module, registry=provider_registry)
+    access.store.put("alpaca-paper", ProviderCredentials({"api_key_id": "key", "api_secret": "secret"}))
 
     assert replaced.operations == []
     assert ("simplechart.provider-credentials", "alpaca-paper") in checked.passwords

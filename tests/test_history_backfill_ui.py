@@ -11,6 +11,7 @@ import pytest
 import app.controller as controller_module
 from app.controller import MainWindow, _recent_history_start
 from app.state import ChartExtensionState
+from data.provider.registry import ProviderRegistry
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider.base import DataProvider
@@ -44,12 +45,17 @@ def _isolated_finplot_windows() -> Iterator[None]:
     fplt.windows.clear()
 
 
-def _window(qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
+def _window(
+    provider_registry: ProviderRegistry,
+    qtbot: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> MainWindow:
     # Never touch the host OS keyring from these tests.
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
@@ -57,7 +63,7 @@ def _window(qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> MainW
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window
@@ -97,9 +103,10 @@ def _sma_keys(window: MainWindow) -> list[str]:
 
 
 def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     warnings: list[str] = []
     monkeypatch.setattr(controller_module, "show_warning", lambda _p, title, _m: warnings.append(title))
     request = _current_request(window)
@@ -130,9 +137,10 @@ def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
 
 
 def test_stale_recent_and_history_results_are_ignored(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     old_request = _current_request(window)
     current = _current_request(window)
     window._on_chart_recent_ready(current, _series(300))
@@ -145,9 +153,10 @@ def test_stale_recent_and_history_results_are_ignored(
 
 
 def test_backfill_error_after_recent_render_shows_status_not_dialog(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     warnings: list[str] = []
     monkeypatch.setattr(controller_module, "show_warning", lambda _p, title, _m: warnings.append(title))
     request = _current_request(window)
@@ -217,9 +226,10 @@ register_extension(_InterimDragTool)
 
 
 def test_history_merge_is_held_during_real_drag_and_applied_once_after(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = _current_request(window)
     recent = _series(300, _FIRST + timedelta(minutes=5 * 200))
     full = _series(500)
@@ -257,9 +267,10 @@ def test_history_merge_is_held_during_real_drag_and_applied_once_after(
 
 
 def test_held_history_merge_is_discarded_after_navigation(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = _current_request(window)
     window._on_chart_recent_ready(request, _series(300))
     window._extension_runtime._drag_session = object()  # type: ignore[assignment]
@@ -276,9 +287,10 @@ def test_held_history_merge_is_discarded_after_navigation(
 
 
 def test_interim_reload_does_not_prepend_partially_backfilled_bars(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = _current_request(window)
     full = _series(500, (datetime.now(tz=UTC) - timedelta(days=3)).replace(second=0, microsecond=0))
     recent = OHLCVSeries("XBI", Timeframe.MIN5, full.bars[200:])
@@ -345,10 +357,11 @@ class _FixedDateTime(datetime):
 
 
 def test_production_load_renders_recent_window_before_backfill_completes(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = _FixedDateTime.now(UTC)
     recent_start = _production_recent_start(window, now)
     provider = _GatedPagedProvider(recent_start)
@@ -358,7 +371,7 @@ def test_production_load_renders_recent_window_before_backfill_completes(
     ) -> DataProvider:
         return provider
 
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     monkeypatch.setattr(controller_module, "show_warning", lambda *_args: None)
     window._state.symbol = "XBI"
     window._state.timeframe = Timeframe.MIN5
@@ -380,7 +393,7 @@ def test_production_load_renders_recent_window_before_backfill_completes(
     assert final is not None and final.bars[0].timestamp < recent_start
     assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
     qtbot.waitUntil(lambda: not window._chart_load_tasks, timeout=10_000)
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         coverage = cache.get_bar_fetch_coverage(
             window._selected_route.cache_namespace, "XBI", Timeframe.MIN5,
         )
@@ -394,9 +407,10 @@ def test_production_load_renders_recent_window_before_backfill_completes(
 
 
 def test_replacement_load_does_not_reveal_partial_cache_as_complete(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     monkeypatch.setattr(window, "_chart_load_timer", _InertTimer())
     request = _current_request(window)
     full = _series(500, (datetime.now(tz=UTC) - timedelta(days=3)).replace(second=0, microsecond=0))
@@ -426,14 +440,15 @@ class _InertTimer:
 
 
 def test_load_timing_log_records_production_load_steps(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SIMPLECHART_LOAD_TIMING", "1")
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = datetime.now(tz=UTC)
     provider = _GatedPagedProvider(_production_recent_start(window, now))
     monkeypatch.setattr(
-        controller_module, "create_provider", lambda _connection, _store: provider,
+        controller_module.ProviderRegistry, "create_provider", staticmethod(lambda _connection, _store: provider),
     )
     real_clear = window._chart.clear_all
 
@@ -476,9 +491,10 @@ def test_load_timing_log_records_production_load_steps(
 
 
 def test_new_symbol_load_requests_the_quote_once(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     quote_requests: list[str | None] = []
     monkeypatch.setattr(
         window, "_refresh_level1", lambda: quote_requests.append(window._state.symbol),
@@ -497,9 +513,10 @@ def test_new_symbol_load_requests_the_quote_once(
 
 
 def test_timeframe_switch_still_refreshes_the_quote_after_load(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     quote_requests: list[str | None] = []
     monkeypatch.setattr(
         window, "_refresh_level1", lambda: quote_requests.append(window._state.symbol),
@@ -588,9 +605,10 @@ def _interim_with_probe(
 
 
 def test_history_progress_renders_content_once_its_history_arrives(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     full = _series(500)
     request = _interim_with_probe(window, full, [full.bars[100]])
     assert _probe_keys(window) == []
@@ -618,9 +636,10 @@ def test_history_progress_renders_content_once_its_history_arrives(
 
 
 def test_history_progress_re_renders_at_most_once_per_interval(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     full = _series(500)
     request = _interim_with_probe(window, full, [full.bars[100], full.bars[20]])
     clock = {"now": 100.0}
@@ -674,9 +693,10 @@ def test_history_progress_re_renders_at_most_once_per_interval(
 
 
 def test_history_progress_waits_for_a_drag_to_finish(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     full = _series(500)
     request = _interim_with_probe(window, full, [full.bars[100]])
     displayed = window._current_series
@@ -692,9 +712,10 @@ def test_history_progress_waits_for_a_drag_to_finish(
 
 
 def test_stale_history_progress_is_ignored(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     full = _series(500)
     request = _interim_with_probe(window, full, [full.bars[100]])
     stale = window._make_chart_load_request(
@@ -726,9 +747,10 @@ class _CutGatedPagedProvider(_GatedPagedProvider):
 
 
 def test_production_backfill_progress_renders_anchored_content_before_completion(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = datetime.now(tz=UTC)
     recent_start = _production_recent_start(window, now)
     # The newest backfill chunk spans the 30 days before recent_start; the
@@ -736,7 +758,7 @@ def test_production_backfill_progress_renders_anchored_content_before_completion
     anchor = recent_start - timedelta(days=10)
     provider = _CutGatedPagedProvider(recent_start - timedelta(days=40))
     monkeypatch.setattr(
-        controller_module, "create_provider", lambda _connection, _store: provider,
+        controller_module.ProviderRegistry, "create_provider", staticmethod(lambda _connection, _store: provider),
     )
     monkeypatch.setattr(controller_module, "show_warning", lambda *_args: None)
     monkeypatch.setattr(
@@ -785,11 +807,15 @@ def test_production_backfill_progress_renders_anchored_content_before_completion
     assert all(oldest_ms <= ms <= newest_ms for ms in received_ms)
 
 
-def test_history_progress_signal_carries_utc_ms_timestamps_intact() -> None:
+def test_history_progress_signal_carries_utc_ms_timestamps_intact(
+    provider_registry: ProviderRegistry,
+) -> None:
     worker = controller_module._FetchWorker(
         db_path=":memory:",
         credential_store=UnavailableCredentialStore("test"),
         request=object(),  # type: ignore[arg-type]
+        provider_factory=provider_registry.create_provider,
+        registry=provider_registry,
     )
     received: list[tuple[object, int]] = []
     worker.history_progress.connect(

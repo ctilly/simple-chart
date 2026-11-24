@@ -38,6 +38,7 @@ from test_basis_change import (  # noqa: F401  (fixture)
     _show,
     _window,
 )
+from provider_support import startup_registry
 
 _production_refresh = MainWindow._refresh_live_bars
 
@@ -642,7 +643,7 @@ def test_a_basis_change_found_by_a_poll_keeps_older_history_like_a_reload(
 
     # The chart shows what a reload shows: not the old-basis history.
     assert polled == reloaded
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_YAHOO, _SYMBOL)
         old = cache.get_raw_bars(
             _YAHOO,

@@ -3,9 +3,8 @@ data/provider/base.py
 
 Abstract base class for data providers.
 
-Any data source (yfinance, Alpaca, or a third-party addition) implements
-this interface. The rest of the app only ever talks to a DataProvider —
-it has no knowledge of which provider is active or how it works internally.
+Each data source implements this interface. The app uses DataProvider to
+access market data through a common API.
 
 A provider is responsible for:
   - Fetching OHLCV bars for a symbol, timeframe, and time range
@@ -19,14 +18,20 @@ and resampling. The provider only needs to handle what it can fetch directly.
 """
 
 import threading
-from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 
 from data.errors import UserFacingError
-from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
+from data.models import (
+    Bar, Level1Quote, MarketSnapshot, NewsArticle, SymbolMatch, SymbolProfile, Timeframe,
+)
+
+
+class ProviderConfigurationError(UserFacingError, RuntimeError):
+    pass
+
 
 # Set while the current context makes background (history backfill) requests;
 # holds that work's cancellation event. Unset means foreground.
@@ -111,7 +116,16 @@ class HistoryUnavailableError(UserFacingError, RuntimeError):
         )
 
 
-class DataProvider(ABC):
+class UnsupportedCapabilityError(UserFacingError, RuntimeError):
+    pass
+
+
+class MissingMarketDataSnapshotError(UserFacingError, RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("The provider returned no SPY market-data snapshot.")
+
+
+class DataProvider:
     """
     Interface for OHLCV data sources.
 
@@ -120,7 +134,9 @@ class DataProvider(ABC):
     belongs in __init__.
     """
 
-    @abstractmethod
+    def check_connection(self) -> None:
+        raise UnsupportedCapabilityError("The provider does not support connection testing.")
+
     def fetch_bars(
         self,
         symbol: str,
@@ -140,7 +156,8 @@ class DataProvider(ABC):
                 requested timeframe natively.
         """
 
-    @abstractmethod
+        raise UnsupportedCapabilityError("The provider does not support bars.")
+
     def fetch_snapshots(self, symbols: list[str]) -> dict[str, MarketSnapshot]:
         """
         Fetch current market snapshots for symbols.
@@ -151,7 +168,8 @@ class DataProvider(ABC):
         symbol must omit it rather than return prior-session data as current.
         """
 
-    @abstractmethod
+        raise UnsupportedCapabilityError("The provider does not support snapshots.")
+
     def fetch_level1(self, symbol: str) -> Level1Quote | None:
         """
         Fetch Level 1 data (company name, last/change, bid/ask with sizes,
@@ -161,9 +179,20 @@ class DataProvider(ABC):
         Individual fields the provider cannot supply are None on the quote.
         """
 
+        raise UnsupportedCapabilityError("The provider does not support Level 1 quotes.")
+
     def fetch_company_name(self, symbol: str) -> str | None:
         """Return a company name when this provider supplies asset reference data."""
         return None
+
+    def fetch_profile(self, symbol: str) -> SymbolProfile | None:
+        return None
+
+    def fetch_news(self, symbol: str) -> tuple[NewsArticle, ...] | None:
+        return None
+
+    def search_symbols(self, query: str) -> tuple[SymbolMatch, ...]:
+        return ()
 
     def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
         return None
@@ -198,7 +227,6 @@ class DataProvider(ABC):
         """
         return None
 
-    @abstractmethod
     def native_timeframes(self) -> list[Timeframe]:
         """
         Return the timeframes this provider can fetch directly.
@@ -208,3 +236,4 @@ class DataProvider(ABC):
         that returns [MIN5, MIN15, MIN30, DAILY, WEEKLY] cannot supply
         MIN39 or MIN65 natively — those must be synthesized from MIN5 bars.
         """
+        raise UnsupportedCapabilityError("The provider does not support bars.")

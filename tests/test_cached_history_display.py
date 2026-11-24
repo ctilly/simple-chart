@@ -22,21 +22,21 @@ import app.controller as controller_module
 import app.extension_runtime as extension_runtime_module
 from app.controller import MainWindow
 from app.data_quality import SymbolRefreshDialog
+from data.provider.registry import ProviderRegistry
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.config import ProviderConnection
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
 from data.provider.credentials import (
     CredentialStoreAccess,
     UnavailableCredentialStore,
 )
 from PyQt6.QtWidgets import QLabel
+from provider_support import startup_registry
 
 ET = ZoneInfo("America/New_York")
 _SYMBOL = "XBI"
@@ -182,7 +182,7 @@ def _seed(
     synthesized: bool = False,
 ) -> None:
     """5m bars and their coverage; optionally the 39m bars built from them."""
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bars(namespace, _SYMBOL, Timeframe.MIN5, bars)
         cache.replace_bar_fetch_coverage(
             namespace,
@@ -209,25 +209,26 @@ def _seed(
 
 
 def _window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     provider: _SourceProvider,
     active_connection_id: str = YFINANCE_CONNECTION_ID,
 ) -> MainWindow:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=provider_registry) as cache:
         cache.set_active_provider_connection_id(active_connection_id)
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
     monkeypatch.setattr(
         controller_module,
         "_provider_availability_by_name",
-        lambda connections, _access: {
+        lambda connections, _access, _registry: {
             connection.provider_name: ProviderAvailability(True, None)
             for connection in connections
         },
@@ -239,7 +240,7 @@ def _window(
     ) -> DataProvider:
         return provider
 
-    monkeypatch.setattr(controller_module, "create_provider", create_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_provider))
     monkeypatch.setattr(_FixedDateTime, "frozen", _NOW)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
     monkeypatch.setattr(extension_runtime_module, "datetime", _FixedDateTime)
@@ -253,7 +254,7 @@ def _window(
     monkeypatch.setattr(MainWindow, "_load", lambda window, **_kwargs: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(db_path))
+    window = MainWindow(str(db_path), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window
@@ -289,6 +290,7 @@ def _at(day: date, hour: int = 9, minute: int = 30) -> datetime:
 
 
 def test_yahoo_5m_shows_contiguous_cached_history_beyond_the_provider_limit(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -301,7 +303,7 @@ def test_yahoo_5m_shows_contiguous_cached_history_beyond_the_provider_limit(
         coverage_end=_THURSDAY_CLOSE,
     )
     provider = _SourceProvider(_YAHOO_LIMIT)
-    window = _window(qtbot, db_path, monkeypatch, provider)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
 
     bars = _show(qtbot, window, Timeframe.MIN5)
 
@@ -314,13 +316,14 @@ def test_yahoo_5m_shows_contiguous_cached_history_beyond_the_provider_limit(
 
 
 def test_redraw_after_a_config_change_keeps_the_displayed_history(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "test.db"
     _seed(db_path, _session_bars(_OLD_START, _LAST_SESSION), _at(_OLD_START))
-    window = _window(qtbot, db_path, monkeypatch, _SourceProvider(_YAHOO_LIMIT))
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, _SourceProvider(_YAHOO_LIMIT))
     shown = _show(qtbot, window, Timeframe.MIN5)
     assert shown[0].timestamp == _at(_OLD_START)
 
@@ -333,6 +336,7 @@ def test_redraw_after_a_config_change_keeps_the_displayed_history(
 
 
 def test_stale_coverage_starts_at_the_fetch_start(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -346,7 +350,7 @@ def test_stale_coverage_starts_at_the_fetch_start(
         coverage_end=_at(stale_end, 16, 0),
     )
     provider = _SourceProvider(_YAHOO_LIMIT)
-    window = _window(qtbot, db_path, monkeypatch, provider)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
 
     bars = _show(qtbot, window, Timeframe.MIN5)
 
@@ -355,19 +359,20 @@ def test_stale_coverage_starts_at_the_fetch_start(
 
 
 def test_cached_bars_before_a_gap_are_not_shown(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "test.db"
     after_gap = date(2026, 8, 10)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=provider_registry) as cache:
         cache.put_bars(
             _YAHOO, _SYMBOL, Timeframe.MIN5, _session_bars(_OLD_START, date(2026, 7, 31)),
         )
     _seed(db_path, _session_bars(after_gap, _LAST_SESSION), _at(after_gap))
     provider = _SourceProvider(_YAHOO_LIMIT)
-    window = _window(qtbot, db_path, monkeypatch, provider)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
 
     bars = _show(qtbot, window, Timeframe.MIN5)
 
@@ -376,6 +381,7 @@ def test_cached_bars_before_a_gap_are_not_shown(
 
 
 def test_displayed_history_is_floored_at_the_lookback_cutoff(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -388,7 +394,7 @@ def test_displayed_history_is_floored_at_the_lookback_cutoff(
         + _session_bars(_OLD_START, _LAST_SESSION)
     )
     _seed(db_path, seeded, _at(before_floor))
-    window = _window(qtbot, db_path, monkeypatch, _SourceProvider(_YAHOO_LIMIT))
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, _SourceProvider(_YAHOO_LIMIT))
 
     bars = _show(qtbot, window, Timeframe.MIN5)
 
@@ -396,6 +402,7 @@ def test_displayed_history_is_floored_at_the_lookback_cutoff(
 
 
 def test_synthesized_39m_shows_contiguous_cached_history(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -409,7 +416,7 @@ def test_synthesized_39m_shows_contiguous_cached_history(
         synthesized=True,
     )
     provider = _SourceProvider(_YAHOO_LIMIT)
-    window = _window(qtbot, db_path, monkeypatch, provider)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
 
     bars = _show(qtbot, window, Timeframe.MIN39)
 
@@ -420,6 +427,7 @@ def test_synthesized_39m_shows_contiguous_cached_history(
 
 
 def test_alpaca_route_is_unchanged(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -432,6 +440,7 @@ def test_alpaca_route_is_unchanged(
     _seed(db_path, seeded, _at(before_floor), namespace=_ALPACA)
     provider = _SourceProvider(None)
     window = _window(
+        provider_registry,
         qtbot, db_path, monkeypatch, provider, ALPACA_PAPER_CONNECTION_ID,
     )
 
@@ -451,6 +460,7 @@ def test_alpaca_route_is_unchanged(
     ],
 )
 def test_refresh_confirmation_says_when_older_cached_history_will_be_hidden(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -460,11 +470,11 @@ def test_refresh_confirmation_says_when_older_cached_history_will_be_hidden(
     hidden: bool,
 ) -> None:
     db_path = tmp_path / "test.db"
-    window = _window(qtbot, db_path, monkeypatch, _SourceProvider(limit), active)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, _SourceProvider(limit), active)
 
     plan = window.plan_symbol_refresh(namespace, _SYMBOL)
     assert plan is not None
-    dialog = SymbolRefreshDialog(namespace, _SYMBOL, plan)
+    dialog = SymbolRefreshDialog(namespace, _SYMBOL, plan, registry=provider_registry)
     qtbot.addWidget(dialog)
     message = dialog.findChild(QLabel, "symbolRefreshMessage")
     assert message is not None
@@ -475,6 +485,7 @@ def test_refresh_confirmation_says_when_older_cached_history_will_be_hidden(
 
 @pytest.mark.parametrize("target", [Timeframe.MIN39, Timeframe.MIN65], ids=["39m", "65m"])
 def test_synthesized_history_is_built_from_older_cached_base_bars(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -489,7 +500,7 @@ def test_synthesized_history_is_built_from_older_cached_base_bars(
         coverage_end=_THURSDAY_CLOSE,
     )
     provider = _SourceProvider(_YAHOO_LIMIT)
-    window = _window(qtbot, db_path, monkeypatch, provider)
+    window = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     expected = Aggregator(_SourceProvider(None)).synthesize_cached_bars(
         _session_bars(_OLD_START, _LAST_SESSION), target,
     )

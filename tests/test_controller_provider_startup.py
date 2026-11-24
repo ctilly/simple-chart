@@ -9,13 +9,13 @@ from PyQt6.QtWidgets import QDialog, QSizeGrip
 import app.controller as controller_module
 from app.bar_comparison import BarComparisonService
 from app.controller import MainWindow, _build_startup_routes
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry
 from data.cache import Cache
 from data.models import Bar, BarCorrection, OHLCVSeries, Timeframe
 from data.provider import ProviderAvailability
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
 from data.provider.credentials import (
     CredentialStore,
     CredentialStoreAccess,
@@ -33,6 +33,14 @@ class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return self.credentials.get(connection_id)
 
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
+
     def put(
         self,
         connection_id: str,
@@ -45,6 +53,7 @@ class _MemoryCredentialStore:
 
 
 def test_main_window_preflights_once_and_passes_result_to_settings(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -58,7 +67,7 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
     preflight_calls = 0
     settings_arguments: dict[str, object] = {}
 
-    def initialize_store() -> CredentialStoreAccess:
+    def initialize_store(*, registry: ProviderRegistry) -> CredentialStoreAccess:
         nonlocal preflight_calls
         preflight_calls += 1
         return access
@@ -117,7 +126,7 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
         SettingsDialog,
     )
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window._on_application_settings()
     window._on_application_settings()
@@ -137,6 +146,7 @@ def test_main_window_preflights_once_and_passes_result_to_settings(
 
 
 def test_main_window_opens_resizable_application_settings(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -168,7 +178,7 @@ def test_main_window_opens_resizable_application_settings(
         capture_exec,
     )
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window._on_application_settings()
 
@@ -183,6 +193,7 @@ def test_main_window_opens_resizable_application_settings(
 
 
 def test_settings_bar_change_reloads_chart_when_dialog_is_cancelled(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -218,7 +229,7 @@ def test_settings_bar_change_reloads_chart_when_dialog_is_cancelled(
         SettingsDialog,
     )
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window._on_application_settings()
 
@@ -226,6 +237,7 @@ def test_settings_bar_change_reloads_chart_when_dialog_is_cancelled(
 
 
 def test_extension_only_reload_reuses_existing_correction_notice(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -249,7 +261,7 @@ def test_extension_only_reload_reuses_existing_correction_notice(
         lambda window, current: notice_calls.append(current),
     )
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window._current_series = series
     monkeypatch.setattr(
@@ -274,6 +286,7 @@ def test_extension_only_reload_reuses_existing_correction_notice(
 
 
 def test_fetch_completion_surfaces_conflicted_bar_correction_notice(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -287,7 +300,7 @@ def test_fetch_completion_surfaces_conflicted_bar_correction_notice(
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
     monkeypatch.setattr(MainWindow, "_render", lambda window, series, history_complete=True: None)
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     timestamp = datetime(2026, 8, 28, 14, 30, tzinfo=timezone.utc)
     namespace = window._selected_route.cache_namespace
@@ -352,6 +365,7 @@ def test_fetch_completion_surfaces_conflicted_bar_correction_notice(
 
 
 def test_startup_uses_yahoo_when_saved_alpaca_dependency_is_unavailable(
+    provider_registry: ProviderRegistry,
     tmp_path: Path,
 ) -> None:
     availability = {
@@ -361,7 +375,7 @@ def test_startup_uses_yahoo_when_saved_alpaca_dependency_is_unavailable(
             "Required package 'alpaca-py' is not installed.",
         ),
     }
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=provider_registry) as cache:
         cache.set_active_provider_connection_id(ALPACA_PAPER_CONNECTION_ID)
 
         routes = _build_startup_routes(
@@ -369,10 +383,11 @@ def test_startup_uses_yahoo_when_saved_alpaca_dependency_is_unavailable(
             ALPACA_PAPER_CONNECTION_ID,
             _MemoryCredentialStore(),
             availability,
+            registry=provider_registry,
         )
 
         assert routes.selected.connection.connection_id == YFINANCE_CONNECTION_ID
-        assert routes.yahoo.connection.connection_id == YFINANCE_CONNECTION_ID
+        assert routes.fallback.connection.connection_id == YFINANCE_CONNECTION_ID
         assert routes.fallback_reason is not None
         assert "alpaca-py" in routes.fallback_reason
         assert (
@@ -382,13 +397,14 @@ def test_startup_uses_yahoo_when_saved_alpaca_dependency_is_unavailable(
 
 
 def test_startup_uses_yahoo_when_saved_alpaca_credentials_are_missing(
+    provider_registry: ProviderRegistry,
     tmp_path: Path,
 ) -> None:
     availability = {
         "yfinance": ProviderAvailability(True, None),
         "alpaca": ProviderAvailability(True, None),
     }
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=provider_registry) as cache:
         cache.set_active_provider_connection_id(ALPACA_PAPER_CONNECTION_ID)
 
         routes = _build_startup_routes(
@@ -396,6 +412,7 @@ def test_startup_uses_yahoo_when_saved_alpaca_credentials_are_missing(
             ALPACA_PAPER_CONNECTION_ID,
             _MemoryCredentialStore(),
             availability,
+            registry=provider_registry,
         )
 
         assert routes.selected.connection.connection_id == YFINANCE_CONNECTION_ID

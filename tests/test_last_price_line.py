@@ -42,6 +42,7 @@ from test_live_refresh import (  # noqa: F401  (fixtures)
     _poll,
     _forming_close,
 )
+from provider_support import startup_registry
 
 _DEFAULT_EXTENSIONS = list(INITIAL_EXTENSIONS)
 
@@ -384,10 +385,10 @@ def test_off_survives_polls_reloads_and_loads(
 
 def test_the_setting_defaults_on_and_persists(tmp_path: Path) -> None:
     db_path = str(tmp_path / "test.db")
-    with Cache(db_path) as cache:
+    with Cache(db_path, registry=startup_registry()) as cache:
         assert cache.get_show_last_price_line() is True
         cache.set_show_last_price_line(False)
-    with Cache(db_path) as cache:
+    with Cache(db_path, registry=startup_registry()) as cache:
         assert cache.get_show_last_price_line() is False
         cache.set_show_last_price_line(True)
         assert cache.get_show_last_price_line() is True
@@ -399,7 +400,7 @@ def test_a_new_window_starts_with_the_stored_setting(
     monkeypatch: pytest.MonkeyPatch,
     source: _EmptyableSource,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.set_show_last_price_line(False)
 
     window, _shown = _live_window(qtbot, tmp_path, monkeypatch, source)

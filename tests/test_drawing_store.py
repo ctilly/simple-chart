@@ -11,6 +11,7 @@ import tools.vertical_line  # noqa: F401
 import tools.fib_retracement  # noqa: F401
 from tools.vertical_line.session_store import VerticalLineStore
 from tools.fib_retracement.session_store import FibRetracementStore
+from provider_support import startup_registry
 
 _DAY_MS = 86_400_000
 _VERTICAL_STORE_KEY = "vertical_line.lines"
@@ -21,7 +22,7 @@ def test_vertical_line_survives_a_restart_when_session_persistence_is_enabled(tm
 
     # Session 1: draw a vertical line and opt it into session persistence.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime, store = _vertical_line_runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
@@ -35,7 +36,7 @@ def test_vertical_line_survives_a_restart_when_session_persistence_is_enabled(tm
 
     # Session 2: a fresh state/store/runtime on the same database.
     state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime2, store2 = _vertical_line_runtime(state2, cache)
         store2.load_for_symbol("SPY")
         passes = runtime2.render_all(_series())
@@ -48,7 +49,7 @@ def test_default_vertical_line_is_volatile(tmp_path: Path) -> None:
     db = str(tmp_path / "t.db")
 
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime, store = _vertical_line_runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
@@ -62,7 +63,7 @@ def test_default_vertical_line_is_volatile(tmp_path: Path) -> None:
 
     # Restart: the volatile line is gone.
     state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime2, store2 = _vertical_line_runtime(state2, cache)
         store2.load_for_symbol("SPY")
         passes = runtime2.render_all(_series())
@@ -72,7 +73,7 @@ def test_default_vertical_line_is_volatile(tmp_path: Path) -> None:
 
 def test_default_timeframe_persistence_off_scopes_line_to_its_timeframe(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         runtime, store = _vertical_line_runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
@@ -96,7 +97,7 @@ def test_fib_drawing_is_volatile_and_gone_after_restart(tmp_path: Path) -> None:
     db = str(tmp_path / "t.db")
 
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime, store = _fib_runtime(state, cache)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing("fib_retracement", _series(), runtime.chart_event(_series(), 1.0, 100.0))
@@ -105,7 +106,7 @@ def test_fib_drawing_is_volatile_and_gone_after_restart(tmp_path: Path) -> None:
         assert runtime.render_all(_series())[0].render.segments  # present this session
 
     state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime2, store2 = _fib_runtime(state2, cache)
         store2.load_for_symbol("SPY")
         passes = runtime2.render_all(_series())
@@ -117,7 +118,7 @@ def test_fib_drawing_can_persist_after_restart_when_enabled(tmp_path: Path) -> N
     db = str(tmp_path / "t.db")
 
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime, store = _fib_runtime(state, cache)
         store.load_for_symbol("SPY")
         start = runtime.start_drawing("fib_retracement", _series(), runtime.chart_event(_series(), 1.0, 100.0))
@@ -133,7 +134,7 @@ def test_fib_drawing_can_persist_after_restart_when_enabled(tmp_path: Path) -> N
         assert runtime.render_all(_series())[0].render.segments
 
     state2 = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(db) as cache:
+    with Cache(db, registry=startup_registry()) as cache:
         runtime2, store2 = _fib_runtime(state2, cache)
         store2.load_for_symbol("SPY")
         passes = runtime2.render_all(_series())
@@ -145,7 +146,7 @@ def test_fib_drawing_can_persist_after_restart_when_enabled(tmp_path: Path) -> N
 def test_expired_durable_tool_record_is_deleted(tmp_path: Path) -> None:
     now_ms = 10 * _DAY_MS
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         cache.put_extension_record(
             _VERTICAL_STORE_KEY,
             "SPY",
@@ -165,7 +166,7 @@ def test_expired_durable_tool_record_is_deleted(tmp_path: Path) -> None:
 def test_age_off_zero_never_expires(tmp_path: Path) -> None:
     now_ms = 10 * _DAY_MS
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         cache.put_extension_record(
             _VERTICAL_STORE_KEY,
             "SPY",
@@ -183,7 +184,7 @@ def test_age_off_zero_never_expires(tmp_path: Path) -> None:
 def test_tool_update_resets_age_off_clock(tmp_path: Path) -> None:
     clock = {"now": 1_000}
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         runtime, store = _vertical_line_runtime(state, cache, now_ms=lambda: clock["now"])
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", _series(), runtime.chart_event(_series(), 2.0, 103.0))
@@ -206,7 +207,7 @@ def test_tool_update_resets_age_off_clock(tmp_path: Path) -> None:
 def test_legacy_tool_record_gets_age_off_metadata_without_expiring(tmp_path: Path) -> None:
     now_ms = 10 * _DAY_MS
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         cache.put_extension_record(
             _VERTICAL_STORE_KEY,
             "SPY",

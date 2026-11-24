@@ -14,16 +14,15 @@ import requests  # type: ignore[import-untyped]
 import app.errors as app_errors
 from app.errors import ErrorContext, report_error, user_message
 from chart.window import ChartWidget
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry, discover_providers
 from data.cache import Cache
 from data.errors import UserFacingError, describe
 from data.models import BarCorrection, Timeframe
-from data.provider import create_provider
 from data.provider.base import HistoryUnavailableError
-from data.provider.config import (
-    ConnectionEnvironment,
-    ProviderConnection,
-    alpaca_paper_connection,
-)
+from data.provider.config import ProviderConnection
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID, ConnectionEnvironment
+from provider_support import alpaca_paper_connection, startup_registry
 from data.provider.credentials import (
     ProviderCredentials,
     UnavailableCredentialStore,
@@ -131,7 +130,7 @@ def test_provider_error_shows_its_neutral_text(
 
 
 def test_user_facing_error_from_cache_shows_its_own_text(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(UserFacingError) as raised:
             cache.put_bar_correction(
                 BarCorrection(
@@ -188,6 +187,14 @@ class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return self._credentials
 
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
+
     def put(self, connection_id: str, credentials: ProviderCredentials) -> None:
         pass
 
@@ -200,7 +207,8 @@ def _create_provider_message(
     credentials: ProviderCredentials | None = None,
 ) -> str:
     with pytest.raises(RuntimeError) as raised:
-        create_provider(connection, _MemoryCredentialStore(credentials))
+        registry = discover_providers("providers")
+        registry.create_provider(connection, _MemoryCredentialStore(credentials))
     return user_message(raised.value, CONTEXT)
 
 
@@ -223,14 +231,15 @@ def test_missing_package_guidance_is_shown(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_incomplete_connection_guidance_is_shown() -> None:
     connection = ProviderConnection(
-        connection_id="alpaca-custom",
+        connection_id=ALPACA_PAPER_CONNECTION_ID,
         display_name="My Alpaca",
         provider_name="alpaca",
-        environment=ConnectionEnvironment.PAPER,
+        options=(("environment", ConnectionEnvironment.PAPER.value),),
+        cache_namespace=alpaca_paper_connection().cache_namespace,
     )
 
     assert (
-        _create_provider_message(connection, ProviderCredentials("AK", "SK"))
+        _create_provider_message(connection, ProviderCredentials({"api_key_id": "AK", "api_secret": "SK"}))
         == "My Alpaca is not fully configured."
     )
 
@@ -240,6 +249,8 @@ def test_unregistered_provider_guidance_is_shown() -> None:
         connection_id="custom",
         display_name="Custom",
         provider_name="not-registered",
+        options=(),
+        cache_namespace="custom",
     )
 
     assert _create_provider_message(connection) == (
@@ -255,9 +266,9 @@ def test_unregistered_provider_guidance_is_shown() -> None:
         ("delete", "Unable to delete provider credentials from the OS keyring."),
     ],
 )
-def test_keyring_failure_guidance_is_shown(operation: str, expected: str) -> None:
-    store = initialize_keyring_credential_store(SecretLeakingKeyring(SECRET)).store
-    credentials = ProviderCredentials(f"AK{SECRET}", SECRET)
+def test_keyring_failure_guidance_is_shown(operation: str, expected: str, provider_registry: ProviderRegistry) -> None:
+    store = initialize_keyring_credential_store(SecretLeakingKeyring(SECRET), registry=provider_registry).store
+    credentials = ProviderCredentials({"api_key_id": f"AK{SECRET}", "api_secret": SECRET})
     calls: dict[str, Callable[[], object]] = {
         "get": lambda: store.get("alpaca-paper"),
         "put": lambda: store.put("alpaca-paper", credentials),
@@ -341,7 +352,7 @@ def test_report_error_logs_other_errors_at_error(
 
 
 _PROVIDER_LIBRARIES = frozenset(
-    {"alpaca", "requests", "curl_cffi", "yfinance", "http", "keyring"}
+    {"alpaca", "requests", "curl_cffi", "yfinance", "http", "keyring", "providers"}
 )
 _PROVIDER_TEXT = re.compile(
     r"\b(?:alpaca|requests|curl_cffi|yfinance|http\.client|keyring)\b"
@@ -396,7 +407,7 @@ def test_app_errors_references_no_provider_library_or_private_name() -> None:
         "from yfinance.exceptions import YFRateLimitError",
         "import http.client",
         "import keyring.errors",
-        "from data.provider.alpaca_provider import AlpacaProvider",
+        "from providers.alpaca.implementation import AlpacaProvider",
         "from data.provider.base import _BACKGROUND_CANCELLATION",
         "x = sys.modules.get('somewhere')",
         "x = importlib.import_module('somewhere')",

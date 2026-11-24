@@ -25,17 +25,16 @@ from app.controller import MainWindow
 from chart.window import ChartWidget
 from app.application_settings import ApplicationSettingsDialog
 from app.dialogs import BasisChangeDialog
+from provider_support import startup_registry
 from data.adjustment import BasisChange, BasisChangeChoice, detect_basis_change
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, BarCorrection, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.config import ProviderConnection
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
 from data.provider.credentials import (
     CredentialStoreAccess,
     UnavailableCredentialStore,
@@ -374,7 +373,7 @@ def _seed(
     coverage_end: datetime,
     namespace: str = _YAHOO,
 ) -> None:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bars(namespace, _SYMBOL, timeframe, bars)
         cache.replace_bar_fetch_coverage(
             namespace,
@@ -433,19 +432,19 @@ def _window(
         "ask_basis_change_choice",
         _Prompts() if prompts is None else prompts,
     )
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.set_active_provider_connection_id(active_connection_id)
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
     monkeypatch.setattr(
         controller_module,
         "_provider_availability_by_name",
-        lambda connections, _access: {
+        lambda connections, _access, _registry: {
             connection.provider_name: ProviderAvailability(True, None)
             for connection in connections
         },
@@ -457,7 +456,7 @@ def _window(
     ) -> DataProvider:
         return provider
 
-    monkeypatch.setattr(controller_module, "create_provider", create_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_provider))
     monkeypatch.setattr(_FixedDateTime, "frozen", _NOW)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
     monkeypatch.setattr(extension_runtime_module, "datetime", _FixedDateTime)
@@ -474,7 +473,7 @@ def _window(
     # Older history loads on its own when a short test chart's view is near
     # its oldest bar; tests/test_older_history.py covers that path.
     monkeypatch.setattr(ChartWidget, "older_history_bars_wanted", lambda _chart: 0)
-    window = MainWindow(str(db_path))
+    window = MainWindow(str(db_path), provider_registry=startup_registry())
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window
@@ -520,7 +519,7 @@ def _cached(
     end: datetime,
     namespace: str = _YAHOO,
 ) -> list[Bar]:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         return cache.get_raw_bars(namespace, _SYMBOL, timeframe, _ms(start), _ms(end))
 
 
@@ -538,7 +537,7 @@ def test_yahoo_5m_split_redownloads_the_provider_window_and_records_older_histor
         for bar in old_bars
         if bar.timestamp in (window_bar, older_bar)
     }
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         for stamp, low in corrected_low.items():
             cache.put_bar_correction(
                 BarCorrection(_YAHOO, _SYMBOL, Timeframe.MIN5, stamp, low=low, volume=777)
@@ -560,7 +559,7 @@ def test_yahoo_5m_split_redownloads_the_provider_window_and_records_older_histor
     assert _cached(db_path, Timeframe.MIN5, _at(_OLD_START), _FETCH_START - timedelta(minutes=1)) == [
         bar for bar in old_bars if bar.timestamp < _FETCH_START
     ]
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_bar_fetch_coverage(_YAHOO, _SYMBOL, Timeframe.MIN5) == (
             _ms(_FETCH_START),
             _ms(_NOW),
@@ -590,7 +589,7 @@ def test_after_a_yahoo_split_39m_starts_at_the_fetch_start_until_rescaled(
     # rebuild from older cached 5m bars does not restore old-basis 39m bars.
     db_path = tmp_path / "test.db"
     _seed_old_basis_5m(db_path)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         old_39m = cache.get_raw_bars(_YAHOO, _SYMBOL, Timeframe.MIN39, 0, _ms(_FETCH_START) - 1)
     provider = _AdjustedSource(_YAHOO_LIMIT, ratio=0.5, volume_factor=2.0)
     window = _window(qtbot, db_path, monkeypatch, provider)
@@ -603,7 +602,7 @@ def test_after_a_yahoo_split_39m_starts_at_the_fetch_start_until_rescaled(
         Timeframe.MIN39,
     )
     assert bars == expected
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_raw_bars(_YAHOO, _SYMBOL, Timeframe.MIN39, 0, _ms(_FETCH_START) - 1) == old_39m
 
 
@@ -631,7 +630,7 @@ def test_yahoo_intraday_is_unchanged_by_a_dividend(
         call[1] >= _at(date(2026, 10, 20)) for call in provider.calls if call[0] == Timeframe.MIN5
     )
     assert _cached(db_path, Timeframe.MIN5, _at(_OLD_START), _WEDNESDAY_CLOSE) == old_bars
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_YAHOO, _SYMBOL) == []
 
 
@@ -668,7 +667,7 @@ def test_daily_dividend_redownloads_daily_prices_and_resets_weekly(
     assert [bar.volume for bar in daily] == [
         bar.volume for bar in _bars(Timeframe.DAILY, _DAILY_START, _LAST_SESSION)
     ]
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_YAHOO, _SYMBOL) == []
         assert cache.get_bar_fetch_coverage(_YAHOO, _SYMBOL, Timeframe.WEEKLY) is None
         assert cache.get_raw_bars(_YAHOO, _SYMBOL, Timeframe.WEEKLY, 0, _ms(_NOW)) == []
@@ -703,7 +702,7 @@ def test_alpaca_split_redownloads_without_a_pending_record(
     )
     assert shown[0].timestamp == _ALPACA_FETCH_START
     assert shown[-1] == _adjusted(_bars(Timeframe.MIN5, _LAST_SESSION, _LAST_SESSION), 0.5, 2.0)[-1]
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_ALPACA, _SYMBOL) == []
     assert prompts.messages == []
 
@@ -731,7 +730,7 @@ def _split_load(
         for bar in old_bars
         if bar.timestamp in (_at(date(2026, 9, 15), 10), _at(date(2026, 7, 15), 10))
     }
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         for stamp, low in corrected_low.items():
             cache.put_bar_correction(
                 BarCorrection(_YAHOO, _SYMBOL, Timeframe.MIN5, stamp, low=low, volume=777)
@@ -763,7 +762,7 @@ def test_rescale_restores_older_history_on_the_new_basis(
     all_5m = _adjusted(_bars(Timeframe.MIN5, _OLD_START, _LAST_SESSION), 0.5, 2.0)
     assert [bar.timestamp for bar in bars] == [bar.timestamp for bar in all_5m]
     assert _cached(db_path, Timeframe.MIN5, _at(_OLD_START), _NOW) == all_5m
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_bar_fetch_coverage(_YAHOO, _SYMBOL, Timeframe.MIN5) == (
             _ms(_at(_OLD_START)),
             _ms(_NOW),
@@ -807,7 +806,7 @@ def test_discard_deletes_the_older_old_basis_history(
 
     assert len(prompts.messages) == 1
     assert bars[0].timestamp == _FETCH_START
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         for timeframe in (Timeframe.MIN5, Timeframe.MIN39):
             assert cache.get_raw_bars(
                 _YAHOO, _SYMBOL, timeframe, 0, _ms(_FETCH_START) - 1,
@@ -856,7 +855,7 @@ def test_remember_my_choice_stores_it(
     db_path, window, _old_bars, _lows = _split_load(qtbot, tmp_path, monkeypatch, prompts)
     _settled(qtbot, window)
 
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_change_choice() == BasisChangeChoice.DISCARD
 
 
@@ -873,7 +872,7 @@ def test_a_dismissed_prompt_keeps_the_record_and_is_not_repeated(
 
     assert len(prompts.messages) == 1
     assert bars[0].timestamp == _FETCH_START
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert len(cache.get_basis_changes(_YAHOO, _SYMBOL)) == 1
 
 
@@ -886,7 +885,7 @@ def test_a_pending_record_prompts_on_load(
     # prompts on the next load of the symbol, with no new detection.
     db_path = tmp_path / "test.db"
     _seed_old_basis_5m(db_path)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.begin_basis_change(
             _YAHOO,
             _SYMBOL,
@@ -930,7 +929,7 @@ def test_rescale_is_dropped_when_coverage_no_longer_starts_at_the_boundary(
 ) -> None:
     # V2-3: something else (a later reset or refresh) moved the coverage.
     boundary = _at(date(2026, 10, 20))
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         bars = _seed_two_day_history(cache)
         cache.begin_basis_change(
             _YAHOO, _SYMBOL, Timeframe.MIN5, [], BasisChange(0.5, 2.0, None),
@@ -955,7 +954,7 @@ def test_rescale_is_dropped_when_coverage_no_longer_starts_at_the_boundary(
 def test_stacked_basis_changes_multiply_ratios(tmp_path: Path) -> None:
     first_boundary = _at(date(2026, 10, 20))
     second_boundary = _at(date(2026, 10, 21))
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         bars = _seed_two_day_history(cache)
         cache.begin_basis_change(
             _YAHOO, _SYMBOL, Timeframe.MIN5, [], BasisChange(0.5, 2.0, None),
@@ -1001,7 +1000,7 @@ def test_settings_change_the_remembered_choice(qtbot: Any, tmp_path: Path) -> No
         "yfinance": ProviderAvailability(True, None),
         "alpaca": ProviderAvailability(True, None),
     }
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = ApplicationSettingsDialog(cache, store, available)
         qtbot.addWidget(dialog)
         combo = dialog.findChild(QComboBox, "basisChangeChoice")
@@ -1061,7 +1060,7 @@ def test_a_39m_first_load_after_a_yahoo_split_shows_only_new_basis_bars(
         _adjusted(_bars(Timeframe.MIN5, date(2026, 8, 31), _LAST_SESSION), 0.5, 2.0),
         Timeframe.MIN39,
     )
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_bar_fetch_coverage(_YAHOO, _SYMBOL, Timeframe.MIN5) == (
             _ms(_FETCH_START),
             _ms(_NOW),
@@ -1107,7 +1106,7 @@ def test_a_record_waits_until_its_timeframe_is_downloaded_again(
     # timeframe's load must not resolve (and so drop) the 5m record.
     db_path = tmp_path / "test.db"
     _seed_old_basis_5m(db_path)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.begin_basis_change(
             _YAHOO,
             _SYMBOL,
@@ -1124,7 +1123,7 @@ def test_a_record_waits_until_its_timeframe_is_downloaded_again(
     _show(qtbot, window, Timeframe.MIN15)
 
     assert prompts.messages == []
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert len(cache.get_basis_changes(_YAHOO, _SYMBOL)) == 1
 
     _show(qtbot, window, Timeframe.MIN5)
@@ -1161,7 +1160,7 @@ def test_one_split_prompts_once_across_timeframes(
         assert bars[0].timestamp == _at(_OLD_START)
 
     assert len(prompts.messages) == 1
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_YAHOO, _SYMBOL) == []
 
 
@@ -1188,7 +1187,7 @@ def test_a_provider_lag_step_is_reset_from_the_older_bars(
         for bar in seeded
         if bar.timestamp in (tuesday_bar, wednesday_bar)
     }
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         for stamp, low in lows.items():
             cache.put_bar_correction(
                 BarCorrection(_YAHOO, _SYMBOL, Timeframe.MIN5, stamp, low=low)
@@ -1199,7 +1198,7 @@ def test_a_provider_lag_step_is_reset_from_the_older_bars(
     bars = _show(qtbot, window, Timeframe.MIN5)
 
     assert bars[0].timestamp == _FETCH_START
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         records = cache.get_basis_changes(_YAHOO, _SYMBOL)
         tuesday = cache.get_bar_inspection(_YAHOO, _SYMBOL, Timeframe.MIN5, tuesday_bar)
         wednesday_inspection = cache.get_bar_inspection(
@@ -1220,7 +1219,7 @@ def test_the_tail_request_never_starts_before_the_provider_window(tmp_path: Path
     aggregator = Aggregator(provider)
     window_start = controller_module._history_start(Timeframe.MIN5, aggregator, now)
     assert window_start == _FETCH_START
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             _YAHOO, _SYMBOL, Timeframe.MIN5, _bars(Timeframe.MIN5, date(2026, 8, 27), date(2026, 8, 28)),
         )
@@ -1267,7 +1266,7 @@ def test_a_weekday_synthesized_first_load_detects_a_split(
     bars = _show(qtbot, window, Timeframe.MIN5)
 
     assert bars[0].timestamp == _FETCH_START
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert len(cache.get_basis_changes(_YAHOO, _SYMBOL)) == 1
 
 
@@ -1295,7 +1294,7 @@ def test_a_provider_lag_step_is_detected_by_a_39m_load(
 
     _show(qtbot, window, Timeframe.MIN39)
 
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert len(cache.get_basis_changes(_YAHOO, _SYMBOL)) == 1
 
 
@@ -1365,14 +1364,13 @@ def test_a_reset_on_a_paged_source_renders_the_recent_window_first(
         return original_fetch(symbol, tf, start, end)
 
     monkeypatch.setattr(provider, "fetch_bars", fetch_bars)
-    monkeypatch.setattr(controller_module, "create_provider", lambda _c, _s: provider)
     monkeypatch.setattr(_FixedDateTime, "frozen", _NOW)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
     assert connection is not None
     request = controller_module._ChartLoadRequest(1, _SYMBOL, timeframe, connection)
-    worker = controller_module._FetchWorker(str(db_path), None, request)  # type: ignore[arg-type]
+    worker = controller_module._FetchWorker(str(db_path), None, request, provider_factory=lambda _connection, _store: provider, registry=startup_registry())  # type: ignore[arg-type]
     recent: list[OHLCVSeries] = []
     finished: list[OHLCVSeries] = []
     errors: list[str] = []
@@ -1439,7 +1437,7 @@ def test_an_unlimited_source_drops_all_old_basis_history_after_a_split(
     assert _cached(
         db_path, Timeframe.MIN5, _at(deep_start), _ALPACA_FETCH_START - timedelta(minutes=1), _ALPACA,
     ) == []
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_basis_changes(_ALPACA, _SYMBOL) == []
     assert prompts.messages == []
 
@@ -1470,7 +1468,7 @@ def test_a_daily_reset_redownloads_from_the_oldest_cached_day(
     assert _cached(
         db_path, Timeframe.DAILY, datetime.combine(deep_start, time(0), tzinfo=ET), _NOW,
     ) == _adjusted(_bars(Timeframe.DAILY, deep_start, _LAST_SESSION), 0.99)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         coverage = cache.get_bar_fetch_coverage(_YAHOO, _SYMBOL, Timeframe.DAILY)
     assert coverage is not None
     assert coverage[0] == _ms(datetime.combine(deep_start, time(0), tzinfo=ET))

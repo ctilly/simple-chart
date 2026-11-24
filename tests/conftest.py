@@ -9,7 +9,14 @@ import pytest
 from PyQt6.QtCore import qInstallMessageHandler
 from PyQt6.QtWidgets import QApplication
 
+from data.provider.registry import ProviderRegistry
+from provider_support import startup_registry
 from simplechart.extensions import _guard
+
+
+@pytest.fixture(scope="session", autouse=True)
+def provider_registry() -> ProviderRegistry:
+    return startup_registry()
 
 
 @pytest.fixture
@@ -20,7 +27,7 @@ def isolated_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         controller,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(UnavailableCredentialStore("test"), False, "test"),
+        lambda *, registry: CredentialStoreAccess(UnavailableCredentialStore("test"), False, "test"),
     )
 
 

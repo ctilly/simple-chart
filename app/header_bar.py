@@ -49,18 +49,20 @@ class AppHeader(QFrame):
         self._quote_label.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._quote_label.setOpenExternalLinks(False)
         self._quote_label.linkActivated.connect(self._activate_link)
-        self._quote_label.setToolTip(
-            "Next earnings source: Yahoo Finance. Dates may change."
-        )
         layout.addWidget(self._quote_label)
         self._quote_html = ""
         self.set_earnings_date("—")
         layout.addStretch(1)
 
+    def set_earnings_source(self, source: str) -> None:
+        self._quote_label.setToolTip(f"<p>Next earnings source: {escape(source)}. Dates may change.</p>")
+
     def set_earnings_date(self, date_text: str, *, highlight: bool = False) -> None:
         if highlight:
+            colors = active_colors()
             date_text = (
-                '<span style="background-color: #ffdc58; color: #251c00;">'
+                f'<span style="background-color: {colors["earnings_highlight"]}; '
+                f'color: {colors["earnings_highlight_text"]};">'
                 f"{date_text}</span>"
             )
         self._earnings_html = _field("Next earnings", date_text)

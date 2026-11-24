@@ -1,30 +1,33 @@
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-import data.provider as provider_registry
+from data.provider.spec import CredentialField
 from data.cache import Cache
 from data.models import Bar, Timeframe
-from data.provider import ProviderConfigurationError, create_provider
+from data.provider import ProviderConfigurationError
+from providers.alpaca import PROVIDER as ALPACA_PROVIDER
 from data.provider.base import DataProvider
-from data.provider.config import (
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import (
     ALPACA_LIVE_CONNECTION_ID,
     ALPACA_PAPER_CONNECTION_ID,
     ConnectionEnvironment,
     MarketDataFeed,
-    YFINANCE_CONNECTION_ID,
-    alpaca_paper_connection,
-    yfinance_connection,
 )
+from provider_support import alpaca_paper_connection, yfinance_connection, startup_registry
 from data.provider.credentials import (
     CredentialStore,
     KeyringCredentialStore,
     ProviderCredentials,
 )
-from data.provider.yfinance_provider import YFinanceProvider
+from data.provider.registry import ProviderRegistry, discover_providers
+from providers.yahoo.implementation import YFinanceProvider
 
 
 class _FakeKeyring:
@@ -53,6 +56,14 @@ class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return self.credentials.get(connection_id)
 
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
+
     def put(
         self,
         connection_id: str,
@@ -67,7 +78,7 @@ class _MemoryCredentialStore:
 def test_cache_creates_three_fixed_connections_with_yahoo_active(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         connections = cache.get_provider_connections()
 
         assert [connection.connection_id for connection in connections] == [
@@ -75,83 +86,82 @@ def test_cache_creates_three_fixed_connections_with_yahoo_active(
             ALPACA_PAPER_CONNECTION_ID,
             ALPACA_LIVE_CONNECTION_ID,
         ]
-        assert connections[0].environment is None
-        assert connections[0].feed is None
-        assert connections[1].environment == ConnectionEnvironment.PAPER
-        assert connections[1].feed == MarketDataFeed.IEX
-        assert connections[2].environment == ConnectionEnvironment.LIVE
-        assert connections[2].feed == MarketDataFeed.IEX
+        assert dict(connections[0].options).get("environment") is None
+        assert dict(connections[0].options).get("feed") is None
+        assert dict(connections[1].options).get("environment") == ConnectionEnvironment.PAPER
+        assert dict(connections[1].options).get("feed") == MarketDataFeed.IEX
+        assert dict(connections[2].options).get("environment") == ConnectionEnvironment.LIVE
+        assert dict(connections[2].options).get("feed") == MarketDataFeed.IEX
         assert cache.get_active_provider_connection_id() == YFINANCE_CONNECTION_ID
 
 
 def test_cache_updates_feed_and_selects_fixed_connection(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
-        cache.set_provider_connection_feed(
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
+        cache.set_provider_connection_options(
             ALPACA_PAPER_CONNECTION_ID,
-            MarketDataFeed.SIP,
+            {"feed": MarketDataFeed.SIP.value},
         )
         cache.set_active_provider_connection_id(ALPACA_PAPER_CONNECTION_ID)
 
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert connection is not None
-        assert connection.feed == MarketDataFeed.SIP
+        assert dict(connection.options).get("feed") == MarketDataFeed.SIP
         assert connection.cache_namespace == "alpaca:sip"
         assert cache.get_active_provider_connection_id() == ALPACA_PAPER_CONNECTION_ID
 
 
 def test_delayed_sip_has_independent_cache_namespace(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
-        cache.set_provider_connection_feed(
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
+        cache.set_provider_connection_options(
             ALPACA_PAPER_CONNECTION_ID,
-            MarketDataFeed.DELAYED_SIP,
+            {"feed": MarketDataFeed.DELAYED_SIP.value},
         )
 
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
 
     assert connection is not None
-    assert connection.feed == MarketDataFeed.DELAYED_SIP
+    assert dict(connection.options).get("feed") == MarketDataFeed.DELAYED_SIP
     assert connection.cache_namespace == "alpaca:delayed_sip"
 
 
 def test_cache_rejects_feed_for_yahoo_and_unknown_active_connection(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
-        with pytest.raises(ValueError, match="not an Alpaca connection"):
-            cache.set_provider_connection_feed(
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
+        with pytest.raises(ValueError, match="Invalid option for the data connection"):
+            cache.set_provider_connection_options(
                 YFINANCE_CONNECTION_ID,
-                MarketDataFeed.IEX,
+                {"feed": MarketDataFeed.IEX.value},
             )
         with pytest.raises(ValueError, match="Unknown provider connection"):
             cache.set_active_provider_connection_id("another-provider")
 
 
-def test_create_provider_constructs_yahoo_without_credentials() -> None:
-    provider = create_provider(yfinance_connection(), _MemoryCredentialStore())
+def test_create_provider_constructs_yahoo_without_credentials(provider_registry: ProviderRegistry) -> None:
+    provider = provider_registry.create_provider(yfinance_connection(), _MemoryCredentialStore())
 
     assert isinstance(provider, YFinanceProvider)
 
 
-def test_create_provider_requires_alpaca_credentials() -> None:
+def test_create_provider_requires_alpaca_credentials(provider_registry: ProviderRegistry) -> None:
     with pytest.raises(ProviderConfigurationError, match="credentials"):
-        create_provider(alpaca_paper_connection(), _MemoryCredentialStore())
+        provider_registry.create_provider(alpaca_paper_connection(), _MemoryCredentialStore())
 
 
 def test_environment_variables_are_not_credential_fallback(
+    provider_registry: ProviderRegistry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("APCA_API_KEY_ID", "environment-key")
     monkeypatch.setenv("APCA_API_SECRET_KEY", "environment-secret")
 
     with pytest.raises(ProviderConfigurationError, match="credentials"):
-        create_provider(alpaca_paper_connection(), _MemoryCredentialStore())
+        provider_registry.create_provider(alpaca_paper_connection(), _MemoryCredentialStore())
 
 
-def test_create_provider_injects_connection_and_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_create_provider_injects_connection_and_credentials() -> None:
     connection = alpaca_paper_connection(MarketDataFeed.SIP)
-    credentials = ProviderCredentials("test-key-id", "test-api-secret")
+    credentials = ProviderCredentials({"api_key_id": "test-key-id", "api_secret": "test-api-secret"})
     store = _MemoryCredentialStore()
     store.put(connection.connection_id, credentials)
     received: list[tuple[object, object]] = []
@@ -163,9 +173,11 @@ def test_create_provider_injects_connection_and_credentials(
         received.append((configured_connection, configured_credentials))
         return YFinanceProvider()
 
-    monkeypatch.setitem(provider_registry._registry, "alpaca", factory)
+    module = ModuleType("test_alpaca_provider")
+    module.PROVIDER = replace(ALPACA_PROVIDER, factory=factory)
+    registry = discover_providers(("providers.yahoo", module))
 
-    provider = create_provider(connection, store)
+    provider = registry.create_provider(connection, store)
 
     assert isinstance(provider, YFinanceProvider)
     assert received == [(connection, credentials)]
@@ -177,7 +189,7 @@ def test_bar_cache_is_isolated_by_provider_feed(tmp_path: Path) -> None:
     sip_bar = _bar(timestamp, 101.0)
     timestamp_ms = int(timestamp.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:iex", "SPY", Timeframe.MIN5, [iex_bar])
         cache.put_bars("alpaca:sip", "SPY", Timeframe.MIN5, [sip_bar])
 
@@ -222,7 +234,7 @@ def test_legacy_bars_migrate_to_yfinance_namespace(tmp_path: Path) -> None:
             (timestamp_ms,),
         )
 
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         yahoo_bars = cache.get_bars(
             "yfinance", "SPY", Timeframe.MIN5, timestamp_ms, timestamp_ms
         )
@@ -235,14 +247,17 @@ def test_legacy_bars_migrate_to_yfinance_namespace(tmp_path: Path) -> None:
     assert alpaca_bars == []
 
 
-def test_keyring_store_round_trips_and_deletes_credentials() -> None:
+def test_keyring_store_round_trips_and_deletes_credentials(provider_registry: ProviderRegistry) -> None:
     backend = _FakeKeyring()
-    store: CredentialStore = KeyringCredentialStore(backend)
-    credentials = ProviderCredentials("test-key-id", "test-api-secret")
+    store: CredentialStore = KeyringCredentialStore(backend, registry=provider_registry)
+    credentials = ProviderCredentials({"api_key_id": "test-key-id", "api_secret": "test-api-secret"})
 
     store.put(ALPACA_PAPER_CONNECTION_ID, credentials)
 
-    assert store.get(ALPACA_PAPER_CONNECTION_ID) == credentials
+    stored = store.get(ALPACA_PAPER_CONNECTION_ID)
+    assert stored is not None
+    assert stored.get("api_key_id") == credentials.get("api_key_id")
+    assert stored.get("api_secret") == credentials.get("api_secret")
     stored_payload = next(iter(backend.passwords.values()))
     assert json.loads(stored_payload) == {
         "api_key_id": "test-key-id",

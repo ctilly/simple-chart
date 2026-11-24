@@ -24,6 +24,7 @@ from app.controller import MainWindow
 from app.dialogs import ApplicationMessageDialog
 from app.extension_config import ExtensionConfigDialog
 from app.state import ChartExtensionState
+from data.provider.registry import ProviderRegistry
 from data.models import Bar, OHLCVSeries, Timeframe
 from data.provider.credentials import CredentialStoreAccess, UnavailableCredentialStore
 from plugin_faults import (
@@ -63,19 +64,24 @@ def _isolated_plugins() -> Iterator[None]:
         yield
 
 
-def _window(qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
+def _window(
+    provider_registry: ProviderRegistry,
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> MainWindow:
     # Never touch the host OS keyring from these tests.
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     return window
 
@@ -135,6 +141,7 @@ class _Scene:
 
 
 def _scene(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -175,7 +182,7 @@ def _scene(
     healthy = plugin_module("b_healthy")
     if arm_before_window:
         arm(fault)
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     window._state.symbol = "XBI"
     window._state.timeframe = Timeframe.MIN5
     window._on_fetch_done(_series("XBI"))
@@ -477,6 +484,7 @@ def _assert_isolated(
 
 @pytest.mark.parametrize("case", _EXTENSION_CASES, ids=_case_id)
 def test_extension_failing_in_each_call_family_is_isolated(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -484,6 +492,7 @@ def test_extension_failing_in_each_call_family_is_isolated(
     case: _Case,
 ) -> None:
     scene = _scene(
+        provider_registry,
         qtbot,
         tmp_path,
         monkeypatch,
@@ -503,13 +512,14 @@ def test_extension_failing_in_each_call_family_is_isolated(
 
 @pytest.mark.parametrize("case", _STORE_CASES, ids=_case_id)
 def test_store_handler_failing_in_each_call_disables_only_its_owner(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     case: _Case,
 ) -> None:
-    scene = _scene(qtbot, tmp_path, monkeypatch, store_fail_in=case.hook)
+    scene = _scene(provider_registry, qtbot, tmp_path, monkeypatch, store_fail_in=case.hook)
     arm(scene.fault, scene.healthy)
     caplog.clear()
     caplog.set_level(logging.WARNING)
@@ -521,6 +531,7 @@ def test_store_handler_failing_in_each_call_disables_only_its_owner(
 
 
 def test_store_factory_failing_at_window_start_is_isolated(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -528,6 +539,7 @@ def test_store_factory_failing_at_window_start_is_isolated(
 ) -> None:
     caplog.set_level(logging.WARNING)
     scene = _scene(
+        provider_registry,
         qtbot,
         tmp_path,
         monkeypatch,
@@ -540,12 +552,14 @@ def test_store_factory_failing_at_window_start_is_isolated(
 
 
 def test_failed_panel_extension_releases_its_panel(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scene = _scene(
+        provider_registry,
         qtbot,
         tmp_path,
         monkeypatch,
@@ -565,12 +579,14 @@ def test_failed_panel_extension_releases_its_panel(
 
 
 def test_reselecting_a_tool_whose_cancel_fails_leaves_no_tool_selected(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scene = _scene(
+        provider_registry,
         qtbot,
         tmp_path,
         monkeypatch,
@@ -597,11 +613,12 @@ def test_reselecting_a_tool_whose_cancel_fails_leaves_no_tool_selected(
 
 
 def test_failure_during_a_drawing_session_of_another_tool_keeps_that_session(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scene = _scene(qtbot, tmp_path, monkeypatch, fail_in="render")
+    scene = _scene(provider_registry, qtbot, tmp_path, monkeypatch, fail_in="render")
     window = scene.window
     scene.healthy.CLEAR_ON_START = False
     window._on_drawing_tool_selected(_HEALTHY)
@@ -618,6 +635,7 @@ def test_failure_during_a_drawing_session_of_another_tool_keeps_that_session(
 
 
 def test_plugin_failing_at_import_is_skipped_and_the_app_starts(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -638,7 +656,7 @@ def test_plugin_failing_at_import_is_skipped_and_the_app_starts(
     )
 
     load_plugin_directory(plugins)
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     qtbot.waitUntil(lambda: bool(_notice_dialogs(window)), timeout=3000)
     qtbot.wait(20)
 

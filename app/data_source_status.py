@@ -16,7 +16,9 @@ SourceStatus = Literal["pending", "connected", "history", "error"]
 
 
 class DataSourceStatus(QWidget):
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, parent: QWidget | None = None, *, fallback_display_name: str = "",
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("dataSourceStatus")
         self.setSizePolicy(
@@ -39,7 +41,7 @@ class DataSourceStatus(QWidget):
         )
         source_layout.addWidget(self._source_label)
 
-        self.set_data_source("Yahoo Finance", "pending")
+        self.set_data_source(fallback_display_name, "pending")
 
     def set_data_source(self, label: str, status: SourceStatus) -> None:
         color = active_colors()[_SOURCE_STATUS_COLOR_KEYS[status]]

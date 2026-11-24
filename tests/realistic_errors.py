@@ -32,10 +32,11 @@ from requests.adapters import HTTPAdapter  # type: ignore[import-untyped]
 from yfinance.data import YfData
 from yfinance.exceptions import YFRateLimitError
 
+from data.provider.registry import discover_providers
 from data.models import Timeframe
-from data.provider.alpaca_provider import AlpacaProvider, _MarketDataClient
-from data.provider.config import MarketDataFeed
-from data.provider.yfinance_provider import YFinanceProvider
+from providers.alpaca.implementation import AlpacaProvider, _MarketDataClient
+from providers.alpaca import MarketDataFeed
+from providers.yahoo.implementation import YFinanceProvider
 from data.provider.credentials import (
     ProviderCredentials,
     initialize_keyring_credential_store,
@@ -474,8 +475,6 @@ def yahoo_transport(get: Callable[[], object]) -> Iterator[None]:
         stack.enter_context(
             mock.patch.object(yfinance.cache, "get_tz_cache", _TimezoneCache)
         )
-        for name in ("_DFS", "_ERRORS", "_TRACEBACKS", "_ISINS"):
-            stack.enter_context(mock.patch.object(yfinance.shared, name, {}))
         yield
 
 
@@ -525,21 +524,22 @@ class SecretLeakingKeyring:
 
 
 def keyring_read_error(secret: str = SECRET) -> BaseException:
-    access = initialize_keyring_credential_store(SecretLeakingKeyring(secret))
+    access = initialize_keyring_credential_store(SecretLeakingKeyring(secret), registry=discover_providers("providers"))
     assert access.available
     return _capture(lambda: access.store.get("alpaca-paper"))
 
 
 def keyring_write_error(secret: str = SECRET) -> BaseException:
-    access = initialize_keyring_credential_store(SecretLeakingKeyring(secret))
+    access = initialize_keyring_credential_store(SecretLeakingKeyring(secret), registry=discover_providers("providers"))
     assert access.available
-    credentials = ProviderCredentials(api_key_id=f"AK{secret}", api_secret=secret)
+    credentials = ProviderCredentials({"api_key_id": f"AK{secret}", "api_secret": secret})
     return _capture(lambda: access.store.put("alpaca-paper", credentials))
 
 
 def keyring_unavailable_error(secret: str = SECRET) -> BaseException:
     access = initialize_keyring_credential_store(
-        SecretLeakingKeyring(secret, available=False)
+        SecretLeakingKeyring(secret, available=False),
+        registry=discover_providers("providers"),
     )
     assert not access.available
     return _capture(lambda: access.store.get("alpaca-paper"))

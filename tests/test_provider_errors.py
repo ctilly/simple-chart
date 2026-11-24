@@ -6,6 +6,7 @@ yfinance history path with a real curl_cffi request at its transport).
 """
 
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -15,14 +16,13 @@ from alpaca.common.exceptions import APIError
 from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFRateLimitError
 
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry
 from data.errors import UserFacingError, describe
 from data.models import Timeframe
-from data.provider import (
-    ProviderConfigurationError,
-    alpaca_provider as alpaca_provider_module,
-    create_provider,
-)
-from data.provider.alpaca_provider import AlpacaProvider, _MarketDataClient
+from data.provider import ProviderConfigurationError
+from providers.alpaca import implementation as alpaca_provider_module
+from providers.alpaca.implementation import AlpacaProvider, _MarketDataClient
 from data.provider.base import (
     HistoryUnavailableError,
     MarketDataEntitlementError,
@@ -32,16 +32,13 @@ from data.provider.base import (
     ProviderRequestRefusedError,
     ProviderUnreachableError,
 )
-from data.provider.config import (
-    ConnectionEnvironment,
-    MarketDataFeed,
-    ProviderConnection,
-)
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID, MarketDataFeed
 from data.provider.credentials import (
     CredentialStoreUnavailableError,
     ProviderCredentials,
 )
-from data.provider.yfinance_provider import YFinanceProvider
+from providers.yahoo.implementation import YFinanceProvider
 from realistic_errors import (
     PROVIDER_SOURCES,
     SECRET,
@@ -327,7 +324,15 @@ def test_status_less_api_error_is_left_untranslated() -> None:
 
 class _Store:
     def get(self, connection_id: str) -> ProviderCredentials | None:
-        return ProviderCredentials(f"AK{SECRET}", f"SK{SECRET}")
+        return ProviderCredentials({"api_key_id": f"AK{SECRET}", "api_secret": f"SK{SECRET}"})
+
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
 
     def put(self, connection_id: str, credentials: ProviderCredentials) -> None:
         pass
@@ -337,6 +342,7 @@ class _Store:
 
 
 def test_factory_gives_the_alpaca_provider_its_connection_name(
+    provider_registry: ProviderRegistry,
     monkeypatch: pytest.MonkeyPatch,
     error_server: LocalErrorServer,
 ) -> None:
@@ -349,14 +355,10 @@ def test_factory_gives_the_alpaca_provider_its_connection_name(
         "_create_stock_historical_data_client",
         local_client,
     )
-    connection = ProviderConnection(
-        connection_id="alpaca-custom",
-        display_name="My Alpaca",
-        provider_name="alpaca",
-        environment=ConnectionEnvironment.PAPER,
-        feed=MarketDataFeed.IEX,
+    connection = replace(
+        provider_registry.build_connection(ALPACA_PAPER_CONNECTION_ID), display_name="My Alpaca",
     )
-    provider = create_provider(connection, _Store())
+    provider = provider_registry.create_provider(connection, _Store())
 
     with pytest.raises(ProviderCredentialsRejectedError) as raised:
         provider.fetch_bars(
@@ -373,13 +375,11 @@ def _raise_rate_limit() -> None:
     raise YFRateLimitError()
 
 
-def test_factory_gives_the_yahoo_provider_its_connection_name() -> None:
-    connection = ProviderConnection(
-        connection_id="yahoo-custom",
-        display_name="My Yahoo",
-        provider_name="yfinance",
+def test_factory_gives_the_yahoo_provider_its_connection_name(provider_registry: ProviderRegistry) -> None:
+    connection = replace(
+        provider_registry.build_connection(YFINANCE_CONNECTION_ID), display_name="My Yahoo",
     )
-    provider = create_provider(connection, _Store())
+    provider = provider_registry.create_provider(connection, _Store())
 
     with yahoo_transport(_raise_rate_limit):
         with pytest.raises(ProviderRateLimitedError) as raised:

@@ -43,14 +43,8 @@ from data.session import (
     is_regular_session_timestamp,
     uses_regular_equity_session,
 )
-from data.provider.config import (
-    FIXED_CONNECTION_IDS,
-    ConnectionEnvironment,
-    MarketDataFeed,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-    fixed_connections,
-)
+from data.provider.config import ProviderConnection
+from data.provider.registry import ProviderRegistry
 
 
 # Path to the DDL file, relative to this module.
@@ -58,6 +52,8 @@ _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MAX_TIMESTAMP_MS = 2**63 - 1
 _BASIS_CHANGE_CHOICE_SETTING = "basis_change_choice"
 _SHOW_LAST_PRICE_LINE_SETTING = "show_last_price_line"
+_SHOW_PAST_EARNINGS_SETTING = "show_past_earnings"
+_SHOW_DIVIDENDS_SETTING = "show_dividends"
 _THEME_SETTING = "theme"
 
 
@@ -75,17 +71,20 @@ class Cache:
     and extension records.
 
     Usage:
-        cache = Cache("/path/to/simplechart.db")
-        bars = cache.get_bars("yfinance", "QQQ", Timeframe.MIN5, start_ts_ms, end_ts_ms)
-        cache.put_bars("yfinance", "QQQ", Timeframe.MIN5, bars)
+        cache = Cache("/path/to/simplechart.db", registry=registry)
+        connection = registry.build_connection(registry.fallback_connection_id)
+        namespace = connection.cache_namespace
+        bars = cache.get_bars(namespace, "QQQ", Timeframe.MIN5, start_ts_ms, end_ts_ms)
+        cache.put_bars(namespace, "QQQ", Timeframe.MIN5, bars)
         cache.close()
 
     Or as a context manager:
-        with Cache("/path/to/simplechart.db") as cache:
+        with Cache("/path/to/simplechart.db", registry=registry) as cache:
             ...
     """
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, registry: ProviderRegistry) -> None:
+        self.registry = registry
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         # Return rows as sqlite3.Row so columns are accessible by name.
         self._conn.row_factory = sqlite3.Row
@@ -93,7 +92,11 @@ class Cache:
         # blocking each other. Important when the chart is reading bars while
         # a background fetch is writing new ones.
         self._conn.execute("PRAGMA journal_mode=WAL")
-        self._init_schema()
+        try:
+            self._init_schema()
+        except Exception:
+            self.close()
+            raise
 
     def _init_schema(self) -> None:
         """Run schema.sql to create tables if they don't exist yet."""
@@ -101,7 +104,8 @@ class Cache:
         self._conn.executescript(ddl)
         self._migrate_bars_cache_namespace()
         self._migrate_watchlist_sort_order()
-        self._ensure_fixed_provider_connections()
+        self._init_provider_connections()
+        self._migrate_asset_reference_source()
 
     def _migrate_bars_cache_namespace(self) -> None:
         columns = {
@@ -137,10 +141,11 @@ class Cache:
                     cache_namespace, symbol, timeframe, timestamp,
                     open, high, low, close, volume, vwap
                 )
-                SELECT 'yfinance', symbol, timeframe, timestamp,
+                SELECT ?, symbol, timeframe, timestamp,
                        open, high, low, close, volume, vwap
                 FROM bars
-                """
+                """,
+                (self.registry.build_connection(self.registry.fallback_connection_id).cache_namespace,),
             )
             self._conn.execute("DROP TABLE bars")
             self._conn.execute("ALTER TABLE bars_with_namespace RENAME TO bars")
@@ -168,55 +173,87 @@ class Cache:
                 ],
             )
 
-    def _ensure_fixed_provider_connections(self) -> None:
+    def _migrate_asset_reference_source(self) -> None:
+        columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(asset_reference)")}
+        if "source" in columns:
+            return
+
         with self._conn:
-            placeholders = ", ".join("?" for _ in FIXED_CONNECTION_IDS)
-            self._conn.execute(
-                f"DELETE FROM provider_connections "
-                f"WHERE connection_id NOT IN ({placeholders})",
-                FIXED_CONNECTION_IDS,
-            )
-            for sort_order, connection in enumerate(fixed_connections()):
+            self._conn.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(asset_reference)")}
+            if "source" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE asset_reference ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+                )
+                self._conn.execute(
+                    "UPDATE asset_reference SET source = ?", (self.registry.fallback_provider.name,),
+                )
+
+    def _init_provider_connections(self) -> None:
+        fallback_id = self.registry.fallback_connection_id
+        connection_ids = sorted(self.registry.connection_ids, key=lambda key: key != fallback_id)
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in self._conn.execute(
+                "PRAGMA table_info(provider_connections)"
+            )}
+            if "options" not in columns:
+                self._conn.execute(
+                    "ALTER TABLE provider_connections ADD COLUMN options TEXT NOT NULL DEFAULT '{}'"
+                )
+            for sort_order, connection_id in enumerate(connection_ids):
+                default = self.registry.build_connection(connection_id)
+                if default.options:
+                    self._migrate_legacy_connection(default)
                 self._conn.execute(
                     """
                     INSERT INTO provider_connections (
-                        connection_id, display_name, provider_name,
-                        environment, feed, sort_order
+                        connection_id, display_name, provider_name, options, sort_order
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(connection_id) DO UPDATE SET
-                        display_name = excluded.display_name,
-                        provider_name = excluded.provider_name,
-                        environment = excluded.environment,
-                        sort_order = excluded.sort_order
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(connection_id) DO NOTHING
                     """,
                     (
-                        connection.connection_id,
-                        connection.display_name,
-                        connection.provider_name,
-                        connection.environment,
-                        connection.feed,
+                        connection_id,
+                        default.display_name,
+                        default.provider_name,
+                        json.dumps(dict(default.options)),
                         sort_order,
                     ),
                 )
             self._conn.execute(
                 """
-                INSERT OR IGNORE INTO application_settings (
-                    setting_key, setting_value
-                )
+                INSERT OR IGNORE INTO application_settings (setting_key, setting_value)
                 VALUES ('active_provider_connection', ?)
                 """,
-                (YFINANCE_CONNECTION_ID,),
+                (fallback_id,),
             )
-            self._conn.execute(
-                f"""
-                UPDATE application_settings
-                SET setting_value = ?
-                WHERE setting_key = 'active_provider_connection'
-                  AND setting_value NOT IN ({placeholders})
-                """,
-                (YFINANCE_CONNECTION_ID, *FIXED_CONNECTION_IDS),
-            )
+
+    def _migrate_legacy_connection(self, default: ProviderConnection) -> None:
+        # A connection first seen after its provider returns still has its legacy columns.
+        row = self._conn.execute(
+            """
+            SELECT environment, feed
+            FROM provider_connections
+            WHERE connection_id = ? AND provider_name = ? AND options = '{}'
+            """,
+            (default.connection_id, default.provider_name),
+        ).fetchone()
+        if row is None:
+            return
+        spec, template = self.registry.connection_template(default.connection_id)
+        fixed = dict(template.fixed_options)
+        legacy_options = {
+            field.key: row[field.key]
+            for field in spec.option_fields
+            if field.key in row.keys() and field.key not in fixed
+            and row[field.key] in dict(field.choices)
+        }
+        connection = self.registry.build_connection(default.connection_id, legacy_options)
+        self._conn.execute(
+            "UPDATE provider_connections SET options = ? WHERE connection_id = ?",
+            (json.dumps(dict(connection.options)), default.connection_id),
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -1522,12 +1559,13 @@ class Cache:
             for row in self._conn.execute(
                 """
                 SELECT setting_key FROM application_settings
-                WHERE setting_key IN ('show_past_earnings', 'show_dividends')
+                WHERE setting_key IN (?, ?)
                   AND setting_value = '1'
-                """
+                """,
+                (_SHOW_PAST_EARNINGS_SETTING, _SHOW_DIVIDENDS_SETTING),
             )
         }
-        return "show_past_earnings" in enabled, "show_dividends" in enabled
+        return _SHOW_PAST_EARNINGS_SETTING in enabled, _SHOW_DIVIDENDS_SETTING in enabled
 
     def set_chart_event_visibility(self, earnings: bool, dividends: bool) -> None:
         with self._conn:
@@ -1539,8 +1577,8 @@ class Cache:
                     setting_value = excluded.setting_value
                 """,
                 (
-                    ("show_past_earnings", "1" if earnings else "0"),
-                    ("show_dividends", "1" if dividends else "0"),
+                    (_SHOW_PAST_EARNINGS_SETTING, "1" if earnings else "0"),
+                    (_SHOW_DIVIDENDS_SETTING, "1" if dividends else "0"),
                 ),
             )
 
@@ -1638,14 +1676,16 @@ class Cache:
     # Asset reference
     # ------------------------------------------------------------------
 
-    def get_asset_reference(self, symbol: str) -> AssetReference | None:
+    def get_asset_reference(self, symbol: str, *, source: str | None = None) -> AssetReference | None:
+        if source is None:
+            source = self.registry.fallback_provider.name
         row = self._conn.execute(
             """
-            SELECT symbol, company_name, refreshed_at
+            SELECT symbol, company_name, refreshed_at, source
             FROM asset_reference
-            WHERE symbol = ?
+            WHERE symbol = ? AND source = ?
             """,
-            (symbol.strip().upper(),),
+            (symbol.strip().upper(), source),
         ).fetchone()
         if row is None:
             return None
@@ -1653,6 +1693,7 @@ class Cache:
             symbol=row["symbol"],
             company_name=row["company_name"],
             refreshed_at=_ms_to_datetime(row["refreshed_at"]),
+            source=row["source"],
         )
 
     def put_asset_reference(
@@ -1660,18 +1701,23 @@ class Cache:
         symbol: str,
         company_name: str,
         refreshed_at: datetime,
+        *,
+        source: str | None = None,
     ) -> None:
+        if source is None:
+            source = self.registry.fallback_provider.name
         normalized = symbol.strip().upper()
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO asset_reference (symbol, company_name, refreshed_at)
-                VALUES (?, ?, ?)
+                INSERT INTO asset_reference (symbol, company_name, refreshed_at, source)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     company_name = excluded.company_name,
-                    refreshed_at = excluded.refreshed_at
+                    refreshed_at = excluded.refreshed_at,
+                    source = excluded.source
                 """,
-                (normalized, company_name, _datetime_to_ms(refreshed_at)),
+                (normalized, company_name, _datetime_to_ms(refreshed_at), source),
             )
 
     # ------------------------------------------------------------------
@@ -1679,41 +1725,75 @@ class Cache:
     # ------------------------------------------------------------------
 
     def get_provider_connections(self) -> list[ProviderConnection]:
+        owners = {
+            connection_id: self.registry.connection_template(connection_id)[0].name
+            for connection_id in self.registry.connection_ids
+        }
         cursor = self._conn.execute(
             """
-            SELECT connection_id, display_name, provider_name, environment, feed
+            SELECT connection_id, provider_name, options
             FROM provider_connections
             ORDER BY sort_order ASC, display_name ASC
             """
         )
-        return [_row_to_provider_connection(row) for row in cursor]
+        return [
+            self._row_to_provider_connection(row)
+            for row in cursor
+            if owners.get(row["connection_id"]) == row["provider_name"]
+        ]
 
     def get_provider_connection(
         self,
         connection_id: str,
     ) -> ProviderConnection | None:
+        if connection_id not in self.registry.connection_ids:
+            return None
+        spec, _ = self.registry.connection_template(connection_id)
         row = self._conn.execute(
             """
-            SELECT connection_id, display_name, provider_name, environment, feed
+            SELECT connection_id, options
             FROM provider_connections
-            WHERE connection_id = ?
+            WHERE connection_id = ? AND provider_name = ?
             """,
-            (connection_id,),
+            (connection_id, spec.name),
         ).fetchone()
-        return None if row is None else _row_to_provider_connection(row)
+        return None if row is None else self._row_to_provider_connection(row)
 
-    def set_provider_connection_feed(
+    def _row_to_provider_connection(self, row: sqlite3.Row) -> ProviderConnection:
+        connection_id = row["connection_id"]
+        spec, template = self.registry.connection_template(connection_id)
+        try:
+            stored = json.loads(row["options"])
+        except json.JSONDecodeError:
+            stored = None
+        options = {}
+        if isinstance(stored, dict):
+            fixed = dict(template.fixed_options)
+            options = {
+                field.key: value
+                for field in spec.option_fields
+                if field.key not in fixed
+                and isinstance(value := stored.get(field.key), str)
+                and value in dict(field.choices)
+            }
+        return self.registry.build_connection(connection_id, options)
+
+    def set_provider_connection_options(
         self,
         connection_id: str,
-        feed: MarketDataFeed,
+        options: Mapping[str, str],
     ) -> None:
-        connection = self.get_provider_connection(connection_id)
-        if connection is None or connection.provider_name != "alpaca":
-            raise ValueError(f"Connection {connection_id!r} is not an Alpaca connection.")
         with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            connection = self.get_provider_connection(connection_id)
+            if connection is None:
+                raise ValueError("Unknown provider connection.")
+            values = dict(connection.options)
+            values.update(options)
+            updated = self.registry.build_connection(connection_id, values)
             self._conn.execute(
-                "UPDATE provider_connections SET feed = ? WHERE connection_id = ?",
-                (feed, connection_id),
+                "UPDATE provider_connections SET options = ? WHERE connection_id = ?",
+                (json.dumps(dict(updated.options)), connection_id),
             )
 
     def get_active_provider_connection_id(self) -> str:
@@ -1961,18 +2041,3 @@ def _row_to_extension_record(row: sqlite3.Row) -> ChartExtensionStoreRecord:
         payload=payload,
     )
 
-
-def _row_to_provider_connection(row: sqlite3.Row) -> ProviderConnection:
-    environment_value = row["environment"]
-    feed_value = row["feed"]
-    return ProviderConnection(
-        connection_id=row["connection_id"],
-        display_name=row["display_name"],
-        provider_name=row["provider_name"],
-        environment=(
-            None
-            if environment_value is None
-            else ConnectionEnvironment(environment_value)
-        ),
-        feed=None if feed_value is None else MarketDataFeed(feed_value),
-    )

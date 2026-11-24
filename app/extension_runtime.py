@@ -51,13 +51,16 @@ class ChartExtensionRuntime:
         cache: Cache,
         extension_store: ChartExtensionStore,
         lookback_days: int,
-        cache_namespace: str = "yfinance",
+        cache_namespace: str | None = None,
     ) -> None:
         self._state = state
         self._cache = cache
         self._extension_store = extension_store
         self._lookback_days = lookback_days
-        self._cache_namespace = cache_namespace
+        self._cache_namespace = (
+            cache.registry.build_connection(cache.registry.fallback_connection_id).cache_namespace
+            if cache_namespace is None else cache_namespace
+        )
         self._deferred_names: set[str] = set()
         self._history_complete = True
         # Older bars than the loaded series can still be loaded on demand.

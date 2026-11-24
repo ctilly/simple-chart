@@ -30,7 +30,8 @@ from simplechart.api import (
 )
 from simplechart.extensions import _registry
 from data.provider.base import HistoryUnavailableError
-from data.provider.config import ALPACA_PAPER_CONNECTION_ID, YFINANCE_CONNECTION_ID
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
 from test_basis_change import (  # noqa: F401  (fixture)
     ET,
     _ALPACA,
@@ -53,6 +54,7 @@ from test_basis_change import (  # noqa: F401  (fixture)
     _show,
     _window,
 )
+from provider_support import startup_registry
 
 _FLOOR = _at(date(2024, 6, 3))
 _production_bars_wanted = ChartWidget.older_history_bars_wanted
@@ -202,7 +204,7 @@ def test_older_intraday_history_loads_and_keeps_the_view(
     rect = viewbox.viewRect()
     assert bars[round(rect.left())].timestamp == edge_times[0]
     assert bars[round(rect.right())].timestamp == edge_times[1]
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         coverage = cache.get_bar_fetch_coverage(_ALPACA, _SYMBOL, Timeframe.MIN30)
     assert coverage is not None and coverage[0] == _ms(_FIRST_CHUNK_START)
 
@@ -381,7 +383,7 @@ def test_a_basis_change_at_the_oldest_cached_session_reloads_instead(
     reload = window._current_chart_request
     assert reload is not None and reload.generation > request.generation
     assert not any(end < _ALPACA_FETCH_START for _tf, _start, end in provider.calls if _start < _ALPACA_FETCH_START - timedelta(days=2))
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         assert cache.get_raw_bars(_ALPACA, _SYMBOL, Timeframe.MIN30, 0, _ms(_ALPACA_FETCH_START) - 1) == []
         assert cache.get_basis_changes(_ALPACA, _SYMBOL) == []
 

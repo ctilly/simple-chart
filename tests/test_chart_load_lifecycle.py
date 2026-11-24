@@ -10,18 +10,23 @@ import pytest
 
 import app.controller as controller_module
 from app.controller import MainWindow, _FetchWorker
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider.base import DataProvider
-from data.provider.alpaca_provider import AlpacaProvider
-from data.provider.config import ProviderConnection, alpaca_paper_connection
+from data.provider.routing import DataRoute
+from providers.alpaca.implementation import AlpacaProvider
+from data.provider.config import ProviderConnection
+from provider_support import alpaca_paper_connection, startup_registry
 from data.provider.credentials import CredentialStore, ProviderCredentials
 
 
 pytestmark = pytest.mark.usefixtures("isolated_credentials")
 
 def _window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -34,7 +39,7 @@ def _window(
         lambda window: None,
     )
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window, production_load
@@ -62,11 +67,12 @@ def _bar(timestamp: datetime) -> Bar:
 
 
 def test_load_never_waits_for_running_fetch(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, production_load = _window(qtbot, tmp_path, monkeypatch)
+    window, production_load = _window(provider_registry, qtbot, tmp_path, monkeypatch)
 
     class RunningThread:
         def isRunning(self) -> bool:
@@ -111,11 +117,12 @@ def test_load_never_waits_for_running_fetch(
 
 
 def test_stopping_data_workers_marks_every_chart_task_cancelled(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     tasks = cast(dict[int, Any], window._chart_load_tasks)
     requests = [
         window._make_chart_load_request(
@@ -148,11 +155,12 @@ def test_stopping_data_workers_marks_every_chart_task_cancelled(
 
 
 def test_rapid_navigation_starts_only_latest_debounced_request(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, production_load = _window(qtbot, tmp_path, monkeypatch)
+    window, production_load = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     started: list[Any] = []
     monkeypatch.setattr(window, "_start_chart_load", started.append)
 
@@ -167,11 +175,12 @@ def test_rapid_navigation_starts_only_latest_debounced_request(
 
 
 def test_stale_chart_success_and_error_do_not_reach_current_ui_handlers(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     connection = window._selected_route.connection
     old_request = window._make_chart_load_request("XLE", Timeframe.DAILY, connection)
     current_request = window._make_chart_load_request(
@@ -206,11 +215,12 @@ def test_stale_chart_success_and_error_do_not_reach_current_ui_handlers(
 
 
 def test_terminal_chart_request_rejects_duplicate_delivery(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = window._make_chart_load_request(
         "NVDA",
         Timeframe.DAILY,
@@ -238,11 +248,12 @@ def test_terminal_chart_request_rejects_duplicate_delivery(
 
 
 def test_finished_task_promotes_latest_pending_request(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     connection = window._selected_route.connection
     request = window._make_chart_load_request("NVDA", Timeframe.DAILY, connection)
     tasks = cast(dict[int, Any], window._chart_load_tasks)
@@ -265,11 +276,12 @@ def test_finished_task_promotes_latest_pending_request(
 
 
 def test_finished_task_preserves_active_debounce_window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, production_load = _window(qtbot, tmp_path, monkeypatch)
+    window, production_load = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     tasks = cast(dict[int, Any], window._chart_load_tasks)
     connection = window._selected_route.connection
     old_request = window._make_chart_load_request("XLE", Timeframe.DAILY, connection)
@@ -291,11 +303,12 @@ def test_finished_task_preserves_active_debounce_window(
 
 
 def test_route_change_before_start_terminates_current_request(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = window._make_chart_load_request(
         "NVDA",
         Timeframe.DAILY,
@@ -315,11 +328,12 @@ def test_route_change_before_start_terminates_current_request(
 
 
 def test_chart_worker_owns_resources_and_is_retained_until_thread_finishes(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     started = threading.Event()
     release = threading.Event()
     provider_thread_ids: list[int] = []
@@ -361,11 +375,11 @@ def test_chart_worker_owns_resources_and_is_retained_until_thread_finishes(
 
     real_cache = Cache
 
-    def create_test_cache(db_path: str) -> Cache:
+    def create_test_cache(db_path: str, *, registry: ProviderRegistry) -> Cache:
         cache_thread_ids.append(threading.get_ident())
-        return real_cache(db_path)
+        return real_cache(db_path, registry=registry)
 
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     monkeypatch.setattr(controller_module, "Cache", create_test_cache)
     production_cleanup = window._on_chart_thread_finished
 
@@ -419,11 +433,12 @@ def test_chart_worker_owns_resources_and_is_retained_until_thread_finishes(
 
 
 def test_cancelled_chart_worker_before_run_emits_only_completion(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = window._make_chart_load_request(
         "NVDA",
         Timeframe.DAILY,
@@ -440,12 +455,14 @@ def test_cancelled_chart_worker_before_run_emits_only_completion(
         calls.append("create")
         raise AssertionError("cancelled worker created a provider")
 
-    monkeypatch.setattr(controller_module, "create_provider", unexpected_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(unexpected_provider))
     worker = _FetchWorker(
         window._db_path,
         window._credential_store,
         request,
         cancelled,
+        provider_factory=window._provider_registry.create_provider,
+        registry=provider_registry,
     )
     finished: list[object] = []
     errors: list[str] = []
@@ -464,12 +481,13 @@ def test_cancelled_chart_worker_before_run_emits_only_completion(
 
 @pytest.mark.parametrize("provider_fails", [False, True])
 def test_cancel_during_provider_call_persists_range_then_skips_next_call(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
     provider_fails: bool,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     request = window._make_chart_load_request(
         "NVDA",
         Timeframe.MIN5,
@@ -513,15 +531,17 @@ def test_cancel_during_provider_call_persists_range_then_skips_next_call(
             return [Timeframe.MIN5, Timeframe.DAILY]
 
     monkeypatch.setattr(
-        controller_module,
+        controller_module.ProviderRegistry,
         "create_provider",
-        lambda _connection, _store: BlockingProvider(),
+        staticmethod(lambda _connection, _store: BlockingProvider()),
     )
     worker = _FetchWorker(
         window._db_path,
         window._credential_store,
         request,
         cancelled,
+        provider_factory=window._provider_registry.create_provider,
+        registry=provider_registry,
     )
     finished: list[object] = []
     errors: list[str] = []
@@ -543,7 +563,7 @@ def test_cancel_during_provider_call_persists_range_then_skips_next_call(
     assert finished == []
     assert errors == []
     assert completed == [True]
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         for timeframe in (Timeframe.DAILY, Timeframe.MIN5):
             assert cache.get_bars(
                 request.cache_namespace,
@@ -610,7 +630,7 @@ def test_cancel_before_synthesized_materialization_keeps_native_cache_only(
         unexpected_materialization,
     )
     namespace = "test-provider"
-    with Cache(str(tmp_path / "cancel-synth.db")) as cache:
+    with Cache(str(tmp_path / "cancel-synth.db"), registry=startup_registry()) as cache:
         with pytest.raises(controller_module._ChartLoadCancelled):
             controller_module._fetch_synthesized_series(
                 aggregator,
@@ -699,7 +719,7 @@ def test_cancel_after_synthesis_preserves_existing_materialized_cache(
     namespace = "test-provider"
     target_coverage_start = int((start + timedelta(minutes=5)).timestamp() * 1000)
     target_coverage_end = int(end.timestamp() * 1000)
-    with Cache(str(tmp_path / "cancel-synth-after.db")) as cache:
+    with Cache(str(tmp_path / "cancel-synth-after.db"), registry=startup_registry()) as cache:
         cache.put_bars(namespace, "NVDA", Timeframe.MIN65, [old_target_bar])
         cache.extend_bar_fetch_coverage(
             namespace,
@@ -774,7 +794,7 @@ def test_cancel_between_tail_refresh_and_head_extension_skips_head(
     namespace = "test-provider"
     coverage_start_ms = int(coverage_start.timestamp() * 1000)
     coverage_end_ms = int(coverage_end.timestamp() * 1000)
-    with Cache(str(tmp_path / "cancel-head-tail.db")) as cache:
+    with Cache(str(tmp_path / "cancel-head-tail.db"), registry=startup_registry()) as cache:
         cache.put_bars(namespace, "NVDA", Timeframe.MIN5, [old_bar])
         cache.extend_bar_fetch_coverage(
             namespace,
@@ -812,11 +832,12 @@ def test_cancel_between_tail_refresh_and_head_extension_skips_head(
 
 
 def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     first_now = datetime(2026, 11, 4, 15, 3, 4, tzinfo=UTC)
     second_now = datetime(2026, 11, 4, 15, 3, 8, tzinfo=UTC)
     clock = [first_now, second_now]
@@ -869,7 +890,7 @@ def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
         return EmptyProvider()
 
     monkeypatch.setattr(controller_module, "datetime", FixedDateTime)
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     request = window._make_chart_load_request(
         "AAPL",
         Timeframe.MIN5,
@@ -883,6 +904,8 @@ def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
             window._db_path,
             window._credential_store,
             request,
+            provider_factory=window._provider_registry.create_provider,
+            registry=provider_registry,
         )
         worker.finished.connect(lambda _request, series: results.append(series))
         worker.error.connect(lambda _request, message: errors.append(message))
@@ -908,11 +931,12 @@ def test_fetch_worker_uses_completed_boundaries_for_repeat_load(
 
 
 def test_fetch_worker_uses_complete_premarket_equity_cache(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = datetime(2026, 11, 4, 14, 8, 54, tzinfo=UTC)
     prior_daily = datetime(2026, 11, 3, 5, 0, tzinfo=UTC)
     prior_daily_settled = datetime(2026, 11, 4, 5, 0, tzinfo=UTC)
@@ -955,13 +979,13 @@ def test_fetch_worker_uses_complete_premarket_equity_cache(
         return NoCallProvider()
 
     monkeypatch.setattr(controller_module, "datetime", FixedDateTime)
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     request = window._make_chart_load_request(
         "AAPL",
         Timeframe.MIN5,
         window._selected_route.connection,
     )
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         cache.put_bars(
             request.cache_namespace,
             "AAPL",
@@ -995,6 +1019,8 @@ def test_fetch_worker_uses_complete_premarket_equity_cache(
         window._db_path,
         window._credential_store,
         request,
+        provider_factory=window._provider_registry.create_provider,
+        registry=provider_registry,
     )
     worker.finished.connect(lambda _request, series: results.append(series))
     worker.error.connect(lambda _request, message: errors.append(message))
@@ -1007,11 +1033,12 @@ def test_fetch_worker_uses_complete_premarket_equity_cache(
 
 
 def test_fetch_worker_repairs_stale_premarket_equity_cache(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = datetime(2026, 11, 4, 14, 8, 54, tzinfo=UTC)
     stale_daily = datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
     stale_last_5m = datetime(2026, 11, 2, 20, 55, tzinfo=UTC)
@@ -1060,13 +1087,13 @@ def test_fetch_worker_repairs_stale_premarket_equity_cache(
         return RepairProvider()
 
     monkeypatch.setattr(controller_module, "datetime", FixedDateTime)
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     request = window._make_chart_load_request(
         "AAPL",
         Timeframe.MIN5,
         window._selected_route.connection,
     )
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         cache.put_bars(
             request.cache_namespace,
             "AAPL",
@@ -1100,6 +1127,8 @@ def test_fetch_worker_repairs_stale_premarket_equity_cache(
         window._db_path,
         window._credential_store,
         request,
+        provider_factory=window._provider_registry.create_provider,
+        registry=provider_registry,
     )
     worker.finished.connect(lambda _request, series: results.append(series))
     worker.error.connect(lambda _request, message: errors.append(message))
@@ -1117,11 +1146,12 @@ def test_fetch_worker_repairs_stale_premarket_equity_cache(
 
 
 def test_real_alpaca_factory_worker_materializes_65m_from_cached_5m(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     now = datetime(2026, 11, 5, 14, 0, tzinfo=UTC)
     daily_bar = datetime(2026, 11, 4, 5, 0, tzinfo=UTC)
     daily_settled = datetime(2026, 11, 5, 5, 0, tzinfo=UTC)
@@ -1135,7 +1165,15 @@ def test_real_alpaca_factory_worker_materializes_65m_from_cached_5m(
 
     class SyntheticCredentialStore:
         def get(self, _connection_id: str) -> ProviderCredentials | None:
-            return ProviderCredentials("synthetic-id", "synthetic-secret")
+            return ProviderCredentials({"api_key_id": "synthetic-id", "api_secret": "synthetic-secret"})
+
+        def read(
+            self,
+            connection_id: str,
+            fields: tuple[CredentialField, ...],
+            display_name: str,
+        ) -> ProviderCredentials | None:
+            return self.get(connection_id)
 
         def put(
             self,
@@ -1169,7 +1207,7 @@ def test_real_alpaca_factory_worker_materializes_65m_from_cached_5m(
         for offset in range(0, 65, 5)
     ]
     base_bars.append(_bar(datetime(2026, 11, 4, 20, 55, tzinfo=UTC)))
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         cache.put_bars(
             request.cache_namespace,
             request.symbol,
@@ -1203,6 +1241,8 @@ def test_real_alpaca_factory_worker_materializes_65m_from_cached_5m(
         window._db_path,
         cast(CredentialStore, SyntheticCredentialStore()),
         request,
+        provider_factory=window._provider_registry.create_provider,
+        registry=provider_registry,
     )
     worker.finished.connect(lambda _request, series: results.append(series))
     worker.error.connect(lambda _request, message: errors.append(message))
@@ -1219,11 +1259,12 @@ def test_real_alpaca_factory_worker_materializes_65m_from_cached_5m(
 
 
 def test_two_real_workers_do_not_block_latest_debounced_request(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, production_load = _window(qtbot, tmp_path, monkeypatch)
+    window, production_load = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     started_symbols: set[str] = set()
     started_lock = threading.Lock()
     first_two_started = threading.Event()
@@ -1272,7 +1313,7 @@ def test_two_real_workers_do_not_block_latest_debounced_request(
     ) -> DataProvider:
         return CoordinatedProvider()
 
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_test_provider))
     production_done = window._on_chart_fetch_done
     production_error = window._on_chart_fetch_error
 
@@ -1336,7 +1377,7 @@ def test_two_real_workers_do_not_block_latest_debounced_request(
     assert current_errors == []
     assert worker_successes == []
     assert worker_errors == []
-    with Cache(window._db_path) as cache:
+    with Cache(window._db_path, registry=provider_registry) as cache:
         cache_end_ms = int(datetime.now(tz=UTC).timestamp() * 1000) + 1_000
         for symbol in ("XLE", "TSLA"):
             assert cache.get_bars(
@@ -1373,11 +1414,12 @@ def test_two_real_workers_do_not_block_latest_debounced_request(
 
 
 def test_real_alpaca_factory_and_cache_support_two_chart_workers(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window, _ = _window(qtbot, tmp_path, monkeypatch)
+    window, _ = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     main_thread_id = threading.get_ident()
     credential_barrier = threading.Barrier(2)
     fetch_barrier = threading.Barrier(2)
@@ -1391,7 +1433,15 @@ def test_real_alpaca_factory_and_cache_support_two_chart_workers(
             with credential_thread_lock:
                 credential_thread_ids.append(threading.get_ident())
             credential_barrier.wait(timeout=2)
-            return ProviderCredentials("synthetic-id", "synthetic-secret")
+            return ProviderCredentials({"api_key_id": "synthetic-id", "api_secret": "synthetic-secret"})
+
+        def read(
+            self,
+            connection_id: str,
+            fields: tuple[CredentialField, ...],
+            display_name: str,
+        ) -> ProviderCredentials | None:
+            return self.get(connection_id)
 
         def put(
             self,
@@ -1429,7 +1479,7 @@ def test_real_alpaca_factory_and_cache_support_two_chart_workers(
     monkeypatch.setattr(window, "_on_chart_fetch_error", record_worker_error)
     window._credential_store = SyntheticCredentialStore()
     connection = alpaca_paper_connection()
-    window._selected_route = cast(Any, SimpleNamespace(connection=connection))
+    window._router.selected_route = DataRoute(Aggregator(DataProvider()), connection, provider_registry)
     requests = [
         window._make_chart_load_request(symbol, Timeframe.DAILY, connection)
         for symbol in ("XLE", "TSLA")

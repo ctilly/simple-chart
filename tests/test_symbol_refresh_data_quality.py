@@ -36,6 +36,7 @@ from app.bar_comparison import (
 from app.data_quality import DataQualityTab
 from data.cache import Cache
 from data.models import Bar, Timeframe
+from provider_support import startup_registry
 
 
 _NAMESPACE = "yfinance"
@@ -222,7 +223,7 @@ def test_refresh_clears_rows_and_selection_so_a_volume_edit_adds_no_price_overri
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _tab(qtbot, cache, _Refresher(cache))
         _load_and_select(tab)
         assert _button(tab, "applyBarCorrection").isEnabled()
@@ -261,7 +262,7 @@ def test_refresh_discards_cached_comparisons_for_the_symbol_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _tab(qtbot, cache, _Refresher(cache), _ComparisonService())
         for symbol in (_OTHER_SYMBOL, _SYMBOL):
             _load_and_select(tab, symbol)
@@ -283,7 +284,7 @@ def test_comparison_runs_until_its_thread_finished_slot_has_run(
     tmp_path: Path,
 ) -> None:
     service = _ComparisonService(blocking=True)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _tab(qtbot, cache, _Refresher(cache), service)
         _load_and_select(tab, _OTHER_SYMBOL)
         _button(tab, "compareBarSources").click()
@@ -319,7 +320,7 @@ def test_late_comparison_result_for_a_refreshed_symbol_is_rejected(
     rewind: str,
 ) -> None:
     service = _ComparisonService(blocking=True)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         refresher = _Refresher(cache, defer_rewind=rewind == "after-drain")
         tab = _tab(qtbot, cache, refresher, service)
         _load_and_select(tab)
@@ -349,7 +350,7 @@ def test_rows_of_another_symbol_survive_a_refresh(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         refresher = _Refresher(cache)
         tab = _tab(qtbot, cache, refresher)
         _load_and_select(tab, _OTHER_SYMBOL)
@@ -377,7 +378,7 @@ def test_unavailable_source_explains_and_asks_nothing(
         "exec",
         lambda _dialog: pytest.fail("no confirmation expected"),
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:iex", _SYMBOL, Timeframe.DAILY, [_OLD_BAR])
         tab = _tab(qtbot, cache, _Unavailable(cache))
         source = tab.findChild(QComboBox, "dataQualitySource")
@@ -399,7 +400,7 @@ def test_refresh_button_is_disabled_without_a_refresh_handler(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = DataQualityTab(cache)
         qtbot.addWidget(tab)
 
@@ -430,7 +431,7 @@ def test_confirmation_asks_yes_or_no_with_the_plan_ranges(
         refresh=lambda: None,
     )
 
-    dialog = data_quality_module.SymbolRefreshDialog(namespace, _SYMBOL, plan)
+    dialog = data_quality_module.SymbolRefreshDialog(namespace, _SYMBOL, plan, registry=startup_registry())
     qtbot.addWidget(dialog)
 
     message = dialog.findChild(QLabel, "symbolRefreshMessage")
@@ -464,7 +465,7 @@ def test_confirmation_yes_accepts_and_no_or_enter_rejects(
         hides_older_intraday=False,
         refresh=lambda: None,
     )
-    dialog = data_quality_module.SymbolRefreshDialog("yfinance", _SYMBOL, plan)
+    dialog = data_quality_module.SymbolRefreshDialog("yfinance", _SYMBOL, plan, registry=startup_registry())
     qtbot.addWidget(dialog)
     dialog.show()
     qtbot.waitExposed(dialog)
@@ -490,7 +491,7 @@ def test_tab_opened_before_the_rewind_drops_rows_and_comparisons(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _ComparisonService()
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         refresher = _Refresher(cache, defer_rewind=True)
         confirming = _tab(qtbot, cache, refresher)
         _confirm_refresh(confirming, monkeypatch)
@@ -554,7 +555,7 @@ def test_top_row_holds_scope_and_refresh_and_a_group_box_holds_inspection(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _tab(qtbot, cache, _Refresher(cache))
 
         layout = tab.layout()
@@ -652,7 +653,7 @@ _FAILED_TEXT = (
 
 
 def test_empty_status_hides_the_banner(qtbot: Any, tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _tab(qtbot, cache, _StatusRefresher(cache))
 
         assert _banner(tab).isHidden()
@@ -675,7 +676,7 @@ def test_status_banner_shows_the_state_of_the_refresh(
     state: data_quality_module.SymbolRefreshState,
     text: str,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         refresher = _StatusRefresher(cache)
         refresher.status = data_quality_module.SymbolRefreshStatus(state, text)
         tab = _tab(qtbot, cache, refresher)
@@ -691,7 +692,7 @@ def test_banner_recolors_and_hides_as_the_status_changes(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         refresher = _StatusRefresher(cache)
         tab = _tab(qtbot, cache, refresher)
         seen: list[tuple[bool, str]] = []

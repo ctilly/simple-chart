@@ -1,22 +1,22 @@
 from datetime import datetime
 from html import escape
-from typing import Literal
+from threading import Event
+from typing import cast
 
-from PyQt6.QtCore import QObject, Qt, QThread, QUrl, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QDialog, QFormLayout, QLabel, QTabWidget, QTextBrowser,
     QWidget,
 )
 
+from app.background_job import LatestJob
 from app.dialogs import build_dialog_content
-from app.fund_calendar import QQQ_REBALANCE_DATES, WITCHING_DATES, next_calendar_date
-from data.models import Level1Quote
-from data.provider.symbol_details import NewsArticle, SymbolProfile, fetch_news, fetch_profile
+from app.fund_calendar import next_qqq_rebalance_date, next_witching_date
+from data.models import Level1Quote, NewsArticle, SymbolProfile
+from data.provider.routing import CapabilityRouter, DataRoute
+from data.provider.spec import Capability
 from data.session import MARKET_TIMEZONE
-
-
-_Section = Literal["profile", "news"]
 
 
 def _label(text: str = "") -> QLabel:
@@ -31,11 +31,22 @@ def _value(number: int | float | None, spec: str) -> str:
     return "—" if number is None else format(number, spec)
 
 
+def _published_in_market_time(published: datetime | None) -> datetime | None:
+    if published is None:
+        return None
+    try:
+        return published.astimezone(MARKET_TIMEZONE)
+    except (OverflowError, ValueError):
+        return None
+
+
 class SymbolDetailsDialog(QDialog):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.resize(620, 520)
         self.symbol = ""
+        self._company_name: str | None = None
+        self._profile_name: str | None = None
         layout = build_dialog_content(self, "symbolDetails", "Symbol Details")
         self.setSizeGripEnabled(True)
         self._title = _label()
@@ -71,13 +82,17 @@ class SymbolDetailsDialog(QDialog):
 
     def reset(self, symbol: str) -> None:
         self.symbol = symbol
-        self._set_name(None)
+        self._company_name = self._profile_name = None
+        self._update_name()
         self._tabs.setCurrentIndex(0)
-        self._profile.setPlainText("Loading Yahoo Finance profile…")
-        self._news.setPlainText("Loading Yahoo Finance news…")
         self.set_quote(None)
 
-    def _set_name(self, name: str | None) -> None:
+    def set_company_name(self, name: str | None) -> None:
+        self._company_name = name
+        self._update_name()
+
+    def _update_name(self) -> None:
+        name = self._company_name or self._profile_name
         title = f"{self.symbol} · {name}" if name else self.symbol
         self._title.setText(title)
         self.setWindowTitle(f"Symbol details · {title}")
@@ -88,8 +103,7 @@ class SymbolDetailsDialog(QDialog):
                 label.setText("—")
             self._quote_status.setText("Waiting for Level 1 quote")
             return
-        if quote.company_name:
-            self._set_name(quote.company_name)
+        self.set_company_name(quote.company_name)
         spread = None if quote.ask is None or quote.bid is None else quote.ask - quote.bid
         values = (
             _value(quote.last_price, ",.2f"), _value(quote.change, "+,.2f"),
@@ -107,17 +121,26 @@ class SymbolDetailsDialog(QDialog):
         if self._quote_status.text() == "Latest Level 1 quote":
             self._quote_status.setText("Last received Level 1 quote")
 
-    def set_profile(self, profile: SymbolProfile | None) -> None:
+    def load_profile(self, source: str) -> None:
+        self._profile_name = None
+        self._update_name()
+        self._profile.setPlainText(f"Loading {source} profile…")
+
+    def load_news(self, source: str) -> None:
+        self._tabs.setTabToolTip(self._tabs.indexOf(self._news), f"<p>Source: {escape(source)}</p>")
+        self._news.setPlainText(f"Loading {source} news…")
+
+    def set_profile(self, profile: SymbolProfile | None, source: str) -> None:
         if profile is None:
-            self._profile.setPlainText("Yahoo Finance profile unavailable.")
+            self._profile.setPlainText(f"{source} profile unavailable.")
             return
-        if profile.name:
-            self._set_name(profile.name)
+        self._profile_name = profile.name
+        self._update_name()
         description = escape(profile.description or "Description unavailable.")
         if not profile.is_etf:
             self._profile.setHtml(
                 f"<p><b>Share float</b> {_value(profile.float_shares, ',d')}</p>"
-                f"<p>{description}</p><p>Source: Yahoo Finance</p>"
+                f"<p>{description}</p><p>Source: {escape(source)}</p>"
             )
             return
         today = datetime.now(MARKET_TIMEZONE).date()
@@ -126,12 +149,12 @@ class SymbolDetailsDialog(QDialog):
             ("Benchmark", profile.benchmark or "—"),
             ("Management fee", _value(profile.management_fee, ".2%")),
             ("Annual report expense ratio", _value(profile.expense_ratio, ".2%")),
-            ("Next U.S. witching date", next_calendar_date(WITCHING_DATES, today)),
+            ("Next U.S. witching date", next_witching_date(today).strftime("%b %d, %Y")),
         ]
         if self.symbol == "QQQ":
             rows.extend((
                 ("Nasdaq-100 schedule", "Quarterly rebalance, annual December reconstitution"),
-                ("Next scheduled effective date", next_calendar_date(QQQ_REBALANCE_DATES, today)),
+                ("Next scheduled effective date", next_qqq_rebalance_date(today).strftime("%b %d, %Y")),
             ))
         else:
             rows.append(("Fund rebalance / reconstitution", "Schedule unavailable"))
@@ -147,14 +170,14 @@ class SymbolDetailsDialog(QDialog):
         )
         self._profile.setHtml(
             f"<p>{description}</p>{body}{table}"
-            "<p>Fund data: Yahoo Finance. Calendar: Cboe, OCC and Nasdaq.</p>"
+            f"<p>Fund data: {escape(source)}. Calendar: Cboe, OCC and Nasdaq.</p>"
         )
 
-    def set_news(self, articles: tuple[NewsArticle, ...] | None) -> None:
+    def set_news(self, articles: tuple[NewsArticle, ...] | None, source: str) -> None:
         if not articles:
             self._news.setPlainText(
-                "Yahoo Finance news unavailable." if articles is None
-                else "Yahoo Finance returned no recent headlines."
+                f"{source} news unavailable." if articles is None
+                else f"{source} returned no recent headlines."
             )
             return
         entries: list[str] = []
@@ -163,8 +186,9 @@ class SymbolDetailsDialog(QDialog):
             if article.url is not None:
                 headline = f'<a href="{escape(article.url, quote=True)}">{headline}</a>'
             details = [article.publisher] if article.publisher else []
-            if article.published:
-                details.append(article.published.astimezone(MARKET_TIMEZONE).strftime("%b %d, %Y · %H:%M ET"))
+            published = _published_in_market_time(article.published)
+            if published is not None:
+                details.append(published.strftime("%b %d, %Y · %H:%M ET"))
             entries.append(f"<p><b>{headline}</b><br>{escape(' · '.join(details))}</p>")
         self._news.setHtml("".join(entries))
 
@@ -173,37 +197,28 @@ class SymbolDetailsDialog(QDialog):
             QDesktopServices.openUrl(url)
 
 
-class _DetailsThread(QThread):
-    result = pyqtSignal(int, str, object)
-
-    def __init__(self, section: _Section, symbol: str, generation: int) -> None:
-        super().__init__()
-        self.section = section
-        self._symbol = symbol
-        self._generation = generation
-
-    def run(self) -> None:
-        if self.isInterruptionRequested():
-            return
-        result = fetch_profile(self._symbol) if self.section == "profile" else fetch_news(self._symbol)
-        if not self.isInterruptionRequested():
-            self.result.emit(self._generation, self.section, result)
-
-
 class SymbolDetails(QObject):
     idle = pyqtSignal()
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, router: CapabilityRouter, parent: QWidget) -> None:
         super().__init__(parent)
+        self._router = router
+        self._profile_key: tuple[DataRoute, str] | None = None
+        self._news_key: tuple[DataRoute, str] | None = None
         self._parent = parent
         self.dialog: SymbolDetailsDialog | None = None
-        self._generation = 0
-        self._threads: dict[_Section, _DetailsThread] = {}
-        self._pending: dict[_Section, tuple[str, int]] = {}
+        self._profile_job = LatestJob("Loading profile", self)
+        self._profile_job.succeeded.connect(self._on_profile)
+        self._profile_job.failed.connect(self._on_profile)
+        self._profile_job.idle.connect(self._on_idle)
+        self._news_job = LatestJob("Loading news", self)
+        self._news_job.succeeded.connect(self._on_news)
+        self._news_job.failed.connect(self._on_news)
+        self._news_job.idle.connect(self._on_idle)
 
     @property
     def busy(self) -> bool:
-        return bool(self._threads)
+        return self._profile_job.busy or self._news_job.busy
 
     def show(self, symbol: str, quote: Level1Quote | None) -> None:
         if self.dialog is None:
@@ -213,12 +228,40 @@ class SymbolDetails(QObject):
             self._invalidate()
             self.dialog.reset(symbol)
             self.dialog.set_quote(quote)
-            for section in ("profile", "news"):
-                self._pending[section] = (symbol, self._generation)
-                self._start(section)
+
         self.dialog.show()
+        self.refresh_routes()
         self.dialog.raise_()
         self.dialog.activateWindow()
+
+    def refresh_routes(self) -> None:
+        dialog = self.dialog
+        if dialog is None or not dialog.isVisible():
+            return
+        symbol = dialog.symbol
+        profile_route = self._router.route(Capability.PROFILE, symbol)
+        news_route = self._router.route(Capability.NEWS, symbol)
+        if (profile_route, symbol) != self._profile_key:
+            self._profile_key = (profile_route, symbol)
+            dialog.load_profile(profile_route.spec.display_name)
+
+            def load_profile(cancelled: Event) -> SymbolProfile | None:
+                return None if cancelled.is_set() else profile_route.aggregator.fetch_profile(symbol)
+
+            self._profile_job.submit(load_profile)
+
+        if (news_route, symbol) != self._news_key:
+            self._news_key = (news_route, symbol)
+            dialog.load_news(news_route.spec.display_name)
+
+            def load_news(cancelled: Event) -> tuple[NewsArticle, ...] | None:
+                return None if cancelled.is_set() else news_route.aggregator.fetch_news(symbol)
+
+            self._news_job.submit(load_news)
+
+    def clear_company_name(self, symbol: str) -> None:
+        if self.dialog is not None and self.dialog.isVisible() and self.dialog.symbol == symbol:
+            self.dialog.set_company_name(None)
 
     def update_quote(self, quote: Level1Quote) -> None:
         if self.dialog is not None and self.dialog.isVisible() and self.dialog.symbol == quote.symbol:
@@ -234,37 +277,20 @@ class SymbolDetails(QObject):
             self.dialog.close()
 
     def _invalidate(self) -> None:
-        self._generation += 1
-        self._pending.clear()
-        for thread in self._threads.values():
-            thread.requestInterruption()
+        self._profile_key = self._news_key = None
+        self._profile_job.cancel()
+        self._news_job.cancel()
 
-    def _start(self, section: _Section) -> None:
-        if section in self._threads or section not in self._pending:
-            return
-        symbol, generation = self._pending.pop(section)
-        thread = _DetailsThread(section, symbol, generation)
-        self._threads[section] = thread
-        thread.result.connect(self._on_result)
-        thread.finished.connect(self._on_finished)
-        thread.start()
+    def _on_profile(self, profile: object = None) -> None:
+        if self.dialog is not None and self.dialog.isVisible() and self._profile_key is not None:
+            route, _ = self._profile_key
+            self.dialog.set_profile(cast(SymbolProfile | None, profile), route.spec.display_name)
 
-    def _on_result(
-        self, generation: int, section: _Section,
-        value: SymbolProfile | tuple[NewsArticle, ...] | None,
-    ) -> None:
-        if generation != self._generation or self.dialog is None or not self.dialog.isVisible():
-            return
-        if section == "profile" and (value is None or isinstance(value, SymbolProfile)):
-            self.dialog.set_profile(value)
-        elif section == "news" and (value is None or isinstance(value, tuple)):
-            self.dialog.set_news(value)
+    def _on_news(self, articles: object = None) -> None:
+        if self.dialog is not None and self.dialog.isVisible() and self._news_key is not None:
+            route, _ = self._news_key
+            self.dialog.set_news(cast(tuple[NewsArticle, ...] | None, articles), route.spec.display_name)
 
-    def _on_finished(self) -> None:
-        thread = self.sender()
-        assert isinstance(thread, _DetailsThread)
-        del self._threads[thread.section]
-        thread.deleteLater()
-        self._start(thread.section)
-        if not self._threads:
+    def _on_idle(self) -> None:
+        if not self.busy:
             self.idle.emit()

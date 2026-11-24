@@ -39,6 +39,7 @@ from data.errors import describe
 from data.cache import Cache, IdenticalCorrectionError
 from data.calendar import MARKET_TIMEZONE
 from data.models import Bar, BarCorrection, BarInspection, Timeframe
+from data.provider.registry import ProviderRegistry
 
 
 _CHART_TIMEFRAMES = (
@@ -51,12 +52,6 @@ _CHART_TIMEFRAMES = (
     Timeframe.WEEKLY,
 )
 _LOGGER = logging.getLogger(__name__)
-_SOURCE_LABELS = {
-    "yfinance": "Yahoo Finance",
-    "alpaca:iex": "Alpaca / IEX",
-    "alpaca:delayed_sip": "Alpaca / SIP (15-minute delayed)",
-    "alpaca:sip": "Alpaca / SIP (real-time)",
-}
 _INSPECTION_ROLE = int(Qt.ItemDataRole.UserRole)
 _COMPARISON_ROW_ROLE = _INSPECTION_ROLE + 1
 _COMPARISON_FIELDS: dict[int, BarField] = {
@@ -321,7 +316,7 @@ class DataQualityTab(QWidget):
         if initial_cache_namespace is not None:
             namespaces.add(initial_cache_namespace)
         for namespace in sorted(namespaces):
-            self._source.addItem(_source_label(namespace), namespace)
+            self._source.addItem(self._cache.registry.namespace_label(namespace), namespace)
         if initial_cache_namespace is not None:
             self._source.setCurrentIndex(
                 self._source.findData(initial_cache_namespace)
@@ -572,16 +567,17 @@ class DataQualityTab(QWidget):
         if scope is None or refresher is None:
             return
         namespace, symbol, _timeframe = scope
+        registry = self._cache.registry
         plan = refresher.plan_symbol_refresh(namespace, symbol)
         if plan is None:
             show_information(
                 self,
                 "Refresh Unavailable",
-                f"{_source_label(namespace)} is not connected in this session. "
+                f"{registry.namespace_label(namespace)} is not connected in this session. "
                 f"Make it the active data source, then refresh {symbol}.",
             )
             return
-        dialog = SymbolRefreshDialog(namespace, symbol, plan, self)
+        dialog = SymbolRefreshDialog(namespace, symbol, plan, self, registry=registry)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         plan.refresh()
@@ -1151,6 +1147,8 @@ class SymbolRefreshDialog(QDialog):
         symbol: str,
         plan: SymbolRefreshPlan,
         parent: QWidget | None = None,
+        *,
+        registry: ProviderRegistry,
     ) -> None:
         super().__init__(parent)
         title = f"Refresh {symbol}?"
@@ -1159,7 +1157,7 @@ class SymbolRefreshDialog(QDialog):
         self.setMinimumWidth(460)
         layout = build_dialog_content(self, "symbolRefreshDialog", title)
 
-        source = _source_label(cache_namespace)
+        source = registry.namespace_label(cache_namespace)
         hidden = (
             "Cached intraday data older than that will no longer be shown, "
             f"because {source} does not provide it. "
@@ -1199,10 +1197,6 @@ def _price_editor(object_name: str, parent: QWidget) -> QDoubleSpinBox:
     editor.setDecimals(6)
     editor.setGroupSeparatorShown(True)
     return editor
-
-
-def _source_label(cache_namespace: str) -> str:
-    return _SOURCE_LABELS.get(cache_namespace, cache_namespace)
 
 
 def _comparison_key(inspection: BarInspection) -> _ComparisonKey:

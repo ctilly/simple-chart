@@ -11,7 +11,7 @@ requires-python = ">=3.13"
 dependencies = [
     "PyQt6>=6.6",
     "finplot>=1.9.7,<1.10",  # pyqtgraph-based finance charting; pulls in pandas. Capped: viewport.py monkeypatches finplot/pyqtgraph private internals, so a minor bump needs a tested upgrade.
-    "yfinance>=1.8.0",   # Yahoo market data and symbol details, including the updated news endpoint
+    "yfinance>=1.8.0,<2",  # Yahoo market data and symbol details, including the updated news endpoint. The major cap mirrors finplot's cap and requires a tested upgrade.
     "lxml>=6.1.3",      # pandas HTML parser used by yfinance historical earnings
     "alpaca-py>=0.44,<0.45",  # official Alpaca market-data SDK; minor-capped while pre-1.0
     "keyring>=25.0",     # sole production store for provider credentials
@@ -39,7 +39,7 @@ simplechart-gui = "simplechart.gui_launcher:main"
 py-modules = ["main"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "chart*", "data*", "indicators*", "simplechart*", "tools*"]
+include = ["app*", "chart*", "data*", "indicators*", "providers*", "simplechart*", "tools*"]
 
 [tool.setuptools.package-data]
 simplechart = ["py.typed"]

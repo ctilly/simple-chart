@@ -1,6 +1,6 @@
 from datetime import date, timezone
 
-from app.earnings_worker import HistoricalEventDates
+from app.earnings import HistoricalEventDates
 from app.theme import active_colors
 from data.calendar import session_date_anchor
 from data.session import MARKET_TIMEZONE

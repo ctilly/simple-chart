@@ -54,6 +54,7 @@ from simplechart.plugins import (
     load_plugin_package,
     load_plugins,
 )
+from provider_support import startup_registry
 
 
 _FIRST = datetime(2026, 6, 1, 13, 30, tzinfo=UTC)
@@ -68,7 +69,7 @@ def _isolated_plugins() -> Iterator[None]:
 
 @pytest.fixture
 def cache(tmp_path: Path) -> Iterator[Cache]:
-    with Cache(str(tmp_path / "test.db")) as opened:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as opened:
         yield opened
 
 

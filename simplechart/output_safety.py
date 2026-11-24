@@ -48,7 +48,7 @@ _TRUSTED_DIRECTORIES = tuple(
     for directory in (
         *(
             _PROJECT_ROOT / package
-            for package in ("app", "chart", "data", "simplechart", "tools", "indicators")
+            for package in ("app", "chart", "data", "simplechart", "tools", "indicators", "providers")
         ),
         _USER_PLUGIN_DIR,
     )

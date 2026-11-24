@@ -125,6 +125,11 @@ there is no verified fix after 60 minutes, stop regardless of confidence.
 ## Tooling
 
 - git, GitHub, and source control are the user's responsibility; don't offer to manage this.
+- Temporary and project working files go in `docs/agentic-projects/`.
+  This includes specs, hand-offs, backlogs, review notes, and scratch
+  scripts. The `docs/` root and `docs/skills/` hold permanent guides only,
+  such as `credential-security.md`. Never move or delete those during
+  cleanup. Session scratch output stays outside the repository.
 
 ## External indicator libraries
 
@@ -180,7 +185,14 @@ All locations load automatically on next launch — no manual controller
 wiring required. The `register_extension()` call at the bottom of the
 indicator file fires on import.
 
-## Building new indicators and tools
+## Where data providers live
+
+Project data sources are packages under `providers/` with a module-level
+`PROVIDER: ProviderSpec`. Startup discovers them before loading chart
+extensions. Read the data provider skill and credential security contract
+before adding or changing a source.
+
+## Building new indicators, tools, and data providers
 
 Canonical skill files walk through the full process: reading the right
 reference files, deciding whether a compiled kernel is needed, implementing
@@ -191,11 +203,13 @@ each piece in order, and verifying the result.
 | Compute indicator | `docs/skills/compute-indicator.md` | Ordinary chart overlays or panel indicators that primarily convert OHLCV data into arrays (SMA, EMA, RSI, MACD). |
 | Interactive indicator | `docs/skills/interactive-indicator.md` | Indicators with context-menu actions, drag handles, persistent drawing state, per-series configuration/removal, or custom render output (AVWAP). |
 | Drawing tool | `docs/skills/drawing-tool.md` | Interactive overlays the user places and manipulates on-chart via the toolbar (vertical line, Fibonacci retracement), with `DrawingStore`-backed persistence (`AxisPolicy` per timeframe/session axis). |
+| Data provider | `docs/skills/data-provider.md` | Project data sources with declarative capabilities, connection settings, and an offline conformance test. |
 
 Agent-specific skill directories (`.codex/skills`, `.claude/skills`,
 `.gemini/skills`, and `.grok/skills`) contain forwarding files that point to
 the canonical docs above.
 
-Read the appropriate skill file before starting any indicator or tool work.
+Read the appropriate skill file before starting any indicator, tool, or
+data provider work.
 Before editing code, produce the spec requested by that skill file and
 wait for approval.

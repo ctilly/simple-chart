@@ -28,7 +28,9 @@ Grouping strategy:
 
 from datetime import date, datetime, timedelta
 
-from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
+from data.models import (
+    Bar, Level1Quote, MarketSnapshot, NewsArticle, SymbolMatch, SymbolProfile, Timeframe,
+)
 from data.provider.base import DataProvider, UnsupportedTimeframeError
 from data.session import (
     bucket_start as _bucket_start,
@@ -102,6 +104,15 @@ class Aggregator:
 
     def fetch_company_name(self, symbol: str) -> str | None:
         return self._provider.fetch_company_name(symbol)
+
+    def fetch_profile(self, symbol: str) -> SymbolProfile | None:
+        return self._provider.fetch_profile(symbol)
+
+    def fetch_news(self, symbol: str) -> tuple[NewsArticle, ...] | None:
+        return self._provider.fetch_news(symbol)
+
+    def search_symbols(self, query: str) -> tuple[SymbolMatch, ...]:
+        return self._provider.search_symbols(query)
 
     def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
         return self._provider.fetch_upcoming_earnings(symbol)

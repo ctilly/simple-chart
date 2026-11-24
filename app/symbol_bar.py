@@ -29,8 +29,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app.symbol_search import SymbolSearch
-from data.models import Timeframe
-from data.provider.symbol_search import SymbolMatch
+from data.models import SymbolMatch, Timeframe
+from data.provider.routing import CapabilityRouter
 
 
 # Display labels for each timeframe button, in the order they appear.
@@ -92,12 +92,12 @@ class SymbolBar(QWidget):
     settings_requested: pyqtSignal = pyqtSignal()
     search_idle: pyqtSignal = pyqtSignal()
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, router: CapabilityRouter, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._active_timeframe: Timeframe = Timeframe.DAILY
         self._tf_buttons: dict[Timeframe, QPushButton] = {}
         self._build()
-        self._search = SymbolSearch(self)
+        self._search = SymbolSearch(router, self)
         self._search.results.connect(self._show_search_results)
         self._search.idle.connect(self.search_idle.emit)
         self._result_model = QStandardItemModel(self)
@@ -160,8 +160,8 @@ class SymbolBar(QWidget):
         self._on_search_edit(first_character)
 
     @property
-    def search_busy(self) -> bool:
-        return self._search.busy
+    def search(self) -> SymbolSearch:
+        return self._search
 
     def stop_search(self) -> None:
         self._search.cancel()

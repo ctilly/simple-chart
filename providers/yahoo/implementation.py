@@ -1,5 +1,5 @@
 """
-data/provider/yfinance_provider.py
+providers/yahoo/implementation.py
 
 yfinance implementation of DataProvider. Used during development and testing
 in place of a paid Alpaca subscription.
@@ -12,15 +12,15 @@ Intraday history limits (Yahoo Finance):
   - 5m, 15m, 30m: ~60 days back
   - These limits are fine for development; production will use Alpaca.
 
-Note: the file is named yfinance_provider.py (not yfinance.py) to avoid
-shadowing the yfinance package on import.
 """
 
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from numbers import Real
 from typing import Any, Never, cast
+from urllib.parse import urlsplit
 
 import pandas as pd
 import yfinance as yf
@@ -28,9 +28,19 @@ from curl_cffi.requests import exceptions as curl_exceptions
 from yfinance.exceptions import YFPricesMissingError, YFRateLimitError
 
 from data.errors import describe, http_status
-from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
+from data.models import (
+    Bar,
+    Holding,
+    Level1Quote,
+    MarketSnapshot,
+    NewsArticle,
+    SymbolMatch,
+    SymbolProfile,
+    Timeframe,
+)
 from data.timestamps import ms_to_datetime
 from data.provider.base import (
+    MissingMarketDataSnapshotError,
     DataProvider,
     HistoryUnavailableError,
     ProviderRateLimitedError,
@@ -138,6 +148,10 @@ class YFinanceProvider(DataProvider):
         snapshots.update(_fetch_fast_info_snapshots(missing))
         return snapshots
 
+    def check_connection(self) -> None:
+        if self.fetch_level1("SPY") is None:
+            raise MissingMarketDataSnapshotError()
+
     def fetch_level1(self, symbol: str) -> Level1Quote | None:
         normalized = symbol.strip().upper()
         if not normalized:
@@ -153,6 +167,100 @@ class YFinanceProvider(DataProvider):
     def fetch_company_name(self, symbol: str) -> str | None:
         quote = self.fetch_level1(symbol)
         return None if quote is None else quote.company_name
+
+    def fetch_profile(self, symbol: str) -> SymbolProfile | None:
+        ticker = yf.Ticker(symbol)
+        try:
+            info = ticker.get_info()
+        except Exception as exc:
+            _LOGGER.debug("Yahoo profile request failed: %s", describe(exc))
+            return None
+        if not isinstance(info, dict) or not info:
+            return None
+        name = _text(info.get("longName")) or _text(info.get("shortName"))
+        description = _text(info.get("longBusinessSummary"))
+        if info.get("quoteType") != "ETF":
+            shares = _number(info.get("floatShares"))
+            return SymbolProfile(name, description, int(shares) if shares is not None else None)
+
+        issuer = _text(info.get("fundFamily"))
+        benchmark = _text(info.get("benchmark"))
+        expense_ratio = None
+        holdings: list[Holding] = []
+        try:
+            fund = ticker.funds_data
+            description = _text(fund.description) or description
+            issuer = _text(fund.fund_overview.get("family")) or issuer
+            operations = fund.fund_operations
+            if "Annual Report Expense Ratio" in operations.index and symbol in operations:
+                expense_ratio = _number(operations.at["Annual Report Expense Ratio", symbol])
+            for holding_symbol, row in fund.top_holdings.iterrows():
+                ticker_name = _text(holding_symbol)
+                weight = _number(row.get("Holding Percent"))
+                if ticker_name is not None and weight is not None:
+                    holdings.append(Holding(ticker_name, _text(row.get("Name")) or ticker_name, weight))
+        except Exception as exc:
+            _LOGGER.debug("Yahoo fund profile request failed: %s", describe(exc))
+
+        if symbol == "QQQ":
+            benchmark = benchmark or "Nasdaq-100"
+        return SymbolProfile(
+            name=name, description=description, is_etf=True, issuer=issuer,
+            benchmark=benchmark, management_fee=_number(info.get("managementFee")),
+            expense_ratio=expense_ratio,
+            holdings=tuple(sorted(holdings, key=lambda holding: holding.weight, reverse=True)[:20]),
+        )
+
+    def fetch_news(self, symbol: str) -> tuple[NewsArticle, ...] | None:
+        try:
+            stories = yf.Ticker(symbol).get_news(count=10)
+        except Exception as exc:
+            _LOGGER.debug("Yahoo news request failed: %s", describe(exc))
+            return None
+        if not isinstance(stories, list):
+            return None
+        articles: list[NewsArticle] = []
+        for story in stories:
+            content = story.get("content") if isinstance(story, dict) else None
+            if not isinstance(content, dict) or (headline := _text(content.get("title"))) is None:
+                continue
+            provider = content.get("provider")
+            publisher = _text(provider.get("displayName")) if isinstance(provider, dict) else None
+            url = None
+            for key in ("canonicalUrl", "clickThroughUrl"):
+                link = content.get(key)
+                url = _web_url(link.get("url")) if isinstance(link, dict) else None
+                if url is not None:
+                    break
+            articles.append(NewsArticle(headline, publisher, _published(content.get("pubDate")), url))
+        articles.sort(key=lambda item: item.published.timestamp() if item.published else float("-inf"), reverse=True)
+        return tuple(articles[:10])
+
+    def search_symbols(self, query: str) -> tuple[SymbolMatch, ...]:
+        try:
+            quotes = yf.Search(
+                query, max_results=8, news_count=0, lists_count=0,
+                include_cb=False, recommended=0, timeout=5,
+            ).quotes
+        except Exception as exc:
+            _LOGGER.debug("Yahoo symbol search failed: %s", describe(exc))
+            return ()
+
+        matches: dict[str, SymbolMatch] = {}
+        for quote in quotes:
+            if not isinstance(quote, dict):
+                continue
+            symbol = quote.get("symbol")
+            if not isinstance(symbol, str) or not symbol.strip():
+                continue
+            name = quote.get("longname") or quote.get("shortname")
+            exchange = quote.get("exchDisp") or quote.get("exchange")
+            matches.setdefault(symbol, SymbolMatch(
+                symbol,
+                name if isinstance(name, str) else "",
+                exchange if isinstance(exchange, str) else "",
+            ))
+        return tuple(matches.values())
 
     def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date] | None:
         normalized = symbol.strip().upper()
@@ -228,6 +336,40 @@ class YFinanceProvider(DataProvider):
 # ------------------------------------------------------------------
 # Private helpers
 # ------------------------------------------------------------------
+
+
+def _text(value: object) -> str | None:
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
+
+
+def _web_url(value: object) -> str | None:
+    url = _text(value)
+    if url is None:
+        return None
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme in {"http", "https"} and parsed.hostname and parsed.username is None:
+            return url
+    except ValueError:
+        pass
+    return None
+
+
+def _published(value: object) -> datetime | None:
+    if isinstance(value, str):
+        try:
+            moment = datetime.fromisoformat(value)
+            if moment.tzinfo is not None:
+                return moment.astimezone(UTC)
+        except (OverflowError, ValueError):
+            pass
+    return None
 
 
 def _raise_request_error(error: Exception, display_name: str) -> Never:

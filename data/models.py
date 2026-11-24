@@ -178,6 +178,42 @@ class AssetReference:
     symbol: str
     company_name: str
     refreshed_at: datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class Holding:
+    symbol: str
+    name: str
+    weight: float
+
+
+@dataclass(frozen=True)
+class SymbolProfile:
+    name: str | None = None
+    description: str | None = None
+    float_shares: int | None = None
+    is_etf: bool = False
+    issuer: str | None = None
+    benchmark: str | None = None
+    management_fee: float | None = None
+    expense_ratio: float | None = None
+    holdings: tuple[Holding, ...] = ()
+
+
+@dataclass(frozen=True)
+class NewsArticle:
+    headline: str
+    publisher: str | None
+    published: datetime | None  # Timezone-aware UTC, if known.
+    url: str | None
+
+
+@dataclass(frozen=True)
+class SymbolMatch:
+    symbol: str
+    name: str
+    exchange: str
 
 
 @dataclass(frozen=True)

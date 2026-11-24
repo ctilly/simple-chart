@@ -12,17 +12,20 @@ session open, Monday 2026-08-17 09:30 ET. The cache was filled from
 2026-08-03, before that limit; the bars before B are kept by the refresh.
 """
 
+import logging
 import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, cast
 from zoneinfo import ZoneInfo
 
 import finplot as fplt
+import pyqtgraph as pg
 import pytest
-from PyQt6.QtCore import QDate, QPoint, Qt
+import yfinance as yf
+from PyQt6.QtCore import QDate, QPoint, Qt, QThread
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -33,35 +36,36 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QTableWidget,
 )
+from pytestqt.qtbot import QtBot
 
 import app.controller as controller_module
 import app.data_quality as data_quality_module
 import app.extension_runtime as extension_runtime_module
 import app.market_status_bar as market_status_bar_module
 import app.symbol_details as symbol_details_module
-import app.symbol_search as symbol_search_module
-from data.provider.symbol_details import Holding, NewsArticle, SymbolProfile
-from data.provider.symbol_search import SymbolMatch
 from app.application_settings import ApplicationSettingsDialog
 from app.controller import MainWindow
 from app.watchlist import SymbolListWidget
 from chart.window import ChartWidget
 from app.data_quality import DataQualityTab
+from data.provider.registry import ProviderRegistry
 from data.aggregator import Aggregator
 from data.cache import Cache
-from data.models import Bar, BarCorrection, Level1Quote, MarketSnapshot, Timeframe
+from data.models import (
+    Bar, BarCorrection, Holding, Level1Quote, MarketSnapshot, NewsArticle,
+    SymbolMatch, SymbolProfile, Timeframe,
+)
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.config import ProviderConnection
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
 from data.session import is_regular_session_timestamp
 from data.provider.credentials import (
     CredentialStoreAccess,
     UnavailableCredentialStore,
 )
+from provider_support import startup_registry
 
 ET = ZoneInfo("America/New_York")
 _SYMBOL = "XBI"
@@ -328,7 +332,7 @@ def _seed(
     )
     seed_start = datetime.combine(_SEED_START, time(0), tzinfo=ET)
     seed_end = datetime.combine(last_session + timedelta(days=1), time(0), tzinfo=ET)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         base_bars = [
             Bar(
                 bar.timestamp,
@@ -405,7 +409,7 @@ def _cached_rows(
     namespace: str = _YAHOO,
     symbol: str = _SYMBOL,
 ) -> list[Row]:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         return _rows(cache.get_raw_bars(namespace, symbol, timeframe, 0, 2**62))
 
 
@@ -415,7 +419,7 @@ def _coverage(
     namespace: str = _YAHOO,
     symbol: str = _SYMBOL,
 ) -> tuple[int, int] | None:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         return cache.get_bar_fetch_coverage(namespace, symbol, timeframe)
 
 
@@ -513,37 +517,42 @@ def _assert_truthful_coverage(
 
 
 def _window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     provider: _SourceProvider,
     active_connection_id: str = YFINANCE_CONNECTION_ID,
+    *,
+    reference_provider: DataProvider | None = None,
 ) -> tuple[MainWindow, list[str]]:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=provider_registry) as cache:
         cache.set_active_provider_connection_id(active_connection_id)
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
     monkeypatch.setattr(
         controller_module,
         "_provider_availability_by_name",
-        lambda connections, _access: {
+        lambda connections, _access, _registry: {
             connection.provider_name: ProviderAvailability(True, None)
             for connection in connections
         },
     )
 
     def create_provider(
-        _connection: ProviderConnection,
+        connection: ProviderConnection,
         _store: object,
     ) -> DataProvider:
+        if reference_provider is not None and connection.connection_id == YFINANCE_CONNECTION_ID:
+            return reference_provider
         return provider
 
-    monkeypatch.setattr(controller_module, "create_provider", create_provider)
+    monkeypatch.setattr(controller_module.ProviderRegistry, "create_provider", staticmethod(create_provider))
     monkeypatch.setattr(_FixedDateTime, "frozen", _NOW)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
     monkeypatch.setattr(extension_runtime_module, "datetime", _FixedDateTime)
@@ -562,7 +571,7 @@ def _window(
     # Older history loads on its own when a short test chart's view is near
     # its oldest bar; tests/test_older_history.py covers that path.
     monkeypatch.setattr(ChartWidget, "older_history_bars_wanted", lambda _chart: 0)
-    window = MainWindow(str(db_path))
+    window = MainWindow(str(db_path), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window, warnings
@@ -636,6 +645,7 @@ def _record_rewinds(
 @_BASES
 @_SHAPES
 def test_rewind_boundaries_are_the_history_starts_and_remove_all_coverage(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -645,7 +655,7 @@ def test_rewind_boundaries_are_the_history_starts_and_remove_all_coverage(
     db_path = tmp_path / "test.db"
     _seed(db_path, base, natives=(Timeframe.MIN15, Timeframe.MIN30))
     provider = _SourceProvider(base, paged)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN39)
     rewinds = _record_rewinds(window, monkeypatch)
     coverage_at_refill: list[dict[Timeframe, tuple[int, int] | None]] = []
@@ -691,12 +701,13 @@ def test_rewind_boundaries_are_the_history_starts_and_remove_all_coverage(
 
 
 def test_plan_describes_the_ranges_at_planning_time(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, _warnings = _window(qtbot, tmp_path / "test.db", monkeypatch, provider)
+    window, _warnings = _window(provider_registry, qtbot, tmp_path / "test.db", monkeypatch, provider)
 
     plan = window.plan_symbol_refresh(_YAHOO, _SYMBOL)
 
@@ -716,6 +727,7 @@ def test_plan_describes_the_ranges_at_planning_time(
 @_BASES
 @_TARGETS
 def test_refill_keeps_one_complete_bar_per_period(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -726,7 +738,7 @@ def test_refill_keeps_one_complete_bar_per_period(
     db_path = tmp_path / "test.db"
     _seed(db_path, base)
     provider = _SourceProvider(base, paged)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, target)
     assert provider.calls == []
     assert any(row[5] >= _BAD_VOLUME for row in _cached_rows(db_path, target))
@@ -760,6 +772,7 @@ def test_refill_keeps_one_complete_bar_per_period(
 @_BASES
 @_TARGETS
 def test_refill_that_fails_partway_leaves_a_gap_the_next_load_fills(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -769,7 +782,7 @@ def test_refill_that_fails_partway_leaves_a_gap_the_next_load_fills(
     db_path = tmp_path / "test.db"
     _seed(db_path, base)
     provider = _SourceProvider(base, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, target)
     recent_start = controller_module._recent_history_start(
         target, _HISTORY_START, _NOW,
@@ -843,7 +856,7 @@ def _stale_target_coverage(db_path: Path, target: Timeframe, retained: str) -> N
             connection.close()
         return
     seed_start = datetime.combine(_SEED_START, time(0), tzinfo=ET)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         last_viewed = datetime(2026, 8, 11, 13, 0, tzinfo=ET)
         stale = cache.get_raw_bars(_YAHOO, _SYMBOL, target, 0, _ms(last_viewed))
         forming_start = stale[-1].timestamp
@@ -872,6 +885,7 @@ def _stale_target_coverage(db_path: Path, target: Timeframe, retained: str) -> N
 @_TARGETS
 @pytest.mark.parametrize("retained", ["absent", "ends-before"])
 def test_refresh_with_absent_or_stale_target_coverage_keeps_one_bar_per_period(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -884,7 +898,7 @@ def test_refresh_with_absent_or_stale_target_coverage_keeps_one_bar_per_period(
     _stale_target_coverage(db_path, target, retained)
     kept = [row for row in _cached_rows(db_path, target) if row[0] < _BOUNDARY]
     provider = _SourceProvider(Timeframe.MIN5, paged)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     window._state.symbol = _SYMBOL
     window._state.timeframe = target
     rebuilt = [
@@ -914,6 +928,7 @@ def test_refresh_with_absent_or_stale_target_coverage_keeps_one_bar_per_period(
 
 
 def test_weekly_and_daily_refill_restores_the_boundary_bars(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -921,7 +936,7 @@ def test_weekly_and_daily_refill_restores_the_boundary_bars(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.WEEKLY)
 
     _refresh_and_reload(qtbot, window)
@@ -949,6 +964,7 @@ def test_weekly_and_daily_refill_restores_the_boundary_bars(
     "timeframe", [Timeframe.MIN5, Timeframe.MIN39], ids=["5m", "39m"],
 )
 def test_paged_refill_renders_the_recent_window_before_older_history(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -957,7 +973,7 @@ def test_paged_refill_renders_the_recent_window_before_older_history(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, timeframe)
     recent_start = controller_module._recent_history_start(
         timeframe, _HISTORY_START, _NOW,
@@ -1013,6 +1029,7 @@ def test_paged_refill_renders_the_recent_window_before_older_history(
 
 
 def test_refresh_on_5m_reloads_only_5m_and_daily_then_15m_loads_cold(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1020,7 +1037,7 @@ def test_refresh_on_5m_reloads_only_5m_and_daily_then_15m_loads_cold(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, natives=(Timeframe.MIN15,))
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     assert provider.calls == []
 
@@ -1054,6 +1071,7 @@ def test_refresh_on_5m_reloads_only_5m_and_daily_then_15m_loads_cold(
 
 @pytest.mark.parametrize("case", ["other-symbol", "inactive-source"])
 def test_refresh_of_data_not_on_screen_rewinds_without_reloading(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1071,7 +1089,7 @@ def test_refresh_of_data_not_on_screen_rewinds_without_reloading(
         _seed(db_path, Timeframe.MIN5)
         _seed(db_path, Timeframe.MIN5, namespace=_ALPACA)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider, active)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider, active)
     _show(qtbot, window, Timeframe.MIN5)
     shown = window._current_chart_request
     on_screen_namespace = window._route_for_symbol(_SYMBOL).cache_namespace
@@ -1159,6 +1177,7 @@ def _hold_tail_requests(
 
 
 def test_running_load_drains_before_rewind_and_pending_load_waits(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1166,7 +1185,7 @@ def test_running_load_drains_before_rewind_and_pending_load_waits(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, last_session=date(2026, 10, 22))
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     rewinds, starts = _instrument_rewind_and_starts(window, monkeypatch)
     gate = _Gate()
     _hold_tail_requests(provider, {Timeframe.MIN5: gate})
@@ -1202,6 +1221,7 @@ def test_running_load_drains_before_rewind_and_pending_load_waits(
 
 
 def test_pending_load_waits_when_one_of_two_draining_loads_finishes(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1214,7 +1234,7 @@ def test_pending_load_waits_when_one_of_two_draining_loads_finishes(
         natives=(Timeframe.MIN15,),
     )
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     rewinds, starts = _instrument_rewind_and_starts(window, monkeypatch)
     gates = {Timeframe.MIN5: _Gate(), Timeframe.MIN15: _Gate()}
     _hold_tail_requests(provider, gates)
@@ -1295,6 +1315,7 @@ def _assert_refill_reached(
     "timeframe", [Timeframe.MIN5, Timeframe.MIN39], ids=["5m", "39m"],
 )
 def test_confirm_before_cutoff_then_rewind_and_reload_after_it(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1304,7 +1325,7 @@ def test_confirm_before_cutoff_then_rewind_and_reload_after_it(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, last_session=date(2026, 10, 22))
     provider = _SourceProvider(Timeframe.MIN5, paged, _CROSSING_LIMIT)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     monkeypatch.setattr(_FixedDateTime, "frozen", _BEFORE_CROSSING)
     rewinds = _record_rewinds(window, monkeypatch)
     gate = _Gate()
@@ -1340,6 +1361,7 @@ def test_confirm_before_cutoff_then_rewind_and_reload_after_it(
     "timeframe", [Timeframe.MIN5, Timeframe.MIN39], ids=["5m", "39m"],
 )
 def test_rewind_before_cutoff_then_reload_worker_after_it(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1349,7 +1371,7 @@ def test_rewind_before_cutoff_then_reload_worker_after_it(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged, _CROSSING_LIMIT)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     monkeypatch.setattr(_FixedDateTime, "frozen", _BEFORE_CROSSING)
     _show(qtbot, window, timeframe)
     rewinds = _record_rewinds(window, monkeypatch)
@@ -1456,7 +1478,7 @@ def _correct_volume(
     timeframe: Timeframe,
     timestamp: datetime,
 ) -> None:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bar_correction(
             BarCorrection(namespace, _SYMBOL, timeframe, timestamp, volume=4_321)
         )
@@ -1492,6 +1514,7 @@ def _expected_message(source: str, days: int, limited: bool) -> str:
     ],
 )
 def test_cancelled_confirmation_shows_computed_ranges_and_changes_nothing(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1514,7 +1537,7 @@ def test_cancelled_confirmation_shows_computed_ranges_and_changes_nothing(
     ):
         _correct_volume(db_path, namespace, timeframe, timestamp)
     provider = _SourceProvider(Timeframe.MIN5, paged=False, intraday_limit=limit)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider, active)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider, active)
     _show(qtbot, window, Timeframe.MIN5)
     shown = window._current_chart_request
     provider.calls.clear()
@@ -1540,6 +1563,7 @@ def test_cancelled_confirmation_shows_computed_ranges_and_changes_nothing(
 
 
 def test_confirmed_refresh_runs_while_settings_is_open_and_keeps_corrections(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1557,7 +1581,7 @@ def test_confirmed_refresh_runs_while_settings_is_open_and_keeps_corrections(
         db_path, _YAHOO, Timeframe.MIN5, datetime(2026, 8, 13, 11, 0, tzinfo=ET),
     )
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     shown = window._current_chart_request
     corrections_before = _all_rows(db_path)["bar_corrections"]
@@ -1606,6 +1630,7 @@ def test_confirmed_refresh_runs_while_settings_is_open_and_keeps_corrections(
 
 
 def test_settings_reopened_before_the_rewind_drops_its_pre_refresh_rows(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1613,7 +1638,7 @@ def test_settings_reopened_before_the_rewind_drops_its_pre_refresh_rows(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, last_session=date(2026, 10, 22))
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     gate = _Gate()
     _hold_tail_requests(provider, {Timeframe.MIN5: gate})
     window._state.symbol = _SYMBOL
@@ -1669,7 +1694,7 @@ def test_settings_reopened_before_the_rewind_drops_its_pre_refresh_rows(
         "rows_after_rewind": 0,
         "apply_after_rewind": False,
     }
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=provider_registry) as cache:
         inspection = cache.get_bar_inspection(_YAHOO, _SYMBOL, Timeframe.MIN5, bad_bar)
     assert inspection is not None
     assert _rows([inspection.raw_bar]) == _rows(
@@ -1781,6 +1806,7 @@ def _hold_older_history(provider: _SourceProvider) -> threading.Event:
 
 
 def test_status_shows_refreshing_until_the_on_screen_reload_completes(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1788,7 +1814,7 @@ def test_status_shows_refreshing_until_the_on_screen_reload_completes(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     tab = _status_tab(qtbot, window)
     seen = _record_status(window, tab)
@@ -1815,6 +1841,7 @@ def test_status_shows_refreshing_until_the_on_screen_reload_completes(
 
 
 def test_status_waits_for_the_drain_and_a_tab_opened_meanwhile_shows_it(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1822,7 +1849,7 @@ def test_status_waits_for_the_drain_and_a_tab_opened_meanwhile_shows_it(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, last_session=date(2026, 10, 22))
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     gate = _Gate()
     _hold_tail_requests(provider, {Timeframe.MIN5: gate})
     window._state.symbol = _SYMBOL
@@ -1855,6 +1882,7 @@ def test_status_waits_for_the_drain_and_a_tab_opened_meanwhile_shows_it(
 
 
 def test_status_of_a_symbol_not_on_screen_is_refreshed_right_after_the_rewind(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1863,7 +1891,7 @@ def test_status_of_a_symbol_not_on_screen_is_refreshed_right_after_the_rewind(
     _seed(db_path, Timeframe.MIN5, symbol=_OTHER_SYMBOL)
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     shown = window._current_chart_request
     tab = _status_tab(qtbot, window, _OTHER_SYMBOL)
@@ -1885,6 +1913,7 @@ _CREDENTIAL_MARKER = "PKSYNTHETICSECRET0123"
 
 @pytest.mark.parametrize("paged", [True, False], ids=["after-recent", "whole-load"])
 def test_status_of_a_failed_reload_never_shows_the_error_text(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1893,7 +1922,7 @@ def test_status_of_a_failed_reload_never_shows_the_error_text(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=paged)
-    window, _warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, _warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     tab = _status_tab(qtbot, window)
     seen = _record_status(window, tab)
@@ -1926,6 +1955,7 @@ def test_status_of_a_failed_reload_never_shows_the_error_text(
 
 
 def test_status_of_a_superseded_reload_says_it_downloads_when_opened(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1933,7 +1963,7 @@ def test_status_of_a_superseded_reload_says_it_downloads_when_opened(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     _show(qtbot, window, Timeframe.MIN5)
     tab = _status_tab(qtbot, window)
     seen = _record_status(window, tab)
@@ -1961,6 +1991,7 @@ def test_status_of_a_superseded_reload_says_it_downloads_when_opened(
 
 @pytest.mark.parametrize("stage", ["before-dispatch", "during-refill", "during-drain"])
 def test_shutdown_leaves_no_refresh_running(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1972,7 +2003,7 @@ def test_shutdown_leaves_no_refresh_running(
     else:
         _seed(db_path, Timeframe.MIN5)
     provider = _SourceProvider(Timeframe.MIN5, paged=True)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     gate = _Gate()
     release = threading.Event()
     if stage == "during-drain":
@@ -2013,6 +2044,7 @@ def test_shutdown_leaves_no_refresh_running(
 
 @pytest.mark.parametrize("path", ["immediate", "after-drain"])
 def test_rewind_error_stops_the_refresh_and_lifts_the_barrier(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2021,7 +2053,7 @@ def test_rewind_error_stops_the_refresh_and_lifts_the_barrier(
     db_path = tmp_path / "test.db"
     _seed(db_path, Timeframe.MIN5, last_session=date(2026, 10, 22))
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider)
     gate = _Gate()
     if path == "after-drain":
         _hold_tail_requests(provider, {Timeframe.MIN5: gate})
@@ -2074,10 +2106,11 @@ def test_rewind_error_stops_the_refresh_and_lifts_the_barrier(
 
 
 def test_symbol_box_search_selects_a_listing_and_keeps_direct_ticker_entry(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "symbol-search.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "symbol-search.db", monkeypatch, provider)
     first_started = threading.Event()
     release_first = threading.Event()
     queries: list[str] = []
@@ -2093,7 +2126,7 @@ def test_symbol_box_search_selects_a_listing_and_keeps_direct_ticker_entry(
             SymbolMatch("9988.HK", "Alibaba Group", "Hong Kong"),
         )
 
-    monkeypatch.setattr(symbol_search_module, "search_symbols", search)
+    monkeypatch.setattr(provider, "search_symbols", search)
     window.show()
     _show(qtbot, window, Timeframe.DAILY)
     bar = window._symbol_bar
@@ -2173,11 +2206,62 @@ def test_symbol_box_search_selects_a_listing_and_keeps_direct_ticker_entry(
         qtbot.waitUntil(lambda: window._close_finalized)
 
 
+_SYNTHETIC_FETCH_ERROR = "synthetic reference fetch failure"
+
+
+def _assert_fetch_failure_logged(caplog: pytest.LogCaptureFixture) -> None:
+    record, = caplog.records
+    assert record.levelno == logging.ERROR
+    assert "RuntimeError" in record.getMessage()
+    assert _SYNTHETIC_FETCH_ERROR not in record.getMessage()
+    assert record.exc_info is None
+
+
+def test_symbol_search_fetch_failure_keeps_main_window_running(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def search(_query: str) -> tuple[SymbolMatch, ...]:
+        raise RuntimeError(_SYNTHETIC_FETCH_ERROR)
+
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    monkeypatch.setattr(provider, "search_symbols", search)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "search-failure.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    bar = window._symbol_bar
+    field = bar.findChild(QLineEdit, "symbolInput")
+    assert field is not None
+    field.setFocus()
+    qtbot.waitUntil(field.hasSelectedText)
+    popup = bar._completer.popup()
+    assert popup is not None
+    caplog.clear()
+
+    with qtbot.captureExceptions() as escaped:
+        try:
+            with qtbot.waitSignal(bar.search_idle, timeout=5_000):
+                qtbot.keyClicks(field, "Failure")  # type: ignore[no-untyped-call]
+            assert window.isVisible() and not window._close_finalized
+            assert not popup.isVisible()
+            assert bar._result_model.rowCount() == 0
+        finally:
+            window.close()
+            qtbot.waitUntil(lambda: window._close_finalized, timeout=5_000)
+
+    assert escaped == []
+    _assert_fetch_failure_logged(caplog)
+
+
 def test_typing_on_plot_reuses_symbol_field_and_loads_once(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "chart-typing.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "chart-typing.db", monkeypatch, provider)
     window.show()
     _show(qtbot, window, Timeframe.DAILY)
     plot = window._chart._master
@@ -2211,10 +2295,11 @@ def test_typing_on_plot_reuses_symbol_field_and_loads_once(
 
 
 def test_watchlist_arrow_keys_load_the_selected_chart(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "watchlist.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "watchlist.db", monkeypatch, provider)
     symbols = window._watchlist.findChild(SymbolListWidget)
     assert symbols is not None
     for symbol in (_SYMBOL, _OTHER_SYMBOL):
@@ -2236,10 +2321,11 @@ def test_watchlist_arrow_keys_load_the_selected_chart(
 
 
 def test_symbol_details_retargets_without_showing_late_news(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "details.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "details.db", monkeypatch, provider)
     slow_news = threading.Event()
     release_news = threading.Event()
 
@@ -2258,8 +2344,8 @@ def test_symbol_details_retargets_without_showing_late_news(
             )
         return SymbolProfile(name="Test stock", float_shares=1234)
 
-    monkeypatch.setattr(symbol_details_module, "fetch_news", news)
-    monkeypatch.setattr(symbol_details_module, "fetch_profile", profile)
+    monkeypatch.setattr(provider, "fetch_news", news)
+    monkeypatch.setattr(provider, "fetch_profile", profile)
     window.show()
     _show(qtbot, window, Timeframe.DAILY)
     banner = window._app_header.findChild(QLabel, "level1Quote")
@@ -2314,11 +2400,104 @@ def test_symbol_details_retargets_without_showing_late_news(
         qtbot.waitUntil(lambda: window._close_finalized)
 
 
+def _open_symbol_details(window: MainWindow) -> symbol_details_module.SymbolDetailsDialog:
+    banner = window._app_header.findChild(QLabel, "level1Quote")
+    assert banner is not None
+    assert 'href="symbol-details"' in banner.text()
+    banner.linkActivated.emit("symbol-details")
+    dialog = window._symbol_details.dialog
+    assert dialog is not None
+    return dialog
+
+
+@pytest.mark.parametrize("section", ["profile", "news"])
+def test_symbol_details_fetch_failure_keeps_main_window_running(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    section: str,
+) -> None:
+    def no_data(_symbol: str) -> None:
+        return None
+
+    def fail(_symbol: str) -> None:
+        raise RuntimeError(_SYNTHETIC_FETCH_ERROR)
+
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    monkeypatch.setattr(
+        provider, "fetch_profile", fail if section == "profile" else no_data,
+    )
+    monkeypatch.setattr(
+        provider, "fetch_news", fail if section == "news" else no_data,
+    )
+    window, _ = _window(provider_registry, qtbot, tmp_path / "details-failure.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+    caplog.clear()
+
+    with qtbot.captureExceptions() as escaped:
+        try:
+            dialog = _open_symbol_details(window)
+            qtbot.waitUntil(lambda: not window._symbol_details.busy, timeout=5_000)
+            assert window.isVisible() and not window._close_finalized
+            assert dialog.isVisible()
+            panel = dialog._profile if section == "profile" else dialog._news
+            text = panel.toPlainText()
+        finally:
+            window.close()
+            qtbot.waitUntil(lambda: window._close_finalized, timeout=5_000)
+
+    assert escaped == []
+    assert text == f"Yahoo Finance {section} unavailable."
+    _assert_fetch_failure_logged(caplog)
+
+
+def test_symbol_details_news_renders_market_time_and_omits_invalid_time(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def news(_symbol: str) -> tuple[NewsArticle, ...]:
+        return (
+            NewsArticle(
+                "Current headline", "Publisher", datetime(2026, 8, 14, 1, 30, tzinfo=UTC), None,
+            ),
+            NewsArticle("Year-one headline", "Archive", datetime(1, 1, 1, tzinfo=UTC), None),
+        )
+
+    def profile(_symbol: str) -> None:
+        return None
+
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    monkeypatch.setattr(provider, "fetch_news", news)
+    monkeypatch.setattr(provider, "fetch_profile", profile)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "news-timestamps.db", monkeypatch, provider)
+    window.show()
+    _show(qtbot, window, Timeframe.DAILY)
+
+    with qtbot.captureExceptions() as escaped:
+        try:
+            dialog = _open_symbol_details(window)
+            qtbot.waitUntil(lambda: not window._symbol_details.busy, timeout=5_000)
+            lines = dialog._news.toPlainText().splitlines()
+        finally:
+            window.close()
+            qtbot.waitUntil(lambda: window._close_finalized, timeout=5_000)
+
+    assert escaped == []
+    assert lines == [
+        "Current headline", "Publisher · Aug 13, 2026 · 21:30 ET",
+        "Year-one headline", "Archive",
+    ]
+
+
 def test_chart_event_settings_persist_and_update_markers_independently(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "events.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "events.db", monkeypatch, provider)
     window.show()
     _show(qtbot, window, Timeframe.DAILY)
     series = window._current_series
@@ -2346,7 +2525,7 @@ def test_chart_event_settings_persist_and_update_markers_independently(
         monkeypatch.setattr(ApplicationSettingsDialog, "exec", use_settings)
         window._on_application_settings()
         _wait_terminal(qtbot, window)
-        qtbot.waitUntil(lambda: window._earnings_thread is None)
+        qtbot.waitUntil(lambda: not window._earnings.busy)
 
     assert plot.active_marker_keys() == []
     set_options(True, True)
@@ -2371,10 +2550,11 @@ def test_chart_event_settings_persist_and_update_markers_independently(
 
 
 def test_late_historical_event_lookup_cannot_mark_new_symbol(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "event-switch.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "event-switch.db", monkeypatch, provider)
     window.show()
     _show(qtbot, window, Timeframe.DAILY)
     series = window._current_series
@@ -2398,7 +2578,7 @@ def test_late_historical_event_lookup_cannot_mark_new_symbol(
         window._on_symbol_changed(_OTHER_SYMBOL)
         _wait_terminal(qtbot, window)
         release.set()
-        qtbot.waitUntil(lambda: window._earnings_thread is None)
+        qtbot.waitUntil(lambda: not window._earnings.busy)
         assert window._loaded_symbol == _OTHER_SYMBOL
         assert window._chart.plot_manager.active_marker_keys() == []
     finally:
@@ -2406,11 +2586,12 @@ def test_late_historical_event_lookup_cannot_mark_new_symbol(
 
 
 def test_market_clock_stays_visible_during_status_messages(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(market_status_bar_module, "datetime", _FixedDateTime)
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "clock.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "clock.db", monkeypatch, provider)
     window.resize(1200, 800)
     window.show()
     status = window.statusBar()
@@ -2455,6 +2636,7 @@ def test_market_clock_stays_visible_during_status_messages(
 
 
 def test_upcoming_earnings_discards_old_selection_and_drains_on_close(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
@@ -2475,7 +2657,7 @@ def test_upcoming_earnings_discards_old_selection_and_drains_on_close(
         return None
 
     monkeypatch.setattr(provider, "fetch_upcoming_earnings", earnings, raising=False)
-    window, _ = _window(qtbot, tmp_path / "earnings.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings.db", monkeypatch, provider)
     window.show()
     try:
         window._on_symbol_changed("AAPL")
@@ -2505,12 +2687,21 @@ def test_upcoming_earnings_discards_old_selection_and_drains_on_close(
         qtbot.waitUntil(second_started.is_set)
         assert quote_label.text().endswith(">—</span>")
         window._on_timeframe_changed(Timeframe.WEEKLY)
-        assert window._earnings_pending is None
+        _wait_terminal(qtbot, window)
+        second_release.set()
+        qtbot.waitUntil(lambda: not window._earnings.busy)
+        assert calls == ["AAPL", "MSFT"]
+
+        second_started.clear()
+        second_release.clear()
+        window._on_watchlist_symbol_selected("AMZN")
+        qtbot.waitUntil(second_started.is_set)
+        _wait_terminal(qtbot, window)
         window.close()
         assert not window._close_finalized
         second_release.set()
         qtbot.waitUntil(lambda: window._close_finalized)
-        assert calls == ["AAPL", "MSFT"]
+        assert calls == ["AAPL", "MSFT", "AMZN"]
     finally:
         first_release.set()
         second_release.set()
@@ -2521,14 +2712,388 @@ def test_upcoming_earnings_discards_old_selection_and_drains_on_close(
 
 @pytest.mark.parametrize(("days_until", "highlighted"), [(-1, False), (0, True), (5, True), (6, False)])
 def test_upcoming_earnings_highlights_dates_within_five_days(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     days_until: int, highlighted: bool,
 ) -> None:
+    from app import earnings
+
     provider = _SourceProvider(Timeframe.MIN5, paged=False)
-    window, _ = _window(qtbot, tmp_path / "earnings.db", monkeypatch, provider)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings.db", monkeypatch, provider)
     today = _NOW.astimezone(ZoneInfo("America/New_York")).date()
     first = today + timedelta(days=days_until)
-    window._on_earnings_result(window._earnings_generation, (first, first))
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", lambda _symbol: (first, first))
+    monkeypatch.setattr(earnings, "datetime", _FixedDateTime)
+    _show(qtbot, window, Timeframe.DAILY)
     label = window._app_header.findChild(QLabel, "level1Quote")
     assert label is not None
+    expected = f"{first:%b} {first.day}"
+    qtbot.waitUntil(lambda: f">{expected}</span>" in label.text())
     assert ("background-color: #ffdc58" in label.text()) is highlighted
+
+
+@pytest.mark.parametrize("method", [
+    "fetch_upcoming_earnings", "fetch_past_earnings", "fetch_dividend_dates",
+])
+def test_earnings_fetch_failure_keeps_main_window_running(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, method: str,
+) -> None:
+    def fail(_symbol: str) -> None:
+        raise RuntimeError(_SYNTHETIC_FETCH_ERROR)
+
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    event_day = date(2026, 10, 22)
+    upcoming_day = date(2030, 1, 2)
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", lambda _symbol: (upcoming_day, upcoming_day))
+    monkeypatch.setattr(provider, "fetch_past_earnings", lambda _symbol: (event_day,))
+    monkeypatch.setattr(provider, "fetch_dividend_dates", lambda _symbol: (event_day,))
+    monkeypatch.setattr(provider, method, fail)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings-failure.db", monkeypatch, provider)
+    history_enabled = method != "fetch_upcoming_earnings"
+    window._cache.set_chart_event_visibility(history_enabled, history_enabled)
+    window.show()
+    label = window._app_header.findChild(QLabel, "level1Quote")
+    assert label is not None
+    caplog.clear()
+
+    with qtbot.captureExceptions() as escaped:
+        try:
+            _show(qtbot, window, Timeframe.DAILY)
+            qtbot.waitUntil(lambda: bool(escaped or caplog.records), timeout=5_000)
+            assert window.isVisible() and not window._close_finalized
+            if history_enabled:
+                qtbot.waitUntil(lambda: label.text().endswith(">Jan 2</span>"))
+        finally:
+            window.close()
+            qtbot.waitUntil(lambda: window._close_finalized, timeout=5_000)
+
+    assert escaped == []
+    assert window._chart.plot_manager.active_marker_keys() == []
+    expected = "Jan 2" if history_enabled else "—"
+    assert label.text().endswith(f">{expected}</span>")
+    _assert_fetch_failure_logged(caplog)
+
+
+def test_blocked_earnings_history_does_not_delay_new_symbols_upcoming_date(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    old_history = _Gate()
+    new_history = _Gate()
+
+    def upcoming(symbol: str) -> tuple[date, date]:
+        day = date(2030, 1, 2 if symbol == _SYMBOL else 3)
+        return day, day
+
+    def history(symbol: str) -> tuple[date, ...]:
+        gate = old_history if symbol == _SYMBOL else new_history
+        gate.entered.set()
+        gate.release.wait(20)
+        return (date(2026, 10, 22),) if symbol == _SYMBOL else ()
+
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", upcoming)
+    monkeypatch.setattr(provider, "fetch_past_earnings", history)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings-overlap.db", monkeypatch, provider)
+    window._cache.set_chart_event_visibility(True, False)
+    label = window._app_header.findChild(QLabel, "level1Quote")
+    assert label is not None
+    plot = window._chart.plot_manager
+    window.show()
+    try:
+        _show(qtbot, window, Timeframe.DAILY)
+        qtbot.waitUntil(old_history.entered.is_set)
+        qtbot.waitUntil(lambda: label.text().endswith(">Jan 2</span>"))
+        window._on_symbol_changed(_OTHER_SYMBOL)
+        _wait_terminal(qtbot, window)
+        assert window._loaded_symbol == _OTHER_SYMBOL
+        qtbot.waitUntil(lambda: label.text().endswith(">Jan 3</span>"))
+        assert not new_history.entered.is_set()
+        assert plot.active_marker_keys() == []
+
+        old_history.release.set()
+        qtbot.waitUntil(new_history.entered.is_set)
+        assert plot.active_marker_keys() == []
+    finally:
+        old_history.release.set()
+        new_history.release.set()
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_chart_event_settings_make_no_upcoming_earnings_requests(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    upcoming_calls: list[str] = []
+    event_day = date(2026, 10, 22)
+    upcoming_day = date(2030, 1, 2)
+
+    def upcoming(symbol: str) -> tuple[date, date]:
+        upcoming_calls.append(symbol)
+        return upcoming_day, upcoming_day
+
+    def set_options(earnings: bool, dividends: bool) -> None:
+        def accept_settings(dialog: ApplicationSettingsDialog) -> int:
+            for name, enabled in (("showPastEarnings", earnings), ("showDividends", dividends)):
+                checkbox = dialog.findChild(QCheckBox, name)
+                assert checkbox is not None
+                checkbox.setChecked(enabled)
+            dialog.accept()
+            return dialog.result()
+
+        monkeypatch.setattr(ApplicationSettingsDialog, "exec", accept_settings)
+        window._on_application_settings()
+
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", upcoming)
+    monkeypatch.setattr(provider, "fetch_past_earnings", lambda _symbol: (event_day,))
+    monkeypatch.setattr(provider, "fetch_dividend_dates", lambda _symbol: (event_day,))
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings-settings.db", monkeypatch, provider)
+    window.show()
+    label = window._app_header.findChild(QLabel, "level1Quote")
+    assert label is not None
+    plot = window._chart.plot_manager
+
+    def has_marker(text: str) -> bool:
+        return [cast(pg.TextItem, plot._markers[key]).toPlainText() for key in plot.active_marker_keys()] == [text]
+
+    try:
+        _show(qtbot, window, Timeframe.DAILY)
+        qtbot.waitUntil(lambda: label.text().endswith(">Jan 2</span>"))
+        assert upcoming_calls == [_SYMBOL]
+        set_options(True, False)
+        qtbot.waitUntil(lambda: has_marker("E"))
+        set_options(False, True)
+        qtbot.waitUntil(lambda: has_marker("D"))
+        assert label.text().endswith(">Jan 2</span>")
+        assert upcoming_calls == [_SYMBOL]
+    finally:
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_close_dismisses_search_popup_and_waits_for_all_five_jobs(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    gates = {name: _Gate() for name in ("upcoming", "history", "profile", "news", "search")}
+    threads: dict[str, QThread] = {}
+
+    def hold(name: str) -> None:
+        gate = gates[name]
+        thread = QThread.currentThread()
+        assert thread is not None
+        threads[name] = thread
+        gate.entered.set()
+        gate.release.wait(20)
+
+    def assert_all_started() -> None:
+        assert [name for name, gate in gates.items() if not gate.entered.is_set()] == []
+
+    def upcoming(_symbol: str) -> None:
+        hold("upcoming")
+
+    def history(_symbol: str) -> tuple[date, ...]:
+        hold("history")
+        return ()
+
+    def profile(_symbol: str) -> None:
+        hold("profile")
+
+    def news(_symbol: str) -> None:
+        hold("news")
+
+    def search(query: str) -> tuple[SymbolMatch, ...]:
+        if query == "Held":
+            hold("search")
+        return (SymbolMatch("TEST", "Test company", "NYSE"),)
+
+    monkeypatch.setattr(provider, "fetch_upcoming_earnings", upcoming)
+    monkeypatch.setattr(provider, "fetch_past_earnings", history)
+    monkeypatch.setattr(provider, "fetch_profile", profile)
+    monkeypatch.setattr(provider, "fetch_news", news)
+    monkeypatch.setattr(provider, "search_symbols", search)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "all-jobs-close.db", monkeypatch, provider)
+    window._cache.set_chart_event_visibility(True, False)
+    window.show()
+    bar = window._symbol_bar
+    field = bar.findChild(QLineEdit, "symbolInput")
+    popup = bar._completer.popup()
+    assert field is not None and popup is not None
+    try:
+        _show(qtbot, window, Timeframe.DAILY)
+        dialog = _open_symbol_details(window)
+        window.activateWindow()
+        field.setFocus()
+        qtbot.waitUntil(field.hasSelectedText)
+        qtbot.keyClicks(field, "Test")  # type: ignore[no-untyped-call]
+        qtbot.waitUntil(popup.isVisible)
+        # A normal edit clears suggestions. Submit at the search component to keep
+        # the displayed popup open while its next real request is in flight.
+        bar._search.edit("Held")
+        qtbot.waitUntil(assert_all_started)
+
+        assert popup.isVisible() and dialog.isVisible()
+        window.close()
+        assert not popup.isVisible()
+        assert not dialog.isVisible()
+        assert not window._close_finalized
+        for name in ("upcoming", "profile", "news", "search"):
+            with qtbot.waitSignal(threads[name].finished):
+                gates[name].release.set()
+            qtbot.wait(0)
+            assert not window._close_finalized
+        gates["history"].release.set()
+        qtbot.waitUntil(lambda: window._close_finalized)
+    finally:
+        for gate in gates.values():
+            gate.release.set()
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+def test_main_window_has_no_earnings_worker_attributes(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SourceProvider(Timeframe.MIN5, paged=False)
+    window, _ = _window(provider_registry, qtbot, tmp_path / "earnings-state.db", monkeypatch, provider)
+    try:
+        _show(qtbot, window, Timeframe.DAILY)
+        assert [name for name in vars(window) if name.startswith("_earnings_")] == []
+    finally:
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized)
+
+
+class _ReferenceProvider(_SourceProvider):
+    def __init__(self) -> None:
+        super().__init__(Timeframe.MIN5, paged=False)
+        self.reference_calls: list[tuple[str, str]] = []
+
+    def search_symbols(self, query: str) -> tuple[SymbolMatch, ...]:
+        self.reference_calls.append(("search_symbols", query))
+        return (SymbolMatch("XBI", "Reference listing", "NYSE"),)
+
+    def fetch_profile(self, symbol: str) -> SymbolProfile:
+        self.reference_calls.append(("fetch_profile", symbol))
+        return SymbolProfile(description="Reference profile")
+
+    def fetch_news(self, symbol: str) -> tuple[NewsArticle, ...]:
+        self.reference_calls.append(("fetch_news", symbol))
+        return (
+            NewsArticle(
+                "Reference headline", "Publisher", datetime(2026, 8, 14, 1, 30, tzinfo=UTC), None,
+            ),
+            NewsArticle("Year-one headline", "Archive", datetime(1, 1, 1, tzinfo=UTC), None),
+        )
+
+    def fetch_upcoming_earnings(self, symbol: str) -> tuple[date, date]:
+        self.reference_calls.append(("fetch_upcoming_earnings", symbol))
+        return date(2026, 10, 26), date(2026, 10, 26)
+
+    def fetch_past_earnings(self, symbol: str) -> tuple[date, ...]:
+        self.reference_calls.append(("fetch_past_earnings", symbol))
+        return (_LAST_SESSION,)
+
+    def fetch_dividend_dates(self, symbol: str) -> tuple[date, ...]:
+        self.reference_calls.append(("fetch_dividend_dates", symbol))
+        return (_LAST_SESSION,)
+
+
+_REFERENCE_METHODS = (
+    "search_symbols", "fetch_profile", "fetch_news", "fetch_upcoming_earnings",
+    "fetch_past_earnings", "fetch_dividend_dates",
+)
+
+
+@pytest.fixture
+def reference_routes(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[MainWindow, _SourceProvider, _ReferenceProvider, list[str]]]:
+    market = _SourceProvider(Timeframe.MIN5, paged=False)
+    reference = _ReferenceProvider()
+    unexpected: list[str] = []
+
+    def reject_call(name: str) -> Callable[..., None]:
+        def reject(*args: object, **kwargs: object) -> None:
+            unexpected.append(name)
+            raise AssertionError(f"Unexpected reference call to {name}")
+
+        return reject
+
+    for method in _REFERENCE_METHODS:
+        monkeypatch.setattr(market, method, reject_call(f"market.{method}"), raising=False)
+    monkeypatch.setattr(yf, "Ticker", reject_call("yfinance.Ticker"))
+    monkeypatch.setattr(yf, "Search", reject_call("yfinance.Search"))
+
+    window, _ = _window(
+        provider_registry,
+        qtbot, tmp_path / "reference-routes.db", monkeypatch, market,
+        ALPACA_PAPER_CONNECTION_ID, reference_provider=reference,
+    )
+    window.show()
+    try:
+        yield window, market, reference, unexpected
+    finally:
+        window.close()
+        qtbot.waitUntil(lambda: window._close_finalized, timeout=5_000)
+
+
+def test_main_window_uses_reference_provider_for_all_six_capabilities(
+    qtbot: QtBot,
+    reference_routes: tuple[MainWindow, _SourceProvider, _ReferenceProvider, list[str]],
+) -> None:
+    window, market, reference, unexpected = reference_routes
+    window._cache.set_chart_event_visibility(True, True)
+    _show(qtbot, window, Timeframe.DAILY)
+
+    bar = window._symbol_bar
+    field = bar.findChild(QLineEdit, "symbolInput")
+    assert field is not None
+    field.setFocus()
+    qtbot.waitUntil(field.hasSelectedText)
+    with qtbot.waitSignal(bar.search_idle, timeout=5_000):
+        qtbot.keyClicks(field, "Biotech")
+    match = bar._result_model.index(0, 0)
+    suggestions = match.data()
+    bar.stop_search()
+
+    dialog = _open_symbol_details(window)
+    qtbot.waitUntil(lambda: not window._symbol_details.busy and not window._earnings.busy)
+
+    assert sorted(reference.reference_calls) == sorted(
+        (method, "Biotech" if method == "search_symbols" else _SYMBOL)
+        for method in _REFERENCE_METHODS
+    )
+    assert unexpected == []
+    assert market.calls and reference.calls == []
+    assert suggestions == "XBI  ·  Reference listing  ·  NYSE"
+    assert "Reference profile" in dialog._profile.toPlainText()
+    assert "Reference headline" in dialog._news.toPlainText()
+    banner = window._app_header.findChild(QLabel, "level1Quote")
+    assert banner is not None and ">Oct 26</span>" in banner.text()
+    plot = window._chart.plot_manager
+    marker_key, = plot.active_marker_keys()
+    assert plot._markers[marker_key].toPlainText() == "E D"
+
+
+def test_reference_provider_news_renders_utc_as_et_and_omits_year_one_time(
+    qtbot: QtBot,
+    reference_routes: tuple[MainWindow, _SourceProvider, _ReferenceProvider, list[str]],
+) -> None:
+    window, _, _, unexpected = reference_routes
+    _show(qtbot, window, Timeframe.DAILY)
+    dialog = _open_symbol_details(window)
+    qtbot.waitUntil(lambda: not window._symbol_details.busy and not window._earnings.busy)
+
+    assert dialog._news.toPlainText().splitlines() == [
+        "Reference headline", "Publisher · Aug 13, 2026 · 21:30 ET",
+        "Year-one headline", "Archive",
+    ]
+    assert unexpected == []

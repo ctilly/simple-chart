@@ -8,6 +8,7 @@ import pytest
 
 from data.cache import Cache
 from data.models import Bar, BarCorrection, Timeframe
+from provider_support import startup_registry
 
 
 _NAMESPACE = "yfinance"
@@ -97,7 +98,7 @@ def test_rewind_deletes_bars_at_or_after_each_boundary_and_keeps_older_bars(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
 
         cache.rewind_symbol_history(_NAMESPACE, _SYMBOL, _BOUNDARIES, _SYNTHESIZED)
@@ -113,7 +114,7 @@ def test_rewind_keeps_yahoo_intraday_bars_older_than_the_source_limit(
 ) -> None:
     db_path = tmp_path / "test.db"
     older_than_limit = datetime(2026, 8, 3, 14, 30, tzinfo=UTC)
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
 
         cache.rewind_symbol_history(_NAMESPACE, _SYMBOL, _BOUNDARIES, _SYNTHESIZED)
@@ -133,7 +134,7 @@ def test_rewind_leaves_other_symbols_namespaces_and_tables_unchanged(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
         _seed_symbol(cache, _NAMESPACE, _OTHER_SYMBOL)
         _seed_symbol(cache, _OTHER_NAMESPACE, _SYMBOL)
@@ -189,7 +190,7 @@ def test_rewind_removes_native_coverage_and_keeps_synthesized_prefix(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
 
         cache.rewind_symbol_history(_NAMESPACE, _SYMBOL, _BOUNDARIES, _SYNTHESIZED)
@@ -224,7 +225,7 @@ def test_rewind_keeps_synthesized_coverage_that_already_ends_before_boundary(
         _ms(datetime(2026, 8, 1, 4, 0, tzinfo=UTC)),
         _ms(datetime(2026, 9, 4, 4, 0, tzinfo=UTC)),
     )
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bars(
             _NAMESPACE,
             _SYMBOL,
@@ -252,7 +253,7 @@ def test_rewind_rolls_back_every_change_when_it_fails_midway(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
         _correct_volume(
             cache,
@@ -295,7 +296,7 @@ def test_rewind_keeps_every_correction(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         _seed_symbol(cache, _NAMESPACE, _SYMBOL)
         for timeframe in (Timeframe.MIN5, Timeframe.MIN39, Timeframe.WEEKLY):
             _correct_volume(

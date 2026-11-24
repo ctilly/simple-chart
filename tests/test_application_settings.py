@@ -21,23 +21,23 @@ from PyQt6.QtWidgets import (
 
 import app.application_settings as application_settings_module
 from app.application_settings import (
-    AlpacaConnectionDialog,
+    ConnectionDialog,
     ApplicationSettingsDialog,
 )
 from app.dialogs import _FRAME_WIDTH
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry
 from data.cache import Cache
 from data.provider import ProviderAvailability
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    MarketDataFeed,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.registry import FALLBACK_PROVIDER as YFINANCE_CONNECTION_ID
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID, MarketDataFeed
 from data.provider.credentials import (
     ProviderCredentials,
     initialize_keyring_credential_store,
 )
 from realistic_errors import SECRET, SecretLeakingKeyring, assert_secret_absent
 from ui_text import capture_message_dialogs, widget_text
+from provider_support import startup_registry
 
 
 _AVAILABLE_PROVIDERS = {
@@ -52,6 +52,14 @@ class _MemoryCredentialStore:
 
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return self.credentials.get(connection_id)
+
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
 
     def put(
         self,
@@ -68,7 +76,7 @@ def test_application_settings_has_fixed_connections_and_ui_tabs(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = ApplicationSettingsDialog(
             cache,
             _MemoryCredentialStore(),
@@ -119,9 +127,9 @@ def test_application_settings_returns_configured_source_without_persisting_it(
     store = _MemoryCredentialStore()
     store.put(
         ALPACA_PAPER_CONNECTION_ID,
-        ProviderCredentials("paper-key", "paper-secret"),
+        ProviderCredentials({"api_key_id": "paper-key", "api_secret": "paper-secret"}),
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = ApplicationSettingsDialog(cache, store, _AVAILABLE_PROVIDERS)
         qtbot.addWidget(dialog)
         active = dialog.findChild(QComboBox, "activeDataSource")
@@ -158,7 +166,7 @@ def test_application_settings_disables_unavailable_credential_provider(
         "yfinance": ProviderAvailability(True, None),
         "alpaca": ProviderAvailability(False, reason),
     }
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.set_active_provider_connection_id(ALPACA_PAPER_CONNECTION_ID)
         dialog = ApplicationSettingsDialog(
             cache,
@@ -212,7 +220,7 @@ def test_application_settings_rejects_programmatic_unavailable_selection(
         "yfinance": ProviderAvailability(True, None),
         "alpaca": ProviderAvailability(False, "Secure storage unavailable."),
     }
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = ApplicationSettingsDialog(
             cache,
             _MemoryCredentialStore(),
@@ -236,19 +244,19 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
 ) -> None:
     store = _MemoryCredentialStore()
     db_path = tmp_path / "test.db"
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert connection is not None
-        dialog = AlpacaConnectionDialog(connection, cache, store)
+        dialog = ConnectionDialog(connection, cache, store)
         qtbot.addWidget(dialog)
         title_bar = dialog.findChild(QFrame, "dialogTitleBar")
-        key_id = dialog.findChild(QLineEdit, "alpacaApiKeyId")
-        secret = dialog.findChild(QLineEdit, "alpacaApiSecret")
-        feed = dialog.findChild(QComboBox, "alpacaFeed")
+        key_id = dialog.findChild(QLineEdit, "credential_api_key_id")
+        secret = dialog.findChild(QLineEdit, "credential_api_secret")
+        feed = dialog.findChild(QComboBox, "option_feed")
         assert key_id is not None
         assert secret is not None
         assert feed is not None
-        assert dialog.objectName() == "alpacaConnectionDialog"
+        assert dialog.objectName() == "connectionDialog"
         assert dialog.windowFlags() & Qt.WindowType.FramelessWindowHint
         assert "background:" in dialog.styleSheet()
         assert f"border: {_FRAME_WIDTH}px solid" in dialog.styleSheet()
@@ -265,17 +273,17 @@ def test_alpaca_connection_dialog_masks_and_saves_credentials(
 
         key_id.setText("paper-key")
         secret.setText("paper-secret")
-        feed.setCurrentIndex(feed.findData(MarketDataFeed.DELAYED_SIP))
+        feed.setCurrentIndex(feed.findData(MarketDataFeed.DELAYED_SIP.value))
         dialog.accept()
         assert dialog.result() == QDialog.DialogCode.Accepted
 
-        assert store.get(ALPACA_PAPER_CONNECTION_ID) == ProviderCredentials(
-            "paper-key",
-            "paper-secret",
-        )
+        stored = store.get(ALPACA_PAPER_CONNECTION_ID)
+        assert stored is not None
+        assert stored.get("api_key_id") == "paper-key"
+        assert stored.get("api_secret") == "paper-secret"
         updated = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert updated is not None
-        assert updated.feed == MarketDataFeed.DELAYED_SIP
+        assert dict(updated.options)["feed"] == MarketDataFeed.DELAYED_SIP
 
         with closing(sqlite3.connect(db_path)) as database:
             database_text = "\n".join(database.iterdump())
@@ -292,16 +300,16 @@ def test_alpaca_connection_dialog_keeps_stored_credentials_when_blank(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    stored = ProviderCredentials("paper-key", "paper-secret")
+    stored = ProviderCredentials({"api_key_id": "paper-key", "api_secret": "paper-secret"})
     store = _MemoryCredentialStore()
     store.put(ALPACA_PAPER_CONNECTION_ID, stored)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert connection is not None
-        dialog = AlpacaConnectionDialog(connection, cache, store)
+        dialog = ConnectionDialog(connection, cache, store)
         qtbot.addWidget(dialog)
-        key_id = dialog.findChild(QLineEdit, "alpacaApiKeyId")
-        secret = dialog.findChild(QLineEdit, "alpacaApiSecret")
+        key_id = dialog.findChild(QLineEdit, "credential_api_key_id")
+        secret = dialog.findChild(QLineEdit, "credential_api_secret")
         assert key_id is not None
         assert secret is not None
         assert key_id.text() == ""
@@ -320,6 +328,7 @@ def test_alpaca_connection_dialog_keeps_stored_credentials_when_blank(
     ],
 )
 def test_alpaca_connection_dialog_credential_save_error_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -329,22 +338,23 @@ def test_alpaca_connection_dialog_credential_save_error_is_shielded(
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
     access = initialize_keyring_credential_store(
-        SecretLeakingKeyring(SECRET, available=store_available)
+        SecretLeakingKeyring(SECRET, available=store_available),
+        registry=provider_registry,
     )
-    credentials = ProviderCredentials(f"AK{SECRET}", SECRET)
+    credentials = ProviderCredentials({"api_key_id": f"AK{SECRET}", "api_secret": SECRET})
     with pytest.raises(RuntimeError) as raised:
         access.store.put(ALPACA_PAPER_CONNECTION_ID, credentials)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=provider_registry) as cache:
         connection = cache.get_provider_connection(ALPACA_PAPER_CONNECTION_ID)
         assert connection is not None
-        dialog = AlpacaConnectionDialog(connection, cache, access.store)
+        dialog = ConnectionDialog(connection, cache, access.store)
         qtbot.addWidget(dialog)
-        key_id = dialog.findChild(QLineEdit, "alpacaApiKeyId")
-        secret = dialog.findChild(QLineEdit, "alpacaApiSecret")
+        key_id = dialog.findChild(QLineEdit, "credential_api_key_id")
+        secret = dialog.findChild(QLineEdit, "credential_api_secret")
         assert key_id is not None
         assert secret is not None
-        key_id.setText(credentials.api_key_id)
-        secret.setText(credentials.api_secret)
+        key_id.setText(credentials.get("api_key_id"))
+        secret.setText(credentials.get("api_secret"))
         caplog.clear()
         caplog.set_level(logging.DEBUG)
 
@@ -371,6 +381,7 @@ def test_alpaca_connection_dialog_credential_save_error_is_shielded(
     ],
 )
 def test_application_settings_credential_read_error_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -380,11 +391,12 @@ def test_application_settings_credential_read_error_is_shielded(
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
     access = initialize_keyring_credential_store(
-        SecretLeakingKeyring(SECRET, available=store_available)
+        SecretLeakingKeyring(SECRET, available=store_available),
+        registry=provider_registry,
     )
     with pytest.raises(RuntimeError) as raised:
         access.store.get(ALPACA_PAPER_CONNECTION_ID)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=provider_registry) as cache:
         dialog = ApplicationSettingsDialog(cache, access.store, _AVAILABLE_PROVIDERS)
         qtbot.addWidget(dialog)
         active = dialog.findChild(QComboBox, "activeDataSource")

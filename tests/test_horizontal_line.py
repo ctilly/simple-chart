@@ -10,6 +10,7 @@ import tools.horizontal_line  # noqa: F401
 from tools.horizontal_line import HorizontalLineIndicator
 from tools.horizontal_line.session_store import HorizontalLineStore
 from simplechart.api import ChoiceParam, ChartExtensionAddMode, FloatParam
+from provider_support import startup_registry
 
 
 def test_horizontal_line_declares_toolbar_add_mode() -> None:
@@ -26,7 +27,7 @@ def test_horizontal_line_one_click_commit_renders_line_and_label(tmp_path: Path)
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -58,7 +59,7 @@ def test_horizontal_line_renders_same_price_across_timeframes(tmp_path: Path) ->
     daily = _daily_series()
     intraday = _intraday_series(daily.bars[2].timestamp)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -83,7 +84,7 @@ def test_horizontal_line_hit_test_drag_config_and_remove(tmp_path: Path) -> None
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -142,7 +143,7 @@ def test_horizontal_line_config_accepts_in_range_price(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -170,7 +171,7 @@ def test_horizontal_line_config_accepts_price_outside_view_range(tmp_path: Path)
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -196,7 +197,7 @@ def test_horizontal_line_config_no_y_range_accepts_any_price(tmp_path: Path) -> 
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _daily_series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = HorizontalLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")

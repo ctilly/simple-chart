@@ -34,18 +34,14 @@ from data.adjustment import BasisChangeChoice
 from data.cache import Cache
 from data.models import Timeframe
 from data.provider import ProviderAvailability
-from data.provider.config import (
-    MarketDataFeed,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.config import ProviderConnection
 from data.provider.credentials import CredentialStore, ProviderCredentials
 
 
 _LOGGER = logging.getLogger(__name__)
 
 
-class AlpacaConnectionDialog(QDialog):
+class ConnectionDialog(QDialog):
     def __init__(
         self,
         connection: ProviderConnection,
@@ -54,13 +50,11 @@ class AlpacaConnectionDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        if connection.provider_name != "alpaca" or connection.feed is None:
-            raise ValueError("AlpacaConnectionDialog requires an Alpaca connection.")
-
         self._connection = connection
         self._cache = cache
         self._credential_store = credential_store
-        self._existing_credentials = self._load_credentials()
+        spec, _ = cache.registry.connection_template(connection.connection_id)
+        self._has_stored_credentials = self._load_credential_status()
 
         self.setWindowTitle(f"Configure {connection.display_name}")
         self.setModal(True)
@@ -68,26 +62,28 @@ class AlpacaConnectionDialog(QDialog):
 
         layout = build_dialog_content(
             self,
-            "alpacaConnectionDialog",
+            "connectionDialog",
             f"Configure {connection.display_name}",
         )
         form = QFormLayout()
+        options = dict(connection.options)
+        self._option_inputs: dict[str, QComboBox] = {}
+        for field in cache.registry.editable_options(connection.connection_id):
+            combo = QComboBox(self)
+            combo.setObjectName(f"option_{field.key}")
+            for value, label in field.choices:
+                combo.addItem(label, value)
+            combo.setCurrentIndex(combo.findData(options[field.key]))
+            self._option_inputs[field.key] = combo
+            form.addRow(field.label, combo)
 
-        self._feed = QComboBox(self)
-        self._feed.setObjectName("alpacaFeed")
-        for feed in MarketDataFeed:
-            self._feed.addItem(feed.display_name, feed)
-        self._feed.setCurrentIndex(self._feed.findData(connection.feed))
-        form.addRow("Market data feed", self._feed)
-
-        self._api_key_id = _secret_input("alpacaApiKeyId", self)
-        self._api_secret = _secret_input("alpacaApiSecret", self)
-        if self._existing_credentials is not None:
-            placeholder = "Stored - leave blank to keep"
-            self._api_key_id.setPlaceholderText(placeholder)
-            self._api_secret.setPlaceholderText(placeholder)
-        form.addRow("API key ID", self._api_key_id)
-        form.addRow("API secret", self._api_secret)
+        self._credential_inputs: dict[str, QLineEdit] = {}
+        for credential in spec.credential_fields:
+            field_input = _secret_input(f"credential_{credential.key}", self)
+            if self._has_stored_credentials:
+                field_input.setPlaceholderText("Stored - leave blank to keep")
+            self._credential_inputs[credential.key] = field_input
+            form.addRow(credential.label, field_input)
         layout.addLayout(form)
 
         buttons = QDialogButtonBox(
@@ -100,54 +96,50 @@ class AlpacaConnectionDialog(QDialog):
         layout.addWidget(buttons)
 
     def accept(self) -> None:
-        api_key_id = self._api_key_id.text().strip()
-        api_secret = self._api_secret.text().strip()
-        if bool(api_key_id) != bool(api_secret):
-            show_warning(
-                self,
-                "Incomplete Credentials",
-                "Enter both the API key ID and API secret.",
-            )
+        values = {key: field.text().strip() for key, field in self._credential_inputs.items()}
+        values = {key: value for key, value in values.items() if value}
+        if values and len(values) != len(self._credential_inputs):
+            show_warning(self, "Incomplete Credentials", "Enter every credential field.")
             return
-        if not api_key_id and self._existing_credentials is None:
-            show_warning(
-                self,
-                "Credentials Required",
-                "Enter the Alpaca API key ID and API secret.",
-            )
+        if self._credential_inputs and not values and not self._has_stored_credentials:
+            show_warning(self, "Credentials Required", "Enter the credentials for this connection.")
             return
 
-        if api_key_id:
-            try:
-                self._credential_store.put(
-                    self._connection.connection_id,
-                    ProviderCredentials(api_key_id, api_secret),
-                )
-            except RuntimeError as exc:
-                context = ErrorContext(
-                    f"Saving {self._connection.display_name} credentials"
-                )
-                show_warning(
-                    self,
-                    "Credential Store Error",
-                    report_error(_LOGGER, exc, context),
-                )
+        options: dict[str, str] = {}
+        for key, combo in self._option_inputs.items():
+            value = combo.currentData()
+            if not isinstance(value, str):
+                show_warning(self, "Options Required", "Select a value for every connection option.")
                 return
+            options[key] = value
+        try:
+            self._cache.set_provider_connection_options(self._connection.connection_id, options)
+        except Exception as exc:
+            context = ErrorContext(f"Saving {self._connection.display_name} options")
+            show_warning(self, "Connection Options Error", report_error(_LOGGER, exc, context))
+            return
 
-        feed = self._feed.currentData()
-        if not isinstance(feed, MarketDataFeed):
-            raise RuntimeError("No Alpaca market-data feed is selected.")
-        self._cache.set_provider_connection_feed(
-            self._connection.connection_id,
-            feed,
-        )
+        if values:
+            try:
+                self._credential_store.put(self._connection.connection_id, ProviderCredentials(values))
+            except RuntimeError as exc:
+                context = ErrorContext(f"Saving {self._connection.display_name} credentials")
+                show_warning(self, "Credential Store Error", report_error(_LOGGER, exc, context))
+                return
         super().accept()
 
-    def _load_credentials(self) -> ProviderCredentials | None:
+    def done(self, result: int) -> None:
+        for field in self._credential_inputs.values():
+            field.clear()
+        super().done(result)
+
+    def _load_credential_status(self) -> bool:
         try:
-            return self._credential_store.get(self._connection.connection_id)
+            return self._cache.registry.credentials_for(
+                self._connection.connection_id, self._credential_store,
+            ) is not None
         except RuntimeError:
-            return None
+            return False
 
 
 class ApplicationSettingsDialog(QDialog):
@@ -158,10 +150,10 @@ class ApplicationSettingsDialog(QDialog):
         provider_availability: Mapping[str, ProviderAvailability],
         parent: QWidget | None = None,
         active_connection_id: str | None = None,
-        alpaca_dialog_factory: Callable[
+        connection_dialog_factory: Callable[
             [ProviderConnection, Cache, CredentialStore, QWidget | None],
-            AlpacaConnectionDialog,
-        ] = AlpacaConnectionDialog,
+            ConnectionDialog,
+        ] = ConnectionDialog,
         current_cache_namespace: str | None = None,
         current_symbol: str | None = None,
         current_timeframe: Timeframe | None = None,
@@ -175,7 +167,8 @@ class ApplicationSettingsDialog(QDialog):
         self._credential_store = credential_store
         self._provider_availability = dict(provider_availability)
         self._active_connection_id = active_connection_id
-        self._alpaca_dialog_factory = alpaca_dialog_factory
+        self._source_selected = False
+        self._connection_dialog_factory = connection_dialog_factory
         self._selected_connection_id: str | None = None
         self._bars_changed = False
 
@@ -197,7 +190,9 @@ class ApplicationSettingsDialog(QDialog):
             if active_connection_id is not None
             else cache.get_active_provider_connection_id()
         )
-        active_connection = cache.get_provider_connection(active_id)
+        active_connection = cache.get_provider_connection(active_id) or cache.get_provider_connection(
+            cache.registry.fallback_connection_id
+        )
         initial_namespace = (
             current_cache_namespace
             if current_cache_namespace is not None
@@ -243,9 +238,10 @@ class ApplicationSettingsDialog(QDialog):
         availability = self._availability(connection)
         if not availability.available:
             return
-        if connection.provider_name == "alpaca":
+        spec, _ = self._cache.registry.connection_template(connection_id)
+        if spec.requires_credentials:
             try:
-                credentials = self._credential_store.get(connection_id)
+                credentials = self._cache.registry.credentials_for(connection_id, self._credential_store)
             except RuntimeError as exc:
                 context = ErrorContext(
                     f"Reading {connection.display_name} credentials"
@@ -281,6 +277,12 @@ class ApplicationSettingsDialog(QDialog):
             raise RuntimeError("Application settings were not accepted.")
         return self._selected_connection_id
 
+    def source_was_selected(self) -> bool:
+        return self._source_selected
+
+    def _mark_source_selected(self, _index: int) -> None:
+        self._source_selected = True
+
     def bars_changed(self) -> bool:
         return self._bars_changed
 
@@ -307,12 +309,11 @@ class ApplicationSettingsDialog(QDialog):
             item.setEnabled(availability.available)
             if availability.reason is not None:
                 item.setToolTip(availability.reason)
-        self._active_source.setCurrentIndex(self._active_source.findData(active_id))
-        current = self._active_source_item(self._active_source.currentIndex())
-        if not current.isEnabled():
-            self._active_source.setCurrentIndex(
-                self._active_source.findData(YFINANCE_CONNECTION_ID)
-            )
+        index = self._active_source.findData(active_id)
+        if index < 0 or not self._active_source_item(index).isEnabled():
+            index = self._active_source.findData(self._cache.registry.fallback_connection_id)
+        self._active_source.setCurrentIndex(index)
+        self._active_source.activated.connect(self._mark_source_selected)
         source_row.addWidget(self._active_source, 1)
         layout.addLayout(source_row)
 
@@ -405,12 +406,17 @@ class ApplicationSettingsDialog(QDialog):
             name_item = QTableWidgetItem(connection.display_name)
             self._set_item_availability(name_item, availability)
             self._connections.setItem(row, 0, name_item)
-            environment = (
-                "-" if connection.environment is None else connection.environment.value.title()
-            )
-            feed = "-" if connection.feed is None else connection.feed.display_name
-            environment_item = QTableWidgetItem(environment)
-            feed_item = QTableWidgetItem(feed)
+            connection_id = connection.connection_id
+            spec, _ = self._cache.registry.connection_template(connection_id)
+            editable = self._cache.registry.editable_options(connection_id)
+            options = dict(connection.options)
+            fixed_labels = [
+                dict(field.choices)[options[field.key]]
+                for field in spec.option_fields if field not in editable
+            ]
+            editable_labels = [dict(field.choices)[options[field.key]] for field in editable]
+            environment_item = QTableWidgetItem(", ".join(fixed_labels) or "-")
+            feed_item = QTableWidgetItem(", ".join(editable_labels) or "-")
             credential_item = QTableWidgetItem(
                 self._credential_status(connection, availability)
             )
@@ -420,14 +426,14 @@ class ApplicationSettingsDialog(QDialog):
             ):
                 self._set_item_availability(item, availability)
                 self._connections.setItem(row, column, item)
-            if connection.provider_name == "alpaca":
+            if spec.requires_credentials or editable:
                 configure = QPushButton("Configure", self._connections)
                 configure.setObjectName(f"configure_{connection.connection_id}")
                 configure.setEnabled(availability.available)
                 if availability.reason is not None:
                     configure.setToolTip(availability.reason)
                 configure.clicked.connect(
-                    lambda _checked=False, selected=connection: self._configure_alpaca(
+                    lambda _checked=False, selected=connection: self._configure_connection(
                         selected
                     )
                 )
@@ -470,12 +476,13 @@ class ApplicationSettingsDialog(QDialog):
         connection: ProviderConnection,
         availability: ProviderAvailability,
     ) -> str:
-        if connection.provider_name == "yfinance":
+        spec, _ = self._cache.registry.connection_template(connection.connection_id)
+        if not spec.requires_credentials:
             return "Not required"
         if not availability.available:
             return "Unavailable"
         try:
-            credentials = self._credential_store.get(connection.connection_id)
+            credentials = self._cache.registry.credentials_for(connection.connection_id, self._credential_store)
         except RuntimeError:
             return "Keyring unavailable"
         return "Stored" if credentials is not None else "Not configured"
@@ -509,15 +516,15 @@ class ApplicationSettingsDialog(QDialog):
         if availability.reason is not None:
             item.setToolTip(availability.reason)
 
-    def _configure_alpaca(self, connection: ProviderConnection) -> None:
-        dialog = self._alpaca_dialog_factory(
+    def _configure_connection(self, connection: ProviderConnection) -> None:
+        dialog = self._connection_dialog_factory(
             connection,
             self._cache,
             self._credential_store,
             self,
         )
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._refresh_connections()
+        dialog.exec()
+        self._refresh_connections()
 
 
 def _secret_input(object_name: str, parent: QWidget) -> QLineEdit:

@@ -1,0 +1,171 @@
+-- data/schema.sql
+--
+-- SQLite schema for SimpleChart.
+--
+-- Tables:
+--   bars              — cached OHLCV data from the data provider
+--   bar_corrections    — user-authored overrides for cached provider bars
+--   bar_fetch_coverage — successfully requested bar-data intervals
+--   basis_changes     — cached history on an outdated adjustment basis
+--   extension_records — plugin-owned persisted records
+--   watchlist         — user-curated symbols
+--   provider_connections — non-secret data-provider configuration
+--   application_settings — application-wide setting values
+--   asset_reference      — provider-neutral company reference data
+--
+-- Run once on first launch via cache.py:init_db().
+
+
+-- bars
+-- ----------------------------------------------------------------------------
+-- One row per bar. The composite primary key
+-- (cache_namespace, symbol, timeframe, timestamp)
+-- enforces uniqueness and doubles as the covering index for the most common
+-- query: "give me all bars for QQQ at 5m between time A and time B."
+--
+-- timeframe stores the Timeframe enum's string value: "5m", "15m", "daily",
+-- etc. Using the string value (rather than an integer code) keeps the data
+-- human-readable when inspecting the database directly.
+--
+-- timestamp is UTC milliseconds since epoch, stored as an INTEGER. SQLite has
+-- no native datetime type; integers are compact, fast to index, and avoid any
+-- timezone serialization ambiguity.
+--
+-- vwap is nullable — not all providers supply it.
+
+CREATE TABLE IF NOT EXISTS bars (
+    cache_namespace TEXT NOT NULL,
+    symbol      TEXT    NOT NULL,
+    timeframe   TEXT    NOT NULL,
+    timestamp   INTEGER NOT NULL,   -- UTC milliseconds
+    open        REAL    NOT NULL,
+    high        REAL    NOT NULL,
+    low         REAL    NOT NULL,
+    close       REAL    NOT NULL,
+    volume      INTEGER NOT NULL,
+    vwap        REAL,               -- nullable
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe, timestamp)
+);
+
+
+-- bar corrections
+-- ----------------------------------------------------------------------------
+-- User-authored field overrides for provider bars. Provider data remains in
+-- bars unchanged, and nullable columns identify exactly which values the user
+-- corrected. Corrections are scoped to the provider/feed cache namespace.
+
+CREATE TABLE IF NOT EXISTS bar_corrections (
+    cache_namespace TEXT NOT NULL,
+    symbol          TEXT NOT NULL,
+    timeframe       TEXT NOT NULL,
+    timestamp       INTEGER NOT NULL,
+    open            REAL,
+    high            REAL,
+    low             REAL,
+    close           REAL,
+    volume          INTEGER,
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe, timestamp)
+);
+
+
+-- bar fetch coverage
+-- ----------------------------------------------------------------------------
+-- Records the continuous interval the application has successfully requested
+-- from a provider, including requests that returned no bars. This prevents
+-- repeated backfill requests before an IPO or a feed's retention boundary.
+
+CREATE TABLE IF NOT EXISTS bar_fetch_coverage (
+    cache_namespace TEXT    NOT NULL,
+    symbol          TEXT    NOT NULL,
+    timeframe       TEXT    NOT NULL,
+    start_timestamp INTEGER NOT NULL,
+    end_timestamp   INTEGER NOT NULL,
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe)
+);
+
+
+-- basis changes
+-- ----------------------------------------------------------------------------
+-- Cached bars a provider has since moved to a new adjustment basis (a split
+-- or dividend) and no longer returns: [old_coverage_start, boundary_timestamp)
+-- of one native timeframe, and of the timeframes synthesized from it, is on
+-- the old basis. New price = old price * ratio; new volume = old volume *
+-- volume_factor. Rows wait for the user to rescale or discard that history.
+
+CREATE TABLE IF NOT EXISTS basis_changes (
+    cache_namespace    TEXT    NOT NULL,
+    symbol             TEXT    NOT NULL,
+    timeframe          TEXT    NOT NULL,
+    boundary_timestamp INTEGER NOT NULL,
+    old_coverage_start INTEGER NOT NULL,
+    ratio              REAL    NOT NULL,
+    volume_factor      REAL    NOT NULL,
+
+    PRIMARY KEY (cache_namespace, symbol, timeframe, boundary_timestamp)
+);
+
+
+-- extension_records
+-- ----------------------------------------------------------------------------
+-- Generic persistence for extension plugins. The app stores and orders opaque
+-- JSON payloads; each extension owns the payload schema behind its store_key.
+
+CREATE TABLE IF NOT EXISTS extension_records (
+    record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_key TEXT    NOT NULL,
+    symbol    TEXT    NOT NULL,
+    sort_key  INTEGER NOT NULL,
+    payload   TEXT    NOT NULL,
+
+    UNIQUE (store_key, record_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_records_store_symbol
+    ON extension_records (store_key, symbol, sort_key);
+
+
+-- watchlist
+-- ----------------------------------------------------------------------------
+-- User-curated list of symbols for quick chart navigation.
+-- Symbols are displayed by sort_order ASC.
+-- The PRIMARY KEY on symbol prevents duplicates.
+
+CREATE TABLE IF NOT EXISTS watchlist (
+    symbol     TEXT    PRIMARY KEY,
+    sort_order INTEGER NOT NULL
+);
+
+
+-- provider connections and application settings
+-- ----------------------------------------------------------------------------
+-- Credentials are intentionally excluded. API keys and secrets are stored in
+-- the operating-system credential store under connection_id. Never add a
+-- credential column or payload here; see docs/credential-security.md.
+
+CREATE TABLE IF NOT EXISTS provider_connections (
+    connection_id TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    provider_name TEXT NOT NULL,
+    environment   TEXT,
+    feed          TEXT,
+    sort_order    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS application_settings (
+    setting_key   TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL
+);
+
+
+-- asset reference
+-- ----------------------------------------------------------------------------
+-- Provider-neutral reference data shared across every market-data connection.
+
+CREATE TABLE IF NOT EXISTS asset_reference (
+    symbol       TEXT    PRIMARY KEY,
+    company_name TEXT    NOT NULL,
+    refreshed_at INTEGER NOT NULL
+);

@@ -23,10 +23,11 @@ from app.controller import (
 from data.aggregator import Aggregator
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
-from data.provider.alpaca_provider import AlpacaProvider
+from providers.alpaca.implementation import AlpacaProvider
 from data.provider.base import DataProvider
-from data.provider.config import MarketDataFeed, alpaca_paper_connection
-from data.provider.yfinance_provider import YFinanceProvider
+from providers.alpaca import MarketDataFeed
+from provider_support import alpaca_paper_connection, startup_registry
+from providers.yahoo.implementation import YFinanceProvider
 
 ET = ZoneInfo("America/New_York")
 _DAILY_HISTORY_START = datetime(2016, 1, 1, tzinfo=UTC)
@@ -306,9 +307,8 @@ def _load(
 ) -> tuple[list[OHLCVSeries], list[str]]:
     monkeypatch.setattr(_FixedDateTime, "frozen", now)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
-    monkeypatch.setattr(controller_module, "create_provider", lambda _c, _s: provider)
     request = _ChartLoadRequest(1, "XBI", timeframe, alpaca_paper_connection())
-    worker = _FetchWorker(str(db_path), cast(Any, None), request)
+    worker = _FetchWorker(str(db_path), cast(Any, None), request, provider_factory=lambda _connection, _store: provider, registry=startup_registry())
     finished: list[OHLCVSeries] = []
     errors: list[str] = []
     worker.finished.connect(lambda _request, series: finished.append(series))
@@ -322,7 +322,7 @@ def _rows(bars: list[Bar]) -> list[Row]:
 
 
 def _cached(db_path: Path, timeframe: Timeframe) -> list[Bar]:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         return cache.get_raw_bars(alpaca_paper_connection().cache_namespace, "XBI", timeframe, 0, 2**62)
 
 
@@ -369,7 +369,7 @@ def test_cold_five_minute_load_starts_at_the_session_open(
     cached = _cached(db_path, Timeframe.MIN5)
     assert cached[0].timestamp == session_open
     assert finished[0].bars[0].timestamp == session_open
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         coverage = cache.get_bar_fetch_coverage(
             alpaca_paper_connection().cache_namespace, "XBI", Timeframe.MIN5,
         )
@@ -447,7 +447,7 @@ def test_pre_a1_cache_with_mid_session_start_loads_without_duplicates(
         patch.setattr(controller_module, "_history_start", _pre_a1_history_start)
         _finished, errors = _load(db_path, _Source(limit, page_span), target, earlier, monkeypatch)
     assert errors == []
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         target_coverage = cache.get_bar_fetch_coverage(namespace, "XBI", target)
         assert target_coverage is not None
         assert datetime.fromtimestamp(target_coverage[0] / 1000, UTC).astimezone(ET).time() == time(13, 17)

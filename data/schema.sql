@@ -11,7 +11,7 @@
 --   watchlist         — user-curated symbols
 --   provider_connections — non-secret data-provider configuration
 --   application_settings — application-wide setting values
---   asset_reference      — provider-neutral company reference data
+--   asset_reference      — source-tagged company reference data
 --
 -- Run once on first launch via cache.py:init_db().
 
@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS provider_connections (
     provider_name TEXT NOT NULL,
     environment   TEXT,
     feed          TEXT,
-    sort_order    INTEGER NOT NULL
+    sort_order    INTEGER NOT NULL,
+    options       TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS application_settings (
@@ -162,10 +163,11 @@ CREATE TABLE IF NOT EXISTS application_settings (
 
 -- asset reference
 -- ----------------------------------------------------------------------------
--- Provider-neutral reference data shared across every market-data connection.
+-- The latest company reference data for each symbol, tagged with its provider.
 
 CREATE TABLE IF NOT EXISTS asset_reference (
     symbol       TEXT    PRIMARY KEY,
     company_name TEXT    NOT NULL,
-    refreshed_at INTEGER NOT NULL
+    refreshed_at INTEGER NOT NULL,
+    source       TEXT    NOT NULL
 );

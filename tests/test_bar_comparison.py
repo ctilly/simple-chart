@@ -1,6 +1,8 @@
 from collections.abc import Mapping
+from dataclasses import replace
 import logging
 from datetime import UTC, datetime, timedelta
+from types import ModuleType
 from typing import cast
 
 import pytest
@@ -11,19 +13,24 @@ from app.bar_comparison import (
     BarComparisonRowKind,
     BarComparisonService,
 )
+from data.provider.spec import Capability, ConnectionTemplate, CredentialField, NamespaceSpec, ProviderSpec
 from data.models import Bar, Level1Quote, MarketSnapshot, Timeframe
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider, MarketDataEntitlementError
-from data.provider.config import (
+from data.provider.config import ProviderConnection
+from providers.alpaca import (
     ALPACA_LIVE_CONNECTION_ID,
     ALPACA_PAPER_CONNECTION_ID,
     MarketDataFeed,
-    ProviderConnection,
+)
+from provider_support import (
     alpaca_live_connection,
     alpaca_paper_connection,
     yfinance_connection,
 )
 from data.provider.credentials import CredentialStore, ProviderCredentials
+from data.provider.registry import discover_providers
+from provider_support import startup_registry
 
 
 _SESSION = datetime(2026, 2, 2, 5, 0, tzinfo=UTC)
@@ -48,7 +55,15 @@ class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         if connection_id not in self._connection_ids:
             return None
-        return ProviderCredentials("synthetic-key", "synthetic-secret")
+        return ProviderCredentials({"api_key_id": "synthetic-key", "api_secret": "synthetic-secret"})
+
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
 
     def put(
         self,
@@ -128,6 +143,92 @@ class _ProviderFactory:
         return provider
 
 
+@pytest.mark.parametrize(
+    ("origin", "corroboration"),
+    [
+        ("yfinance", ("alpaca:iex", "alpaca:delayed_sip")),
+        ("alpaca:iex", ("alpaca:delayed_sip", "yfinance")),
+        ("alpaca:delayed_sip", ("alpaca:iex", "yfinance")),
+        ("alpaca:sip", ("alpaca:iex", "alpaca:delayed_sip", "yfinance")),
+    ],
+)
+def test_comparison_fetches_origin_and_comparable_namespaces(
+    origin: str, corroboration: tuple[str, ...],
+) -> None:
+    cached = _bar()
+    factory = _ProviderFactory({
+        namespace: _Provider([cached])
+        for namespace in ("yfinance", "alpaca:iex", "alpaca:delayed_sip", "alpaca:sip")
+    })
+
+    result = _service(factory).compare(origin, "SPY", Timeframe.DAILY, cached)
+
+    assert [(row.kind, row.source_namespace) for row in result.rows] == [
+        (BarComparisonRowKind.CACHED_ORIGIN, origin),
+        (BarComparisonRowKind.REFRESHED_ORIGIN, origin),
+        *((BarComparisonRowKind.CORROBORATION, namespace) for namespace in corroboration),
+    ]
+    assert [connection.cache_namespace for connection in factory.connections] == [
+        origin, *corroboration,
+    ]
+    assert all(row.bar == cached and row.error is None for row in result.rows)
+    if origin == "alpaca:sip":
+        assert _row(result, "alpaca:delayed_sip").label == "Alpaca / SIP (15-minute delayed)"
+
+
+@pytest.mark.parametrize(
+    ("configured", "third_is_origin"),
+    [(True, False), (False, False), (True, True)],
+    ids=["configured", "missing", "third-origin"],
+)
+def test_standalone_comparison_uses_registry_factory_and_only_configured_sources(
+    configured: bool, third_is_origin: bool,
+) -> None:
+    cached = _bar()
+    calls: list[str] = []
+
+    def factory(connection: ProviderConnection, credentials: ProviderCredentials | None) -> DataProvider:
+        calls.append(connection.cache_namespace)
+        return _Provider([cached])
+
+    base_registry = startup_registry()
+    fallback = ModuleType("comparison_fallback")
+    fallback.PROVIDER = replace(base_registry.fallback_provider, factory=factory)
+    third = ModuleType("comparison_third")
+    third.PROVIDER = ProviderSpec(
+        name="third",
+        display_name="Third Provider",
+        connections=(ConnectionTemplate("third", "Third Connection"),),
+        capabilities=frozenset({Capability.BARS}),
+        namespaces=(NamespaceSpec("third:quotes", "Third Bar Source", (), True),),
+        factory=factory,
+        credential_fields=(CredentialField("api_key_id", "Key"), CredentialField("api_secret", "Secret")),
+    )
+    registry = discover_providers((fallback, "providers.alpaca", third))
+    store = _MemoryCredentialStore(connection_ids={"third"} if configured else set())
+    service = BarComparisonService(
+        store,
+        [registry.build_connection(connection_id) for connection_id in registry.connection_ids],
+        {name: ProviderAvailability(True, None) for name in registry.providers},
+        registry=registry,
+    )
+
+    fallback_namespace = base_registry.fallback_provider.namespaces[0].namespace
+    third_namespace = "third:quotes"
+    origin = third_namespace if third_is_origin else fallback_namespace
+    result = service.compare(origin, "SPY", Timeframe.DAILY, cached)
+
+    corroboration = []
+    if third_is_origin:
+        corroboration.append((fallback_namespace, "Yahoo Finance"))
+        assert result.rows[1].label == "Refreshed Third Bar Source"
+    elif configured:
+        corroboration.append((third_namespace, "Third Bar Source"))
+    assert [(row.source_namespace, row.label) for row in result.rows[2:]] == corroboration
+    assert all(row.bar == cached and row.error is None for row in result.rows)
+    assert calls == [origin, *(namespace for namespace, _ in corroboration)]
+
+
 def test_sip_origin_constructs_feed_specific_alpaca_and_yahoo_providers() -> None:
     cached = _bar(low=68.64)
     factory = _ProviderFactory(
@@ -164,7 +265,7 @@ def test_sip_origin_constructs_feed_specific_alpaca_and_yahoo_providers() -> Non
         for connection in factory.connections
         if connection.provider_name == "alpaca"
     ]
-    assert [connection.feed for connection in alpaca_connections] == [
+    assert [dict(connection.options)["feed"] for connection in alpaca_connections] == [
         MarketDataFeed.DELAYED_SIP,
         MarketDataFeed.IEX,
     ]
@@ -237,6 +338,7 @@ def test_comparison_prefers_active_alpaca_connection_for_feed_variants() -> None
         provider_availability=_AVAILABLE,
         provider_factory=factory,
         preferred_connection_id=ALPACA_LIVE_CONNECTION_ID,
+        registry=startup_registry(),
     )
 
     service.compare(
@@ -567,6 +669,7 @@ def _service(
         provider_availability=_AVAILABLE,
         provider_factory=factory,
         preferred_connection_id=ALPACA_PAPER_CONNECTION_ID,
+        registry=startup_registry(),
     )
 
 

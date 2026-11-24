@@ -21,6 +21,7 @@ from data.provider.base import (
     background_request_cancellation,
     background_requests,
 )
+from provider_support import startup_registry
 
 _NAMESPACE = "alpaca:test"
 _SPAN = timedelta(days=30)
@@ -118,7 +119,7 @@ def test_cold_paged_range_fetches_chunks_newest_first_and_covers_exactly(
     aggregator = Aggregator(provider)
     start = _END - timedelta(days=100, hours=3)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             aggregator, cache, _NAMESPACE, "XBI", Timeframe.MIN5, start, _END,
         )
@@ -142,7 +143,7 @@ def test_non_paged_provider_keeps_single_request(tmp_path: Path) -> None:
     provider = PagedProvider(page_span=None)
     start = _END - timedelta(days=100)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             Aggregator(provider), cache, _NAMESPACE, "XBI", Timeframe.MIN5,
             start, _END,
@@ -155,7 +156,7 @@ def test_range_within_one_page_keeps_single_request(tmp_path: Path) -> None:
     provider = PagedProvider()
     start = _END - timedelta(days=20)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_and_cache_bars(
             Aggregator(provider), cache, _NAMESPACE, "XBI", Timeframe.MIN5,
             start, _END,
@@ -175,10 +176,10 @@ def test_dispatch_window_bounds_completed_work_behind_a_stalled_chunk(
     cancellation = threading.Event()
     errors: list[BaseException] = []
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
 
         def run() -> None:
-            with Cache(str(tmp_path / "test.db")) as worker_cache:
+            with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as worker_cache:
                 try:
                     _fetch_bar_range(
                         Aggregator(provider), worker_cache, _NAMESPACE, "XBI",
@@ -215,7 +216,7 @@ def test_failed_middle_chunk_commits_contiguous_run_and_resumes_remainder(
     provider.failures.add(starts[2])
     aggregator = Aggregator(provider)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(RuntimeError, match="chunk failed"):
             _fetch_and_cache_bars(
                 aggregator, cache, _NAMESPACE, "XBI", Timeframe.MIN5,
@@ -251,7 +252,7 @@ def test_cancel_after_first_commit_keeps_contiguous_run_and_stops(
     for later in starts[2:]:
         provider.gates[later] = second_gate
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         original_put = cache.put_bars
 
         def put_then_cancel(*args: object, **kwargs: object) -> None:
@@ -280,7 +281,7 @@ def test_disjoint_old_coverage_is_replaced_by_first_commit(tmp_path: Path) -> No
     old_start = _END - timedelta(days=400)
     old_end = _END - timedelta(days=300)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.replace_bar_fetch_coverage(
             _NAMESPACE, "XBI", Timeframe.MIN5, _ms(old_start), _ms(old_end),
         )
@@ -304,7 +305,7 @@ def test_long_stale_tail_refresh_stays_single_request_and_empty_keeps_coverage(
         Timeframe.MIN5, _END - timedelta(days=90),
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.replace_bar_fetch_coverage(
             _NAMESPACE, "XBI", Timeframe.MIN5, _ms(start), _ms(covered_end),
         )
@@ -331,7 +332,7 @@ def test_cancel_after_first_replacing_commit_keeps_only_new_suffix(
     for older in starts[1:]:
         provider.gates[older] = older_gate
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.replace_bar_fetch_coverage(
             _NAMESPACE, "XBI", Timeframe.MIN5, _ms(old_start), _ms(old_end),
         )
@@ -375,7 +376,7 @@ def test_cancelled_background_chunks_count_as_cancellation_not_failure(
 
     provider.fetch_bars = fetch  # type: ignore[method-assign]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with background_requests(cancellation):
             with pytest.raises(_ChartLoadCancelled):
                 _fetch_bar_range(
@@ -399,7 +400,7 @@ def test_chunk_tasks_inherit_the_callers_request_priority(tmp_path: Path) -> Non
     provider.fetch_bars = fetch  # type: ignore[method-assign]
     start = _END - timedelta(days=100)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         _fetch_bar_range(
             Aggregator(provider), cache, _NAMESPACE, "XBI", Timeframe.MIN5, start, _END,
         )

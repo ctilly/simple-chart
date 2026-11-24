@@ -28,6 +28,7 @@ from test_basis_change import (  # noqa: F401  (fixture)
     _window,
 )
 from test_live_refresh import _LiveSource
+from provider_support import startup_registry
 
 _BROKEN_THEME = 'name = "Broken"\n[colors]\nnope = "#000000"\n'
 _MINE = 'name = "Mine"\ninherits = "dark"\n[colors]\nbackground = "#ff00ff"\n'
@@ -41,13 +42,13 @@ def _window_with_theme(
 ) -> MainWindow:
     db_path = tmp_path / "test.db"
     if saved is not None:
-        with Cache(str(db_path)) as cache:
+        with Cache(str(db_path), registry=startup_registry()) as cache:
             cache.set_theme(saved)
     return _window(qtbot, db_path, monkeypatch, _LiveSource())
 
 
 def test_theme_setting_defaults_to_light_and_round_trips(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         assert cache.get_theme() == "Light"
         cache.set_theme("Dark")
         assert cache.get_theme() == "Dark"
@@ -170,7 +171,7 @@ def test_settings_theme_dropdown_lists_themes_and_ok_saves_the_choice(
     themes_dir.mkdir()
     (themes_dir / "mine.toml").write_text(_MINE, encoding="utf-8")
     names = list(load_themes(themes_dir)[0])
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = _settings_dialog(cache, names)
         qtbot.addWidget(dialog)
         combo = dialog.findChild(QComboBox, "theme")
@@ -190,7 +191,7 @@ def test_settings_theme_dropdown_lists_themes_and_ok_saves_the_choice(
 
 
 def test_settings_cancel_does_not_save_the_theme(qtbot: Any, tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         dialog = _settings_dialog(cache, ["Light", "Dark"])
         qtbot.addWidget(dialog)
         combo = dialog.findChild(QComboBox, "theme")
@@ -206,7 +207,7 @@ def test_settings_ok_keeps_a_saved_theme_missing_from_the_list(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.set_theme("Missing")
         dialog = ApplicationSettingsDialog(
             cache,

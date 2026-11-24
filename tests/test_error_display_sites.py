@@ -28,15 +28,15 @@ from app.controller import (
     _SnapshotWorker,
 )
 from chart.window import ChartWidget
+from data.provider.spec import CredentialField
+from data.provider.registry import ProviderRegistry
 from data.aggregator import Aggregator
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.errors import UserFacingError
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    alpaca_paper_connection,
-)
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID
+from provider_support import alpaca_paper_connection, startup_registry
 from data.provider.credentials import (
     CredentialStoreAccess,
     ProviderCredentials,
@@ -95,6 +95,9 @@ class _FailingProvider(DataProvider):
     def __init__(self, exc: BaseException) -> None:
         self._exc = exc
 
+    def check_connection(self) -> None:
+        raise self._exc
+
     def fetch_bars(
         self,
         symbol: str,
@@ -121,6 +124,14 @@ class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return self.credentials.get(connection_id)
 
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
+
     def put(self, connection_id: str, credentials: ProviderCredentials) -> None:
         self.credentials[connection_id] = credentials
 
@@ -129,6 +140,7 @@ class _MemoryCredentialStore:
 
 
 def _window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -142,13 +154,13 @@ def _window(
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: credential_access,
+        lambda *, registry: credential_access,
     )
     production_load = MainWindow._load
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(tmp_path / "test.db"), connection_id)
+    window = MainWindow(str(tmp_path / "test.db"), connection_id, provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window
@@ -215,6 +227,7 @@ def _capture_logs(caplog: pytest.LogCaptureFixture) -> None:
 
 @pytest.mark.parametrize("label", sorted(_SITE_SOURCES))
 def test_whole_load_error_dialog_and_refresh_status_are_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -222,13 +235,13 @@ def test_whole_load_error_dialog_and_refresh_status_are_shielded(
     error_server: LocalErrorServer,
     label: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     exc = _real_error(error_server, label)
     monkeypatch.setattr(
-        controller_module,
+        controller_module.ProviderRegistry,
         "create_provider",
-        lambda connection, store: _FailingProvider(exc),
+        staticmethod(lambda connection, store: _FailingProvider(exc)),
     )
     request = _current_request(window, Timeframe.DAILY)
     window._refresh_reload = _RefreshReload(request, datetime.now(tz=UTC))
@@ -255,6 +268,7 @@ def test_whole_load_error_dialog_and_refresh_status_are_shielded(
     "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
 )
 def test_background_history_error_status_bar_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -262,17 +276,17 @@ def test_background_history_error_status_bar_is_shielded(
     error_server: LocalErrorServer,
     label: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     exc = _real_error(error_server, label)
     monkeypatch.setattr(
-        controller_module,
+        controller_module.ProviderRegistry,
         "create_provider",
-        lambda connection, store: _FailingProvider(exc),
+        staticmethod(lambda connection, store: _FailingProvider(exc)),
     )
     request = _current_request(window, Timeframe.MIN5)
     window._on_chart_recent_ready(request, _series(300))
-    worker = _FetchWorker(window._db_path, window._credential_store, request)
+    worker = _FetchWorker(window._db_path, window._credential_store, request, provider_factory=window._provider_registry.create_provider, registry=provider_registry)
     worker.error.connect(window._on_chart_fetch_error)
     _capture_logs(caplog)
 
@@ -291,6 +305,7 @@ def test_background_history_error_status_bar_is_shielded(
     "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
 )
 def test_quote_error_status_bar_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -298,7 +313,7 @@ def test_quote_error_status_bar_is_shielded(
     error_server: LocalErrorServer,
     label: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     exc = _real_error(error_server, label)
     window._state.symbol = "XBI"
     request = _Level1Request(
@@ -314,6 +329,7 @@ def test_quote_error_status_bar_is_shielded(
         request,
         False,
         datetime.now(tz=UTC),
+        registry=provider_registry,
     )
     worker.error.connect(window._on_level1_error)
     _capture_logs(caplog)
@@ -329,6 +345,7 @@ def test_quote_error_status_bar_is_shielded(
     "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
 )
 def test_watchlist_quote_error_status_bar_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -336,7 +353,7 @@ def test_watchlist_quote_error_status_bar_is_shielded(
     error_server: LocalErrorServer,
     label: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     exc = _real_error(error_server, label)
     worker = _SnapshotWorker(
         [_SnapshotBatch(Aggregator(_FailingProvider(exc)), ["XBI"])],
@@ -356,6 +373,7 @@ def test_watchlist_quote_error_status_bar_is_shielded(
     "label", ["alpaca_invalid_header", "alpaca_http_client_invalid_header"],
 )
 def test_provider_validation_error_dialog_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -363,7 +381,7 @@ def test_provider_validation_error_dialog_is_shielded(
     error_server: LocalErrorServer,
     label: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     exc = _real_error(error_server, label)
     worker = _ProviderValidationWorker(_FailingProvider(exc), "Alpaca Paper")
@@ -394,6 +412,7 @@ def _available_alpaca(window: MainWindow) -> None:
     ],
 )
 def test_provider_configure_credential_store_error_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -401,10 +420,11 @@ def test_provider_configure_credential_store_error_is_shielded(
     operation: str,
     reason: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     access = initialize_keyring_credential_store(
-        SecretLeakingKeyring(SECRET, available=operation == "read")
+        SecretLeakingKeyring(SECRET, available=operation == "read"),
+        registry=provider_registry,
     )
     window._credential_store = access.store
     _available_alpaca(window)
@@ -425,12 +445,13 @@ def test_provider_configure_credential_store_error_is_shielded(
 
 
 def test_provider_configure_missing_credentials_is_shielded(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     window._credential_store = _MemoryCredentialStore()
     _available_alpaca(window)
@@ -448,6 +469,7 @@ def test_provider_configure_missing_credentials_is_shielded(
 
 
 def test_startup_unavailable_provider_status_names_the_provider_once(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -457,6 +479,7 @@ def test_startup_unavailable_provider_status_names_the_provider_once(
     _capture_logs(caplog)
 
     window = _window(
+        provider_registry,
         qtbot,
         tmp_path,
         monkeypatch,
@@ -499,6 +522,7 @@ def _raise_unknown(render_target: str) -> Any:
     ],
 )
 def test_panel_limit_dialog_shows_guidance_and_shields_other_errors(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -506,7 +530,7 @@ def test_panel_limit_dialog_shows_guidance_and_shields_other_errors(
     ensure_panel: Callable[[str], Any],
     expected: str,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     shown = capture_message_dialogs(monkeypatch)
     monkeypatch.setattr(window._chart, "ensure_extension_panel", ensure_panel)
     _capture_logs(caplog)
@@ -522,6 +546,7 @@ def test_panel_limit_dialog_shows_guidance_and_shields_other_errors(
 
 @pytest.fixture
 def wired_window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -530,7 +555,7 @@ def wired_window(
     # production dispatch methods.
     real_snapshots = MainWindow._refresh_watchlist_snapshots
     real_level1 = MainWindow._refresh_level1
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     window._snapshot_timer.stop()
     for symbol in window._watchlist.symbols():
         window._cache.remove_from_watchlist(symbol)
@@ -582,9 +607,10 @@ def test_threaded_quote_errors_reach_status_bar_shielded(
 ) -> None:
     window = wired_window
     exc = _real_error(error_server, "alpaca_invalid_header")
-    window._selected_route = _DataRoute(
+    window._router.selected_route = _DataRoute(
         Aggregator(_FailingProvider(exc)),
         alpaca_paper_connection(),
+        startup_registry(),
     )
     status = window.statusBar()
     assert status is not None
@@ -615,9 +641,9 @@ def test_threaded_provider_validation_error_is_shielded(
     exc = _real_error(error_server, "alpaca_api_401")
     _available_alpaca(window)
     monkeypatch.setattr(
-        controller_module,
+        controller_module.ProviderRegistry,
         "create_provider",
-        lambda connection, store: _FailingProvider(exc),
+        staticmethod(lambda connection, store: _FailingProvider(exc)),
     )
     _capture_logs(caplog)
 

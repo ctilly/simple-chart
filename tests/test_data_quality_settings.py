@@ -1,8 +1,10 @@
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import logging
 from pathlib import Path
 import threading
+from types import ModuleType
 from typing import Any
 
 import pytest
@@ -11,12 +13,14 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDateEdit,
+    QDialog,
     QDoubleSpinBox,
     QLabel,
     QLineEdit,
     QPushButton,
     QTableWidget,
 )
+from pytestqt.qtbot import QtBot
 
 import app.data_quality as data_quality_module
 from app.application_settings import ApplicationSettingsDialog
@@ -27,7 +31,9 @@ from app.bar_comparison import (
     BarComparisonService,
     BarFieldSuggestion,
 )
-from app.data_quality import DataQualityTab
+from app.controller import MainWindow
+from app.data_quality import DataQualityTab, SymbolRefreshDialog
+from data.provider.spec import Capability, ConnectionTemplate, CredentialField, NamespaceSpec, ProviderSpec
 from data.aggregator import resample
 from data.cache import Cache, IdenticalCorrectionError
 from data.models import (
@@ -39,11 +45,10 @@ from data.models import (
 )
 from data.provider import ProviderAvailability
 from data.provider.base import DataProvider
-from data.provider.config import (
-    ALPACA_PAPER_CONNECTION_ID,
-    MarketDataFeed,
-    yfinance_connection,
-)
+from data.provider.config import ProviderConnection
+from data.provider.registry import ProviderRegistry, discover_providers
+from providers.alpaca import ALPACA_PAPER_CONNECTION_ID, MarketDataFeed
+from provider_support import yfinance_connection, startup_registry
 from data.provider.credentials import (
     ProviderCredentials,
     UnavailableCredentialStore,
@@ -83,6 +88,14 @@ def _no_detached_comparison_workers() -> Iterator[None]:
 class _MemoryCredentialStore:
     def get(self, connection_id: str) -> ProviderCredentials | None:
         return None
+
+    def read(
+        self,
+        connection_id: str,
+        fields: tuple[CredentialField, ...],
+        display_name: str,
+    ) -> ProviderCredentials | None:
+        return self.get(connection_id)
 
     def put(
         self,
@@ -147,14 +160,118 @@ class _BlockingComparisonService(_ComparisonService):
         return result
 
 
+@pytest.mark.usefixtures("isolated_credentials")
+@pytest.mark.parametrize("action", ["compare", "refresh", "unavailable"])
+def test_main_window_data_quality_uses_registry_sources(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_registry: ProviderRegistry,
+    action: str,
+) -> None:
+    cached = _bad_spy_bar()
+
+    class BarProvider(DataProvider):
+        def native_timeframes(self) -> list[Timeframe]:
+            return [Timeframe.MIN5, Timeframe.DAILY]
+
+        def fetch_bars(
+            self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime,
+        ) -> list[Bar]:
+            return [cached]
+
+    def factory(connection: ProviderConnection, credentials: ProviderCredentials | None) -> DataProvider:
+        return BarProvider()
+
+    original_fallback = provider_registry.fallback_provider
+    fallback_namespace = original_fallback.namespaces[0].namespace
+    fallback_label = "Primary Bar Source"
+    third_namespace = "third:bars"
+    third_label = "Independent Bar Source"
+    fallback = ModuleType("quality_fallback")
+    fallback.PROVIDER = replace(
+        original_fallback, factory=factory,
+        namespaces=(replace(original_fallback.namespaces[0], label=fallback_label),),
+    )
+    third = ModuleType("quality_third")
+    third.PROVIDER = ProviderSpec(
+        name="third",
+        display_name="Third Provider",
+        connections=(ConnectionTemplate("third", "Third Connection"),),
+        capabilities=frozenset({Capability.BARS}),
+        namespaces=(NamespaceSpec(third_namespace, third_label, (), True),),
+        factory=factory,
+    )
+    registry = discover_providers((fallback, third))
+    db_path = str(tmp_path / "test.db")
+    with Cache(db_path, registry=registry) as cache:
+        for namespace in (fallback_namespace, third_namespace):
+            cache.put_bars(namespace, "SPY", Timeframe.DAILY, [cached])
+    shown = capture_message_dialogs(monkeypatch)
+    confirmations: list[str] = []
+
+    def capture_confirmation(dialog: SymbolRefreshDialog) -> QDialog.DialogCode:
+        message = dialog.findChild(QLabel, "symbolRefreshMessage")
+        assert message is not None
+        confirmations.append(message.text())
+        return QDialog.DialogCode.Rejected
+
+    def exercise_settings(dialog: ApplicationSettingsDialog) -> QDialog.DialogCode:
+        qtbot.addWidget(dialog)
+        tab = dialog.findChild(DataQualityTab, "dataQualityTab")
+        assert tab is not None
+        source = tab.findChild(QComboBox, "dataQualitySource")
+        assert source is not None
+        if action == "compare":
+            date_editor = tab.findChild(QDateEdit, "dataQualityDate")
+            assert date_editor is not None
+            date_editor.setDate(QDate(2026, 2, 2))
+            _button(tab, "loadBarsForDate").click()
+            _table(tab).setCurrentCell(0, 0)
+            _button(tab, "compareBarSources").click()
+            qtbot.waitUntil(lambda: not tab.comparison_running())
+            table = _comparison_table(tab)
+            assert [_cell_text(table, row, 0) for row in range(table.rowCount())] == [
+                f"Cached {fallback_label}", f"Refreshed {fallback_label}", third_label,
+            ]
+            assert _cell_text(table, 2, 6) == "Comparison only"
+        elif action == "refresh":
+            _button(tab, "refreshSymbolFromSource").click()
+            assert len(confirmations) == 1
+            assert f"refreshed from {fallback_label}" in confirmations[0]
+        else:
+            source.setCurrentIndex(source.findData(third_namespace))
+            _button(tab, "refreshSymbolFromSource").click()
+            assert [message.message for message in shown] == [
+                f"{third_label} is not connected in this session. "
+                "Make it the active data source, then refresh SPY.",
+            ]
+        assert source.itemText(source.findData(fallback_namespace)) == fallback_label
+        assert source.itemText(source.findData(third_namespace)) == third_label
+        dialog.reject()
+        return QDialog.DialogCode.Rejected
+
+    def skip_load(window: MainWindow) -> None:
+        pass
+
+    monkeypatch.setattr(MainWindow, "_load", skip_load)
+    monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", skip_load)
+    monkeypatch.setattr(SymbolRefreshDialog, "exec", capture_confirmation)
+    monkeypatch.setattr(ApplicationSettingsDialog, "exec", exercise_settings)
+
+    window = MainWindow(db_path, provider_registry=registry)
+    qtbot.addWidget(window)
+    window._on_application_settings()
+
+
 def test_settings_data_quality_tab_uses_current_chart_context(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
-        cache.set_provider_connection_feed(
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
+        cache.set_provider_connection_options(
             ALPACA_PAPER_CONNECTION_ID,
-            MarketDataFeed.DELAYED_SIP,
+            {"feed": MarketDataFeed.DELAYED_SIP.value},
         )
         cache.put_bars(
             "alpaca:delayed_sip",
@@ -190,7 +307,7 @@ def test_find_suspicious_bar_populates_editor(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -228,7 +345,7 @@ def test_apply_and_restore_bar_correction(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -295,7 +412,7 @@ def test_apply_preserves_undisplayed_provider_precision(
         close=691.712345678901,
         volume=79_286_521,
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -336,7 +453,7 @@ def test_volume_editor_accepts_displayed_group_separators(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -378,7 +495,7 @@ def test_load_date_finds_after_hours_bar_by_new_york_date(
     tmp_path: Path,
 ) -> None:
     after_hours = datetime(2026, 2, 3, 0, 45, tzinfo=UTC)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -412,7 +529,7 @@ def test_daily_yahoo_bar_displays_its_utc_session_date(
     tmp_path: Path,
 ) -> None:
     yahoo_session = datetime(2026, 2, 2, 0, 0, tzinfo=UTC)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -439,7 +556,7 @@ def test_settings_tracks_immediately_applied_bar_changes(
     qtbot: Any,
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -482,7 +599,7 @@ def test_invalid_editor_values_show_validation_message(
         warnings.append((title, message))
 
     monkeypatch.setattr(data_quality_module, "show_warning", capture_warning)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -525,7 +642,7 @@ def test_correction_conflict_is_visible_and_editable(
 ) -> None:
     initial = Bar(_SESSION, 100.0, 110.0, 90.0, 105.0, 1_000)
     revised = Bar(_SESSION, 90.0, 110.0, 85.0, 90.0, 1_000)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [initial])
         cache.put_bar_correction(
             BarCorrection(
@@ -568,7 +685,7 @@ def test_compare_sources_runs_off_thread_and_shows_no_revision_message(
     result = _comparison_result(cached, cached)
     service = _ComparisonService({_SESSION: result})
     main_thread_id = threading.get_ident()
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -612,7 +729,7 @@ def test_comparison_cell_copies_only_selected_field_to_editor(
         low_corroborated=True,
     )
     service = _ComparisonService({_SESSION: result})
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -673,7 +790,7 @@ def test_comparison_result_is_cached_until_compare_again(
             second_timestamp: _comparison_result(second, second),
         }
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -722,7 +839,7 @@ def test_refresh_provider_bar_replaces_raw_bar_and_invalidates_comparison(
     service = _ComparisonService(
         {_SESSION: _comparison_result(cached, refreshed)}
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -783,7 +900,7 @@ def test_synthesized_bar_explains_comparison_is_unavailable(
 ) -> None:
     cached = _bad_spy_bar()
     service = _ComparisonService({_SESSION: _comparison_result(cached, cached)})
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("yfinance", "SPY", Timeframe.MIN39, [cached])
         tab = DataQualityTab(
             cache,
@@ -809,7 +926,7 @@ def test_settings_detaches_running_comparison_until_application_shutdown(
 ) -> None:
     cached = _bad_spy_bar()
     service = _BlockingComparisonService(_comparison_result(cached, cached))
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("yfinance", "SPY", Timeframe.DAILY, [cached])
         dialog = ApplicationSettingsDialog(
             cache,
@@ -955,7 +1072,7 @@ def test_unchanged_correction_reports_no_correction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [_bad_spy_bar()])
         tab = _suspicious_bar_tab(qtbot, cache)
 
@@ -972,7 +1089,7 @@ def test_identical_correction_is_recognized_by_type_not_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [_bad_spy_bar()])
         tab = _suspicious_bar_tab(qtbot, cache)
 
@@ -996,7 +1113,7 @@ def test_correction_failure_from_outside_the_app_is_shielded(
     shown = capture_message_dialogs(monkeypatch)
     with LocalErrorServer() as server:
         exc = http_client_invalid_header(server)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [_bad_spy_bar()])
         tab = _suspicious_bar_tab(qtbot, cache)
         high = tab.findChild(QDoubleSpinBox, "dataQualityHigh")
@@ -1048,7 +1165,7 @@ def test_provider_refresh_failure_from_outside_the_app_is_shielded(
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
     exc = requests_invalid_header(invalid_header_values()["unicode_newline_str"])
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _refresh_ready_tab(qtbot, cache)
 
         def fail(*args: object) -> None:
@@ -1080,7 +1197,7 @@ def test_provider_refresh_guidance_still_shows_its_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     shown = capture_message_dialogs(monkeypatch)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         tab = _refresh_ready_tab(qtbot, cache)
         cache.rewind_symbol_history(
             "alpaca:delayed_sip", "SPY", {Timeframe.DAILY: 0}, ()
@@ -1171,8 +1288,9 @@ def test_bar_older_than_the_provider_window_cannot_be_refreshed(
         provider_connections=[yfinance_connection()],
         provider_availability=_AVAILABLE_PROVIDERS,
         provider_factory=lambda _connection, _store: provider,
+        registry=startup_registry(),
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("yfinance", "SPY", Timeframe.MIN5, [cached])
         tab = DataQualityTab(
             cache,
@@ -1221,7 +1339,7 @@ def test_refreshing_a_5m_provider_bar_updates_its_39m_and_65m_bars(
     bad = bars[20]
     bars[20] = Bar(bad.timestamp, bad.open, bad.high, 68.4, bad.close, bad.volume, bad.vwap)
     refreshed = Bar(bad.timestamp, bad.open, bad.high, 684.9, bad.close, bad.volume)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(namespace, "SPY", Timeframe.MIN5, bars)
         for synthesized in (Timeframe.MIN39, Timeframe.MIN65):
             cache.put_bars(namespace, "SPY", synthesized, resample(bars, synthesized))

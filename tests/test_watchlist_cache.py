@@ -2,24 +2,25 @@ import sqlite3
 from pathlib import Path
 
 from data.cache import Cache
+from provider_support import startup_registry
 
 
 def test_watchlist_reorder_persists_user_order(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.add_to_watchlist("SPY")
         cache.add_to_watchlist("QQQ")
         cache.add_to_watchlist("IWM")
 
         cache.reorder_watchlist(["IWM", "SPY", "QQQ"])
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         symbols = cache.get_watchlist()
 
     assert symbols == ["IWM", "SPY", "QQQ"]
 
 
 def test_watchlist_duplicate_add_keeps_original_order(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.add_to_watchlist("SPY")
         cache.add_to_watchlist("QQQ")
         cache.add_to_watchlist("IWM")
@@ -46,7 +47,7 @@ def test_watchlist_sort_order_migration_preserves_legacy_rowid_order(
     finally:
         conn.close()
 
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         symbols = cache.get_watchlist()
 
     assert symbols == ["SPY", "QQQ", "IWM"]

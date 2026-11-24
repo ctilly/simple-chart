@@ -21,10 +21,11 @@ import pytest
 import app.controller as controller_module
 import app.extension_runtime as extension_runtime_module
 from app.controller import MainWindow
+from data.provider.registry import ProviderRegistry
 from data.cache import Cache
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider.base import DataProvider, HistoryUnavailableError
-from data.provider.config import yfinance_connection
+from provider_support import yfinance_connection, startup_registry
 from data.provider.credentials import (
     CredentialStoreAccess,
     UnavailableCredentialStore,
@@ -211,7 +212,7 @@ def _ms(timestamp: datetime) -> int:
 
 
 def _seed(db_path: Path, scenario: _Scenario) -> None:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         intraday = _intraday_bars(scenario.last_intraday_bar)
         cache.put_bars(_NAMESPACE, _SYMBOL, Timeframe.MIN5, intraday)
         cache.replace_bar_fetch_coverage(
@@ -251,6 +252,7 @@ def _snapshot(db_path: Path) -> CacheSnapshot:
 
 
 def _window(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     db_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -261,12 +263,12 @@ def _window(
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(
+        lambda *, registry: CredentialStoreAccess(
             UnavailableCredentialStore("test"), False, "test",
         ),
     )
     monkeypatch.setattr(
-        controller_module, "create_provider", lambda _connection, _store: provider,
+        controller_module.ProviderRegistry, "create_provider", staticmethod(lambda _connection, _store: provider),
     )
     monkeypatch.setattr(_FixedDateTime, "frozen", now)
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
@@ -281,7 +283,7 @@ def _window(
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
-    window = MainWindow(str(db_path))
+    window = MainWindow(str(db_path), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     return window, warnings
@@ -351,6 +353,7 @@ def _call_key(call: Call) -> tuple[str, datetime, datetime]:
 
 
 def _assert_loads_complete_cleanly(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -363,7 +366,7 @@ def _assert_loads_complete_cleanly(
     _seed(db_path, scenario)
     seeded_bars, seeded_coverage = _snapshot(db_path)
     provider = _HolidayProvider(unavailable=tail == "unavailable")
-    window, warnings = _window(qtbot, db_path, monkeypatch, provider, scenario.now)
+    window, warnings = _window(provider_registry, qtbot, db_path, monkeypatch, provider, scenario.now)
     expected_bars = _bar_tuples(_expected_series(scenario, timeframe))
     expected_calls = _expected_calls(scenario, timeframe)
     assert expected_bars
@@ -406,6 +409,7 @@ def _assert_loads_complete_cleanly(
 @_TIMEFRAMES
 @_VARIANTS
 def test_weekday_holiday_load_completes_cleanly(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -414,6 +418,7 @@ def test_weekday_holiday_load_completes_cleanly(
     loads: int,
 ) -> None:
     _assert_loads_complete_cleanly(
+        provider_registry,
         qtbot, tmp_path, monkeypatch, _THANKSGIVING, timeframe, tail, loads,
     )
 
@@ -421,6 +426,7 @@ def test_weekday_holiday_load_completes_cleanly(
 @_TIMEFRAMES
 @_VARIANTS
 def test_early_close_afternoon_load_completes_cleanly(
+    provider_registry: ProviderRegistry,
     qtbot: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -429,5 +435,6 @@ def test_early_close_afternoon_load_completes_cleanly(
     loads: int,
 ) -> None:
     _assert_loads_complete_cleanly(
+        provider_registry,
         qtbot, tmp_path, monkeypatch, _EARLY_CLOSE, timeframe, tail, loads,
     )

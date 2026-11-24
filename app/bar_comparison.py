@@ -12,20 +12,16 @@ from data.models import Bar, Timeframe
 from data.provider import (
     ProviderAvailability,
     ProviderConfigurationError,
-    create_provider,
 )
 from data.provider.base import (
     DataProvider,
     MarketDataEntitlementError,
     UnsupportedTimeframeError,
 )
-from data.provider.config import (
-    ConnectionEnvironment,
-    MarketDataFeed,
-    ProviderConnection,
-    YFINANCE_CONNECTION_ID,
-)
+from data.provider.config import ProviderConnection
 from data.provider.credentials import CredentialStore
+from data.provider.registry import ProviderRegistry
+from data.provider.spec import Capability, NamespaceSpec, ProviderSpec
 
 
 BarField = Literal["open", "high", "low", "close", "volume"]
@@ -39,12 +35,6 @@ _CELL_RELATIVE_TOLERANCE = 0.0001
 _CELL_ABSOLUTE_TOLERANCE = 0.01
 _CORROBORATION_RELATIVE_TOLERANCE = 0.01
 _CORROBORATION_DIRECTION_RATIO = 3.0
-_SOURCE_LABELS = {
-    "yfinance": "Yahoo Finance",
-    "alpaca:iex": "Alpaca / IEX",
-    "alpaca:delayed_sip": "Alpaca / SIP (15-minute delayed)",
-    "alpaca:sip": "Alpaca / SIP (real-time)",
-}
 
 
 def _never_cancel() -> bool:
@@ -96,13 +86,18 @@ class BarComparisonService:
         credential_store: CredentialStore,
         provider_connections: Sequence[ProviderConnection],
         provider_availability: Mapping[str, ProviderAvailability],
-        provider_factory: ProviderFactory = create_provider,
+        provider_factory: ProviderFactory | None = None,
         preferred_connection_id: str | None = None,
+        *,
+        registry: ProviderRegistry,
     ) -> None:
+        self._registry = registry
         self._credential_store = credential_store
-        self._connections = tuple(provider_connections)
+        self._connections = {
+            connection.connection_id: connection for connection in provider_connections
+        }
         self._availability = dict(provider_availability)
-        self._provider_factory = provider_factory
+        self._provider_factory = registry.create_provider if provider_factory is None else provider_factory
         self._preferred_connection_id = preferred_connection_id
 
     def compare(
@@ -119,11 +114,12 @@ class BarComparisonService:
                 "directly with provider bars."
             )
 
-        requests = self._source_requests(origin_namespace)
+        origin_label = self._registry.namespace_label(origin_namespace)
+        requests = self._source_requests(origin_namespace, origin_label)
         rows: list[BarComparisonRow] = [
             BarComparisonRow(
                 origin_namespace,
-                f"Cached {_source_label(origin_namespace)}",
+                f"Cached {origin_label}",
                 BarComparisonRowKind.CACHED_ORIGIN,
                 cached_bar,
             )
@@ -163,111 +159,77 @@ class BarComparisonService:
             origin_unchanged=refreshed_bar is not None and not suggestions,
         )
 
-    def _source_requests(self, origin_namespace: str) -> list[_SourceRequest]:
-        alpaca_connection = self._alpaca_connection()
-        origin_connection = self._connection_for_namespace(
-            origin_namespace,
-            alpaca_connection,
-        )
-        requests = [
-            _SourceRequest(
-                origin_namespace,
-                f"Refreshed {_source_label(origin_namespace)}",
-                origin_connection,
-                BarComparisonRowKind.REFRESHED_ORIGIN,
-            )
-        ]
-
-        if alpaca_connection is not None:
-            alternate_feeds: tuple[MarketDataFeed, ...]
-            if origin_namespace == "alpaca:iex":
-                alternate_feeds = (MarketDataFeed.DELAYED_SIP,)
-            elif origin_namespace in ("alpaca:delayed_sip", "alpaca:sip"):
-                alternate_feeds = (MarketDataFeed.IEX,)
-            elif origin_namespace == "yfinance":
-                alternate_feeds = (
-                    MarketDataFeed.IEX,
-                    MarketDataFeed.DELAYED_SIP,
-                )
-            else:
-                alternate_feeds = ()
-            for feed in alternate_feeds:
-                connection = replace(alpaca_connection, feed=feed)
-                requests.append(
-                    _SourceRequest(
-                        connection.cache_namespace,
-                        _source_label(connection.cache_namespace),
-                        connection,
-                        BarComparisonRowKind.CORROBORATION,
-                    )
-                )
-
-        if origin_namespace != "yfinance":
-            yahoo = next(
-                (
-                    connection
-                    for connection in self._connections
-                    if connection.connection_id == YFINANCE_CONNECTION_ID
-                ),
+    def _source_requests(
+        self, origin_namespace: str, origin_label: str,
+    ) -> list[_SourceRequest]:
+        origin_connection = None
+        corroboration: list[_SourceRequest] = []
+        for spec in self._registry.providers.values():
+            if Capability.BARS not in spec.capabilities:
+                continue
+            namespaces = [
+                namespace for namespace in spec.namespaces
+                if namespace.comparable or namespace.namespace == origin_namespace
+            ]
+            if not namespaces:
+                continue
+            origin = next(
+                (namespace for namespace in namespaces if namespace.namespace == origin_namespace),
                 None,
             )
-            requests.append(
-                _SourceRequest(
-                    "yfinance",
-                    _source_label("yfinance"),
-                    yahoo,
-                    BarComparisonRowKind.CORROBORATION,
-                )
-            )
-        return requests
+            connection = self._comparison_connection(spec, origin)
+            if connection is None:
+                continue
+            for namespace in namespaces:
+                variant = self._registry.connection_variant(connection, namespace)
+                if namespace is origin:
+                    origin_connection = variant
+                else:
+                    corroboration.append(_SourceRequest(
+                        namespace.namespace,
+                        namespace.label,
+                        variant,
+                        BarComparisonRowKind.CORROBORATION,
+                    ))
 
-    def _alpaca_connection(self) -> ProviderConnection | None:
-        availability = self._availability.get("alpaca")
+        return [
+            _SourceRequest(
+                origin_namespace,
+                f"Refreshed {origin_label}",
+                origin_connection,
+                BarComparisonRowKind.REFRESHED_ORIGIN,
+            ),
+            *corroboration,
+        ]
+
+    def _comparison_connection(
+        self, spec: ProviderSpec, origin: NamespaceSpec | None,
+    ) -> ProviderConnection | None:
+        availability = self._availability.get(spec.name)
         if availability is None or not availability.available:
             return None
         candidates = [
-            connection
-            for connection in self._connections
-            if connection.provider_name == "alpaca"
+            self._connections[template.connection_id]
+            for template in spec.connections
+            if template.connection_id in self._connections
         ]
-        candidates.sort(
-            key=lambda connection: (
-                connection.connection_id != self._preferred_connection_id,
-                connection.environment != ConnectionEnvironment.PAPER,
-                connection.connection_id,
-            )
-        )
+        # A connection that can refresh the origin takes priority over one that cannot.
+        candidates.sort(key=lambda connection: (
+            origin is not None and self._registry.connection_variant(connection, origin) is None,
+            connection.connection_id != self._preferred_connection_id,
+        ))
         for connection in candidates:
+            if not spec.requires_credentials:
+                return connection
             try:
-                credentials = self._credential_store.get(connection.connection_id)
+                credentials = self._registry.credentials_for(
+                    connection.connection_id, self._credential_store,
+                )
             except RuntimeError:
                 return None
             if credentials is not None:
                 return connection
         return None
-
-    def _connection_for_namespace(
-        self,
-        namespace: str,
-        alpaca_connection: ProviderConnection | None,
-    ) -> ProviderConnection | None:
-        if namespace == "yfinance":
-            return next(
-                (
-                    connection
-                    for connection in self._connections
-                    if connection.connection_id == YFINANCE_CONNECTION_ID
-                ),
-                None,
-            )
-        if alpaca_connection is None:
-            return None
-        feed_value = namespace.removeprefix("alpaca:")
-        try:
-            feed = MarketDataFeed(feed_value)
-        except ValueError:
-            return None
-        return replace(alpaca_connection, feed=feed)
 
     def _fetch_source(
         self,
@@ -277,9 +239,6 @@ class BarComparisonService:
         cached_bar: Bar,
     ) -> BarComparisonRow:
         if request.connection is None:
-            return _failed_row(request, "This data source is unavailable.")
-        availability = self._availability.get(request.connection.provider_name)
-        if availability is None or not availability.available:
             return _failed_row(request, "This data source is unavailable.")
         try:
             provider = self._provider_factory(
@@ -468,7 +427,3 @@ def _failed_row(request: _SourceRequest, error: str) -> BarComparisonRow:
         None,
         error,
     )
-
-
-def _source_label(namespace: str) -> str:
-    return _SOURCE_LABELS.get(namespace, namespace)

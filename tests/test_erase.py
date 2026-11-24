@@ -15,6 +15,7 @@ from tools.erase import EraseTool
 from tools.fib_retracement.session_store import FibRetracementStore
 from tools.vertical_line.session_store import VerticalLineStore
 from simplechart.api import ChartEvent, ChartExtensionAddMode, ChartExtensionMutation, ChartExtensionRender
+from provider_support import startup_registry
 
 
 def test_erase_declares_toolbar_and_icon() -> None:
@@ -43,7 +44,7 @@ def test_erase_clears_transient_but_keeps_persistent(tmp_path: Path) -> None:
     # the drawings that persist across sessions.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         runtime, store = _runtime(state, cache)
         store.load_for_symbol("SPY")
 
@@ -85,7 +86,7 @@ def test_erase_clears_transient_but_keeps_persistent(tmp_path: Path) -> None:
 def test_erase_is_a_noop_when_nothing_is_transient(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         runtime, store = _runtime(state, cache)
         store.load_for_symbol("SPY")
         runtime.start_drawing("vertical_line", series, runtime.chart_event(series, 2.0, 100.0))
@@ -102,7 +103,7 @@ def test_erase_runs_cleanly_and_spares_avwap_anchors(tmp_path: Path) -> None:
     # the fan-out must not throw on the non-DrawingStore avwap handler.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         runtime, store = _runtime(state, cache)
         store.load_for_symbol("SPY")
         # Place the drawing first so it owns series key vertical_line_1 (the

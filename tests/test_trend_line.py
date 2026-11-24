@@ -11,6 +11,7 @@ import tools.trend_line  # noqa: F401
 from tools.trend_line import TrendLineTool
 from tools.trend_line.session_store import TrendLineStore
 from simplechart.api import ChartExtensionAddMode, ChoiceParam, FloatParam
+from provider_support import startup_registry
 
 
 def test_trend_line_declares_toolbar_and_icon() -> None:
@@ -38,7 +39,7 @@ def test_preview_draws_diagonal_to_cursor() -> None:
 def test_second_click_commits_and_deactivates(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -56,7 +57,7 @@ def test_second_click_commits_and_deactivates(tmp_path: Path) -> None:
 def test_vertex_drag_moves_only_that_endpoint(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -80,7 +81,7 @@ def test_vertex_drag_moves_only_that_endpoint(tmp_path: Path) -> None:
 def test_body_drag_translates_whole_line(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -111,7 +112,7 @@ def test_line_projects_past_last_bar(tmp_path: Path) -> None:
     # not snap back onto the last bar.
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -129,7 +130,7 @@ def test_line_projects_past_last_bar(tmp_path: Path) -> None:
 def test_body_drag_into_future(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -155,7 +156,7 @@ def test_body_drag_into_future(tmp_path: Path) -> None:
 def test_configure_and_remove(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
-    with Cache(str(tmp_path / "t.db")) as cache:
+    with Cache(str(tmp_path / "t.db"), registry=startup_registry()) as cache:
         store = TrendLineStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")

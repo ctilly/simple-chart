@@ -2,11 +2,12 @@ from pathlib import Path
 
 from data.cache import Cache
 from data.models import ChartExtensionStoreRecord
+from provider_support import startup_registry
 
 
 def test_update_extension_record_persists_sort_key_and_payload(tmp_path: Path) -> None:
     db_path = tmp_path / "simplechart.db"
-    cache = Cache(str(db_path))
+    cache = Cache(str(db_path), registry=startup_registry())
     try:
         record = cache.put_extension_record(
             "avwap.anchors",
@@ -43,7 +44,7 @@ def test_update_extension_record_persists_sort_key_and_payload(tmp_path: Path) -
     finally:
         cache.close()
 
-    with Cache(str(db_path)) as reopened:
+    with Cache(str(db_path), registry=startup_registry()) as reopened:
         records = reopened.get_extension_records("avwap.anchors", "SPY")
 
     assert records == [updated]
@@ -51,7 +52,7 @@ def test_update_extension_record_persists_sort_key_and_payload(tmp_path: Path) -
 
 def test_extension_records_are_scoped_by_store_key_and_symbol(tmp_path: Path) -> None:
     db_path = tmp_path / "simplechart.db"
-    cache = Cache(str(db_path))
+    cache = Cache(str(db_path), registry=startup_registry())
     try:
         expected = cache.put_extension_record(
             "avwap.anchors",

@@ -1,15 +1,17 @@
 from typing import Any
+from unittest.mock import Mock
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QToolButton
 
 from app.data_source_status import DataSourceStatus
 from app.symbol_bar import SymbolBar
+from data.aggregator import Aggregator
 
 
 def test_settings_button_is_aligned_with_timeframe_buttons(qtbot: Any) -> None:
     opened: list[bool] = []
-    symbol_bar = SymbolBar()
+    symbol_bar = SymbolBar(Mock(spec=Aggregator))
     symbol_bar.settings_requested.connect(lambda: opened.append(True))
     qtbot.addWidget(symbol_bar)
     symbol_bar.show()

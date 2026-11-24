@@ -12,6 +12,7 @@ import app.controller as controller_module
 import tools.trend_line  # noqa: F401
 from app.controller import MainWindow
 from app.state import ChartExtensionState
+from data.provider.registry import ProviderRegistry
 from data.cache import Cache
 from data.models import Bar, OHLCVSeries, Timeframe
 from data.provider.credentials import CredentialStoreAccess, UnavailableCredentialStore
@@ -169,18 +170,23 @@ def _record_action(menu: QMenu) -> QAction:
     return next(action for action in menu.actions() if action.text() == "Record")
 
 
-def _window(qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> MainWindow:
+def _window(
+    provider_registry: ProviderRegistry,
+    qtbot: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> MainWindow:
     monkeypatch.setattr(
         controller_module,
         "initialize_keyring_credential_store",
-        lambda: CredentialStoreAccess(UnavailableCredentialStore("test"), False, "test"),
+        lambda *, registry: CredentialStoreAccess(UnavailableCredentialStore("test"), False, "test"),
     )
     production_load = MainWindow._load
     monkeypatch.setattr(MainWindow, "_load", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", lambda window: None)
     monkeypatch.setattr(MainWindow, "_refresh_level1", lambda window: None)
     monkeypatch.setattr(controller_module, "show_warning", lambda *_args: None)
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     monkeypatch.setattr(MainWindow, "_load", production_load)
     window.resize(1200, 800)
@@ -225,9 +231,10 @@ def _with_tool(window: MainWindow) -> None:
 
 
 def test_trend_line_started_on_one_symbol_cannot_finish_on_another(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 50, 100.0))
     window._on_drawing_tool_selected("trend_line")
     window._on_bar_clicked(5.0, 100.0, 1.0, 1.0)
@@ -238,7 +245,7 @@ def test_trend_line_started_on_one_symbol_cannot_finish_on_another(
     _deliver(window, _series("SPY", 50, 600.0))
     window._on_bar_clicked(7.0, 600.0, 1.0, 1.0)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=provider_registry) as cache:
         assert cache.get_extension_records("trend_line.drawings", "SPY") == []
         assert cache.get_extension_records("trend_line.drawings", "XBI") == []
     # The tool stays selected; the click on SPY started a fresh line.
@@ -247,9 +254,10 @@ def test_trend_line_started_on_one_symbol_cannot_finish_on_another(
 
 
 def test_timeframe_change_cancels_a_drawing_in_progress(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 50, 100.0))
     window._on_drawing_tool_selected("trend_line")
     window._on_bar_clicked(5.0, 100.0, 1.0, 1.0)
@@ -261,9 +269,10 @@ def test_timeframe_change_cancels_a_drawing_in_progress(
 
 
 def test_reload_during_a_drag_cancels_it_and_the_release_writes_nothing(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 300, 100.0))
     _with_tool(window)
     interactions = window._chart.interactions
@@ -291,9 +300,10 @@ def test_reload_during_a_drag_cancels_it_and_the_release_writes_nothing(
 
 
 def test_right_click_while_a_new_symbol_loads_does_nothing(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 50, 100.0))
     _with_tool(window)
     menus: list[QMenu] = []
@@ -312,9 +322,10 @@ def test_right_click_while_a_new_symbol_loads_does_nothing(
 
 
 def test_context_action_is_dropped_when_a_load_starts_while_its_menu_is_open(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 50, 100.0))
     _with_tool(window)
 
@@ -333,9 +344,10 @@ def test_context_action_is_dropped_when_a_load_starts_while_its_menu_is_open(
 
 
 def test_context_action_still_applies_when_the_same_load_merges_history(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _start_load(window, "XBI")
     request = window._current_chart_request
     assert request is not None
@@ -360,9 +372,10 @@ def test_context_action_still_applies_when_the_same_load_merges_history(
 
 
 def test_cancelled_drag_released_with_a_modifier_does_not_block_the_next_drag(
+    provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    window = _window(qtbot, tmp_path, monkeypatch)
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
     _display(window, _series("XBI", 300, 100.0))
     _with_tool(window)
     interactions = window._chart.interactions

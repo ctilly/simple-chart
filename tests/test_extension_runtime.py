@@ -26,6 +26,7 @@ from simplechart.api import (
 )
 from indicators.avwap.anchor_store import AvwapAnchorStore
 from indicators.avwap.models import AnchorRecord
+from provider_support import startup_registry
 
 
 class SegmentOnlyIndicator(ChartExtension):
@@ -218,7 +219,7 @@ class RecordingStore:
 def test_runtime_adds_avwap_state_when_anchors_exist(tmp_path: Path) -> None:
     state = State(symbol="SPY")
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors([
             AnchorRecord(
@@ -251,7 +252,7 @@ def test_runtime_updates_series_keys_and_preserves_current_visibility(
         )
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         passes = runtime.render_all(_series())
 
@@ -272,7 +273,7 @@ def test_runtime_tracks_horizontal_segment_keys_and_visibility(
         )
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         passes = runtime.render_all(_series())
 
@@ -291,7 +292,7 @@ def test_runtime_tracks_vertical_line_keys_and_visibility(tmp_path: Path) -> Non
         )
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         passes = runtime.render_all(_series())
 
@@ -304,7 +305,7 @@ def test_runtime_routes_toolbar_drawing_lifecycle(tmp_path: Path) -> None:
     state = State(symbol="SPY")
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = RecordingStore()
         runtime = _runtime(state, cache, store)
         start = runtime.start_drawing(
@@ -347,7 +348,7 @@ def test_runtime_applies_toolbar_drawing_cancel_mutation(tmp_path: Path) -> None
         working_params={},
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = RecordingStore()
         runtime = _runtime(state, cache, store)
         mutation = runtime.cancel_drawing(session)
@@ -362,7 +363,7 @@ def test_runtime_chart_event_resolves_timestamp_x(tmp_path: Path) -> None:
     series = _series()
     x_value = series.bars[2].timestamp.timestamp()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         event = runtime.chart_event(series, x_value)
 
@@ -376,7 +377,7 @@ def test_runtime_applies_plugin_context_action_to_add_avwap_anchor(
     state = State(symbol="SPY")
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         event = runtime.chart_event(series, 2.0, button="right")
@@ -399,7 +400,7 @@ def test_runtime_routes_avwap_drag_and_persists_finish(tmp_path: Path) -> None:
     original_ts = int(series.bars[1].timestamp.timestamp() * 1000)
     target_ts = int(series.bars[3].timestamp.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         persisted = _put_avwap_anchor(
             cache,
             AnchorRecord(
@@ -434,7 +435,7 @@ def test_runtime_skips_avwap_drag_redraw_until_anchor_bar_changes(tmp_path: Path
     series = _series()
     anchor_ts = int(series.bars[1].timestamp.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         persisted = _put_avwap_anchor(
             cache,
             AnchorRecord(
@@ -461,7 +462,7 @@ def test_runtime_removes_avwap_anchor_through_store(tmp_path: Path) -> None:
     series = _series()
     anchor_ts = int(series.bars[1].timestamp.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         persisted = _put_avwap_anchor(
             cache,
             AnchorRecord(
@@ -499,7 +500,7 @@ def test_runtime_uses_indicator_owned_avwap_config(tmp_path: Path) -> None:
     series = _series()
     anchor_ts = int(series.bars[1].timestamp.timestamp() * 1000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         persisted = _put_avwap_anchor(
             cache,
             AnchorRecord(
@@ -691,7 +692,7 @@ def test_interim_render_skips_full_history_extensions_without_pruning_state(
         ChartExtensionState(name="test_interim_segment", params={}),
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         interim = runtime.render_all(_series(), history_complete=False)
         interim_sma = state.extensions[0]
@@ -719,7 +720,7 @@ def test_deferred_drawing_is_not_hit_by_drag_or_context_menu(
     state.extensions = [ChartExtensionState(name="test_full_history_tool", params={})]
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         runtime.render_all(series)
         event = runtime.chart_event(series, 0.0, 100.0)
@@ -788,7 +789,7 @@ def test_interim_render_shows_extensions_whose_lookback_is_loaded(
         ChartExtensionState(name="sma", params={"days": 2, "color": "#ffffff"}),
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         runtime = _runtime(state, cache)
         interim = runtime.render_all(series, history_complete=False)
 
@@ -821,7 +822,7 @@ def test_interim_avwap_omits_unloaded_anchors_and_keeps_their_visibility(
         )
     ]
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = AvwapAnchorStore(AppChartExtensionStoreContext(state, cache))
         store.restore_anchors(anchors)
         runtime = _runtime(state, cache, store)

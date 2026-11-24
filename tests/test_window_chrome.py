@@ -17,6 +17,7 @@ from PyQt6.QtTest import QTest
 
 import app.controller as controller_module
 from app.controller import MainWindow
+from data.provider.registry import ProviderRegistry
 from app.theme import active_theme, apply_theme
 from app.window_chrome import (
     MainWindowTitleBar,
@@ -443,6 +444,7 @@ def test_main_window_wires_custom_chrome_only_on_wayland(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
     custom_chrome: bool,
+    provider_registry: ProviderRegistry,
 ) -> None:
     monkeypatch.setattr(
         controller_module,
@@ -456,7 +458,7 @@ def test_main_window_wires_custom_chrome_only_on_wayland(
         lambda window: None,
     )
 
-    window = MainWindow(str(tmp_path / "test.db"))
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
     qtbot.addWidget(window)
     window.show()
     QApplication.processEvents()

@@ -20,6 +20,7 @@ from realistic_errors import (
     assert_secret_absent,
     requests_invalid_header,
 )
+from provider_support import startup_registry
 
 
 _EXPECTED_STATUS = {
@@ -753,7 +754,7 @@ def test_bar_correction_guidance_is_user_facing_and_still_a_value_error(
     correction: dict[str, Any],
     message: str,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -776,7 +777,7 @@ def test_bar_correction_guidance_is_user_facing_and_still_a_value_error(
 
 
 def test_bar_correction_on_missing_bar_is_user_facing(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(ValueError) as raised:
             cache.put_bar_correction(
                 BarCorrection(
@@ -794,7 +795,7 @@ def test_bar_correction_on_missing_bar_is_user_facing(tmp_path: Path) -> None:
 
 def test_provider_bar_refresh_guidance_is_user_facing(tmp_path: Path) -> None:
     other_session = datetime(2026, 2, 3, 5, 0, tzinfo=UTC)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -839,7 +840,7 @@ def test_provider_bar_refresh_guidance_is_user_facing(tmp_path: Path) -> None:
 def test_timezone_naive_timestamp_stays_an_internal_value_error(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(ValueError) as raised:
             cache.put_bar_correction(
                 BarCorrection(

@@ -7,6 +7,7 @@ import pytest
 from data.aggregator import resample
 from data.cache import Cache, IdenticalCorrectionError
 from data.models import Bar, BarCorrection, Timeframe
+from provider_support import startup_registry
 
 
 _SPY_SESSION = datetime(2026, 2, 2, 5, 0, tzinfo=UTC)
@@ -17,7 +18,7 @@ def test_bar_correction_overrides_only_selected_field(
 ) -> None:
     raw = _bar(_SPY_SESSION, low=68.64)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [raw])
         cache.put_bar_correction(
             BarCorrection(
@@ -61,7 +62,7 @@ def test_correction_identical_to_provider_bar_raises_identical_correction_error(
 ) -> None:
     raw = _bar(_SPY_SESSION, low=68.64)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [raw])
         with pytest.raises(IdenticalCorrectionError):
             cache.put_bar_correction(
@@ -80,7 +81,7 @@ def test_bar_correction_stores_only_values_that_differ_from_provider(
 ) -> None:
     raw = _bar(_SPY_SESSION, low=68.64)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [raw])
         cache.put_bar_correction(
             BarCorrection(
@@ -115,7 +116,7 @@ def test_bar_correction_stores_only_values_that_differ_from_provider(
 def test_put_bar_correction_replaces_the_complete_override_set(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -157,7 +158,7 @@ def test_put_bar_correction_replaces_the_complete_override_set(
 def test_provider_refresh_preserves_only_the_corrected_field(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -217,7 +218,7 @@ def test_provider_refresh_conflict_falls_back_to_raw_provider_bar(
     initial = Bar(_SPY_SESSION, 100.0, 110.0, 90.0, 105.0, 1_000)
     revised = Bar(_SPY_SESSION, 90.0, 110.0, 85.0, 90.0, 1_000)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [initial])
         cache.put_bar_correction(
             BarCorrection(
@@ -265,7 +266,7 @@ def test_correction_is_scoped_to_provider_feed(
     iex = _bar(_SPY_SESSION, low=684.0, volume=1_800_000)
     timestamp_ms = _timestamp_ms(_SPY_SESSION)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [delayed])
         cache.put_bars("alpaca:iex", "SPY", Timeframe.DAILY, [iex])
         cache.put_bar_correction(
@@ -308,7 +309,7 @@ def test_delete_bar_correction_restores_provider_bar(
     raw = _bar(_SPY_SESSION, low=68.64)
     timestamp_ms = _timestamp_ms(_SPY_SESSION)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:delayed_sip", "SPY", Timeframe.DAILY, [raw])
         cache.put_bar_correction(
             BarCorrection(
@@ -348,7 +349,7 @@ def test_delete_bar_correction_restores_provider_bar(
 def test_correction_rejects_invalid_effective_ohlcv(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -390,7 +391,7 @@ def test_correction_rejects_invalid_effective_ohlcv(
 
 
 def test_correction_rejects_unknown_bar(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(ValueError, match="does not exist"):
             cache.put_bar_correction(
                 BarCorrection(
@@ -404,7 +405,7 @@ def test_correction_rejects_unknown_bar(tmp_path: Path) -> None:
 
 
 def test_correction_rejects_timezone_naive_timestamp(tmp_path: Path) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         with pytest.raises(ValueError, match="timezone-aware"):
             cache.put_bar_correction(
                 BarCorrection(
@@ -422,7 +423,7 @@ def test_find_suspicious_bars_uses_symmetric_close_ratio(
 ) -> None:
     normal_session = datetime(2026, 2, 3, 5, 0, tzinfo=UTC)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -477,7 +478,7 @@ def test_find_suspicious_bars_reports_nonpositive_prices(
         volume=79_286_521,
     )
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -500,7 +501,7 @@ def test_find_suspicious_bars_does_not_query_each_bar_individually(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -539,7 +540,7 @@ def test_find_suspicious_bars_builds_inspections_only_for_candidates(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(cache_module, "_row_to_bar_inspection", count_inspection)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -568,7 +569,7 @@ def test_get_bar_inspections_for_date_returns_only_requested_session(
     second = datetime(2026, 2, 2, 14, 45, tzinfo=UTC)
     next_day = datetime(2026, 2, 3, 14, 30, tzinfo=UTC)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -592,7 +593,7 @@ def test_get_bar_inspections_for_date_uses_new_york_calendar_date(
     prior_session_after_hours = datetime(2026, 2, 2, 0, 45, tzinfo=UTC)
     requested_session_after_hours = datetime(2026, 2, 3, 0, 45, tzinfo=UTC)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -619,7 +620,7 @@ def test_daily_date_lookup_includes_yahoo_midnight_utc_bar(
     tmp_path: Path,
 ) -> None:
     yahoo_midnight = datetime(2026, 2, 2, 0, 0, tzinfo=UTC)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -641,7 +642,7 @@ def test_weekly_date_lookup_snaps_to_containing_week(
     tmp_path: Path,
 ) -> None:
     monday = datetime(2026, 2, 2, 0, 0, tzinfo=UTC)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -662,7 +663,7 @@ def test_weekly_date_lookup_snaps_to_containing_week(
 def test_get_bar_cache_namespaces_lists_only_cached_data_sources(
     tmp_path: Path,
 ) -> None:
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -687,7 +688,7 @@ def test_refresh_provider_bar_removes_correction_that_matches_new_raw_value(
     timestamp_ms = _timestamp_ms(_SPY_SESSION)
     refreshed = _bar(_SPY_SESSION, low=685.77)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -753,7 +754,7 @@ def test_refresh_provider_bar_normalizes_matching_fields_only(
         79_286_521,
         691.25,
     )
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -796,7 +797,7 @@ def test_refresh_provider_bar_retains_conflicting_override_for_review(
 ) -> None:
     refreshed = Bar(_SPY_SESSION, 80.0, 90.0, 70.0, 80.0, 1_000)
     timestamp_ms = _timestamp_ms(_SPY_SESSION)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -846,7 +847,7 @@ def test_refresh_provider_bar_rekeys_daily_correction_when_timestamp_moves(
 ) -> None:
     refreshed_timestamp = datetime(2026, 2, 2, 6, 0, tzinfo=UTC)
     refreshed = _bar(refreshed_timestamp, low=680.0)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -897,7 +898,7 @@ def test_refresh_provider_bar_rejects_shifted_intraday_timestamp_atomically(
     original_timestamp = datetime(2026, 2, 2, 14, 30, tzinfo=UTC)
     shifted_timestamp = datetime(2026, 2, 2, 14, 31, tzinfo=UTC)
     original = _bar(original_timestamp, low=68.64)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "alpaca:delayed_sip",
             "SPY",
@@ -947,7 +948,7 @@ def test_refresh_provider_bar_rejects_timestamp_collision_without_changes(
     colliding_timestamp = datetime(2026, 2, 2, 6, 0, tzinfo=UTC)
     original = _bar(_SPY_SESSION, low=68.64)
     collision = _bar(colliding_timestamp, low=680.0)
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(
             "yfinance",
             "SPY",
@@ -1041,7 +1042,7 @@ def test_refresh_provider_bar_resynthesizes_that_session_of_39m_and_65m(
     refreshed = Bar(target.timestamp, target.open, 1000.0, target.low, target.close, 9_999)
     namespace = "alpaca:iex"
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars(namespace, "SPY", Timeframe.MIN5, first + second)
         for synthesized in (Timeframe.MIN39, Timeframe.MIN65):
             # Built as the controller materializes them: regular session only.
@@ -1083,7 +1084,7 @@ def test_refresh_provider_bar_does_not_create_unmaterialized_synthesized_bars(
     target = bars[20]
     refreshed = Bar(target.timestamp, target.open, 1000.0, target.low, target.close, 9_999)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         cache.put_bars("alpaca:iex", "SPY", Timeframe.MIN5, bars)
 
         cache.refresh_provider_bar(

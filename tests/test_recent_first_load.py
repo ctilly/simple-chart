@@ -22,7 +22,8 @@ from data.cache import Cache
 from data.calendar import bars_for_n_days
 from data.models import Bar, Level1Quote, MarketSnapshot, OHLCVSeries, Timeframe
 from data.provider.base import DataProvider, background_request_cancellation
-from data.provider.config import ProviderConnection, alpaca_paper_connection
+from data.provider.config import ProviderConnection
+from provider_support import alpaca_paper_connection, startup_registry
 from data.provider.credentials import CredentialStore
 from data.session import exchange_day_start, is_regular_session_timestamp
 
@@ -217,9 +218,8 @@ def _load(
         return provider
 
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
-    monkeypatch.setattr(controller_module, "create_provider", create_test_provider)
     request = _ChartLoadRequest(1, "XBI", timeframe, alpaca_paper_connection())
-    worker = _FetchWorker(str(db_path), None, request, cancellation_event)  # type: ignore[arg-type]
+    worker = _FetchWorker(str(db_path), None, request, cancellation_event, provider_factory=create_test_provider, registry=startup_registry())  # type: ignore[arg-type]
     recent: list[OHLCVSeries] = []
     finished: list[OHLCVSeries] = []
     errors: list[str] = []
@@ -364,7 +364,7 @@ def _seed_raw_and_target(
     namespace = alpaca_paper_connection().cache_namespace
     raw = SessionProvider(None).fetch_bars("XBI", Timeframe.MIN5, raw_start, end)
     aggregator = Aggregator(SessionProvider(None))
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         cache.put_bars(namespace, "XBI", Timeframe.MIN5, raw)
         cache.replace_bar_fetch_coverage(
             namespace, "XBI", Timeframe.MIN5,
@@ -512,7 +512,7 @@ class GatedBranchProvider(SessionProvider):
 
 
 def _daily_rows(db_path: Path) -> int:
-    with Cache(str(db_path)) as cache:
+    with Cache(str(db_path), registry=startup_registry()) as cache:
         return len(cache.get_bars(
             alpaca_paper_connection().cache_namespace, "XBI", Timeframe.DAILY,
             0, int(_NOW.timestamp() * 1000) + 1,
@@ -528,11 +528,8 @@ def _start_worker(
 ) -> tuple[threading.Thread, list[str], list[int], list[str]]:
     """Run the production worker on a thread; returns delivery kinds, daily rows at delivery, errors."""
     monkeypatch.setattr(controller_module, "datetime", _FixedDateTime)
-    monkeypatch.setattr(
-        controller_module, "create_provider", lambda _connection, _store: provider,
-    )
     request = _ChartLoadRequest(1, "XBI", Timeframe.MIN5, alpaca_paper_connection())
-    worker = _FetchWorker(str(db_path), None, request, cancellation_event)  # type: ignore[arg-type]
+    worker = _FetchWorker(str(db_path), None, request, cancellation_event, provider_factory=lambda _connection, _store: provider, registry=startup_registry())  # type: ignore[arg-type]
     delivered: list[str] = []
     daily_rows: list[int] = []
     errors: list[str] = []

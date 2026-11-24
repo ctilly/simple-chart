@@ -15,6 +15,7 @@ from simplechart.api import (
     LINE_STYLE_OPTIONS,
     bars_for_n_days,
 )
+from provider_support import startup_registry
 
 
 def test_five_day_marker_declares_hidden_add_mode() -> None:
@@ -105,7 +106,7 @@ def test_five_day_marker_config_mutation_uses_stable_marker_key() -> None:
 def test_five_day_marker_store_creates_default_symbol_settings(tmp_path: Path) -> None:
     state = State(symbol="AAPL")
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FiveDayMarkerStore(AppChartExtensionStoreContext(state, cache))
         store.load_for_symbol("AAPL")
         store.prepare_active_extensions()
@@ -124,7 +125,7 @@ def test_five_day_marker_store_creates_default_symbol_settings(tmp_path: Path) -
 def test_five_day_marker_store_keeps_symbols_independent(tmp_path: Path) -> None:
     state = State(symbol="AAPL")
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FiveDayMarkerStore(AppChartExtensionStoreContext(state, cache))
         store.load_for_symbol("AAPL")
         mutation = FiveDayMarkerIndicator().apply_config_to_series(
@@ -162,7 +163,7 @@ def test_five_day_marker_runtime_config_and_remove_are_symbol_scoped(
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series(Timeframe.DAILY, 8)
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FiveDayMarkerStore(AppChartExtensionStoreContext(state, cache))
         store.load_for_symbol("SPY")
         runtime = _runtime(state, cache, store)

@@ -11,6 +11,7 @@ import tools.fib_retracement  # noqa: F401
 from tools.fib_retracement import FibonacciRetracementIndicator
 from tools.fib_retracement.session_store import FibRetracementStore
 from simplechart.api import ChoiceParam, ChartExtensionAddMode, FloatParam
+from provider_support import startup_registry
 
 
 def test_fib_declares_toolbar_add_mode() -> None:
@@ -131,7 +132,7 @@ def test_fib_commit_deactivates_and_scopes_to_exact_timeframe(tmp_path: Path) ->
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -159,7 +160,7 @@ def test_fib_drag_preview_uses_base_key_from_level_hit(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
@@ -212,7 +213,7 @@ def test_fib_close_mode_config_drag_and_remove(tmp_path: Path) -> None:
     state = State(symbol="SPY", timeframe=Timeframe.DAILY)
     series = _series()
 
-    with Cache(str(tmp_path / "test.db")) as cache:
+    with Cache(str(tmp_path / "test.db"), registry=startup_registry()) as cache:
         store = FibRetracementStore(AppChartExtensionStoreContext(state, cache))
         runtime = _runtime(state, cache, store)
         store.load_for_symbol("SPY")
