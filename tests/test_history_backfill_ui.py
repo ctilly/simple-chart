@@ -2,11 +2,16 @@ import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta, tzinfo
+from pathlib import Path
 from typing import Any, Self
 from types import SimpleNamespace
 
 import finplot as fplt
 import pytest
+from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
+from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtWidgets import QApplication
+from pytestqt.qtbot import QtBot
 
 import app.controller as controller_module
 from app.controller import MainWindow, _recent_history_start
@@ -100,6 +105,83 @@ def _view(window: MainWindow) -> list[tuple[float, float]]:
 
 def _sma_keys(window: MainWindow) -> list[str]:
     return [key for key in window._chart.plot_manager.active_series_keys() if key.startswith("sma_")]
+
+
+@pytest.mark.parametrize(
+    ("scaletype", "price", "scalef"),
+    [("linear", 370.0, 1), ("linear", 2_000_000.0, 1_000_000), ("log", 370.0, 1)],
+    ids=["linear", "scaled", "log"],
+)
+def test_price_axis_drag_rescales_progressively(
+    provider_registry: ProviderRegistry,
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scaletype: str,
+    price: float,
+    scalef: int,
+) -> None:
+    window = _window(provider_registry, qtbot, tmp_path, monkeypatch)
+    chart = window._chart
+    price_ax = chart._price_panel.ax
+    fplt.set_y_scale(scaletype, ax=price_ax)
+    series = OHLCVSeries("XBI", Timeframe.MIN5, [
+        Bar(_FIRST + timedelta(minutes=5 * i), price, price * 1.02, price * 0.98, price, 1_000)
+        for i in range(40)
+    ])
+    window._render(series)
+    window.resize(1200, 800)
+    window.show()
+    qtbot.waitExposed(window)
+
+    viewbox = price_ax.vb
+    assert (viewbox.yscale.scaletype, viewbox.yscale.scalef) == (scaletype, scalef)
+    axis = price_ax.getAxis("right")
+    master = chart._master
+    widget = master.viewport()
+    start = master.mapFromScene(QPointF(
+        axis.scenePos().x() + axis.width() / 2,
+        viewbox.sceneBoundingRect().center().y(),
+    ))
+    assert not viewbox.sceneBoundingRect().contains(master.mapToScene(start))
+
+    def send_mouse(
+        kind: QEvent.Type, offset: int, button: Qt.MouseButton, buttons: Qt.MouseButton,
+    ) -> None:
+        pos = start + QPoint(0, offset)
+        event = QMouseEvent(
+            kind, QPointF(pos), QPointF(widget.mapToGlobal(pos)),
+            button, buttons, Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(widget, event)
+        # pyqtgraph throttles mouse moves to 100 Hz.
+        qtbot.wait(20)
+
+    def price_range() -> tuple[float, float]:
+        rect = viewbox.viewRect()
+        return float(viewbox.yscale.xform(rect.top())), float(viewbox.yscale.xform(rect.bottom()))
+
+    initial = price_range()
+    left = Qt.MouseButton.LeftButton
+    none = Qt.MouseButton.NoButton
+    send_mouse(QEvent.Type.MouseMove, 0, none, none)
+    send_mouse(QEvent.Type.MouseButtonPress, 0, left, left)
+    ranges = []
+    for offset in (8, 32, 64):
+        send_mouse(QEvent.Type.MouseMove, offset, none, left)
+        ranges.append(price_range())
+    send_mouse(QEvent.Type.MouseButtonRelease, 64, left, none)
+
+    assert ranges[0] == pytest.approx(initial)
+    assert all(price * 0.97 < low < high < price * 1.03 for low, high in ranges)
+    spans = [high - low for low, high in ranges]
+    assert spans[0] > spans[1] > spans[2]
+
+    assert not viewbox.v_autozoom
+    before_update = price_range()
+    viewbox.v_zoom_scale = 1.0  # Remove zoom padding for an exact endpoint comparison.
+    assert viewbox.update_y_zoom()
+    assert price_range() == pytest.approx(before_update)
 
 
 def test_recent_render_then_history_merge_keeps_view_and_indicators(

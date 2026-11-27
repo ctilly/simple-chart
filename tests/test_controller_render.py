@@ -1,8 +1,58 @@
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, cast
+
+import finplot as fplt
+import pytest
+from pytestqt.qtbot import QtBot
 
 from app.controller import MainWindow
 from app.state import ChartExtensionState
+from data.models import Bar, OHLCVSeries, Timeframe
+from data.provider.registry import ProviderRegistry
 from simplechart.api import VerticalLineRender
+
+
+def test_main_window_renders_hollow_red_candle(
+    qtbot: QtBot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider_registry: ProviderRegistry,
+    isolated_credentials: None,
+) -> None:
+    def skip_startup_request(_window: MainWindow) -> None:
+        pass
+
+    monkeypatch.setattr(fplt, "windows", [])
+    monkeypatch.setattr(fplt, "master_data", {})
+    monkeypatch.setattr(fplt, "last_ax", None)
+    monkeypatch.setattr(MainWindow, "_load", skip_startup_request)
+    monkeypatch.setattr(MainWindow, "_refresh_watchlist_snapshots", skip_startup_request)
+    window = MainWindow(str(tmp_path / "test.db"), provider_registry=provider_registry)
+    qtbot.addWidget(window)
+
+    window._render(OHLCVSeries("TSLA", Timeframe.DAILY, [
+        Bar(datetime(2026, 11, 24, tzinfo=timezone.utc), 380.0, 386.0, 378.0, 384.96, 1_000),
+        Bar(datetime(2026, 11, 25, tzinfo=timezone.utc), 370.51, 382.0, 369.0, 380.20, 1_000),
+        Bar(datetime(2026, 11, 27, tzinfo=timezone.utc), 386.0, 388.0, 381.0, 383.0, 1_000),
+    ]))
+
+    manager = window._chart.plot_manager
+    item = manager._candle_plot
+    assert isinstance(item, fplt.CandlestickItem)
+    source = item.datasrc
+    rows, _ = source.rows(5, 1, 2, item.ax.vb.yscale, resamp=item.resamp)
+    color_groups = list(item.colorfunc(item, source, rows))
+    assert [
+        (frame, body)
+        for _, frame, body, candles in color_groups
+        if 1 in candles.index
+    ] == [(manager._colors.candle_down, manager._colors.hollow_body)]
+    assert [
+        (frame, body)
+        for _, frame, body, candles in color_groups
+        if 2 in candles.index
+    ] == [(manager._colors.candle_up, manager._colors.candle_up)]
 
 
 def test_controller_adds_vertical_line_render_to_legend() -> None:

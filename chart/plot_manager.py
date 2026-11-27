@@ -176,15 +176,19 @@ class PlotManager:
             self._candle_plot = fplt.candlestick_ochl(
                 df,
                 ax=self._price_panel.ax,
-                colorfunc=fplt.price_colorfilter,
+                colorfunc=_hollow_candle_colorfilter,
             )
-            # Hollow/solid scheme: bull candles have a white body (hollow)
-            # with a green outline and wick; bear candles are fully red.
             colors = self._colors
             cast(Any, self._candle_plot).colors.update({
                 "bull_body":   colors.hollow_body,
                 "bull_frame":  colors.candle_up,
                 "bull_shadow": colors.candle_up,
+                "weak_bull_body":   colors.candle_up,
+                "weak_bull_frame":  colors.candle_up,
+                "weak_bull_shadow": colors.candle_up,
+                "weak_bear_body":   colors.hollow_body,
+                "weak_bear_frame":  colors.candle_down,
+                "weak_bear_shadow": colors.candle_down,
                 "bear_body":   colors.candle_down,
                 "bear_frame":  colors.candle_down,
                 "bear_shadow": colors.candle_down,
@@ -713,8 +717,44 @@ class PlotManager:
 
 
 # ------------------------------------------------------------------
-# Private helpers — data formatting for finplot
+# Private helpers — candle colors and data formatting for finplot
 # ------------------------------------------------------------------
+
+def _hollow_candle_colorfilter(
+    item: fplt.CandlestickItem,
+    datasrc: fplt.PandasDataSource,
+    df: pd.DataFrame,
+) -> Iterator[tuple[str, str, str, pd.DataFrame]]:
+    if df.empty:
+        return
+
+    open_col, close_col = df.columns[1:3]
+    index = df.index
+    # Finplot's hilo aggregation strides the candle source's RangeIndex.
+    if isinstance(index, pd.RangeIndex) and index.step > 1:
+        opens = df[open_col].to_numpy()
+        closes = df[close_col].to_numpy()
+        previous_closes = np.concatenate((opens[:1], closes[:-1]))
+    else:
+        raw: pd.DataFrame = datasrc.df
+        labels = index.to_numpy()
+        opens = raw.loc[index, open_col].to_numpy()
+        closes = raw.loc[index, close_col].to_numpy()
+        previous_closes = raw.loc[(labels - 1).clip(min=0), close_col].to_numpy()
+        previous_closes = np.where(labels == 0, opens, previous_closes)
+
+    green = closes >= previous_closes
+    hollow = closes >= opens
+    groups = (
+        ("bull", green & hollow),
+        ("weak_bull", green & ~hollow),
+        ("weak_bear", ~green & hollow),
+        ("bear", ~green & ~hollow),
+    )
+    for group, mask in groups:
+        shadow, frame, body = item.rowcolors(group)
+        yield shadow, frame, body, df.loc[mask]
+
 
 _DAY_MS = 86_400_000
 _HALF_DAY_MS = 43_200_000

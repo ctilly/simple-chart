@@ -80,6 +80,9 @@ class _YScaleLike(Protocol):
     scalef: float
     scaletype: str
 
+    def xform(self, y: float) -> float: ...
+    def invxform(self, y: float, verify: bool = False) -> float: ...
+
 
 class _WindowStateLike(Protocol):
     _isMouseLeftDrag: bool
@@ -686,8 +689,8 @@ def _patch_update_y_zoom(viewbox: _ViewBoxLike) -> None:
             return None
 
         if not self.v_autozoom or count == 0:
-            hi = view_rect.bottom()
-            lo = view_rect.top()
+            hi = self.yscale.xform(view_rect.bottom())
+            lo = self.yscale.xform(view_rect.top())
 
         if self.yscale.scaletype == "log":
             if lo < 0:
@@ -805,7 +808,8 @@ def _scale_from_price_axis_drag(viewbox: _ViewBoxLike, event: _DragEventLike) ->
     new_high = anchor_value + (1.0 - state.baseline) * new_span
 
     target_rect = viewbox.targetRect()
-    viewbox.set_range(target_rect.left(), new_low, target_rect.right(), new_high)
+    yscale = viewbox.yscale
+    viewbox.set_range(target_rect.left(), yscale.xform(new_low), target_rect.right(), yscale.xform(new_high))
     _clamp_axis_drag_range(viewbox, target_rect.left(), target_rect.right())
     _refresh_price_axis_precision(viewbox, zooming_in=(dy_total > 0), min_decimals=state.min_decimals)
 
@@ -1109,10 +1113,12 @@ def _clamp_axis_drag_range(viewbox: _ViewBoxLike, left: float, right: float) -> 
         clamped_low = min_visible_low
         clamped_high = max_visible_high
 
-    viewbox.set_range(left, clamped_low, right, clamped_high)
+    yscale = viewbox.yscale
+    viewbox.set_range(left, yscale.xform(clamped_low), right, yscale.xform(clamped_high))
 
 
 def _data_y_bounds_for_window(viewbox: _ViewBoxLike, left: float, right: float) -> tuple[float | None, float | None]:
+    """Return visible data bounds in view coordinates for the axis drag."""
     datasrc = viewbox.datasrc_or_standalone
     if datasrc is None:
         return None, None
@@ -1124,7 +1130,8 @@ def _data_y_bounds_for_window(viewbox: _ViewBoxLike, left: float, right: float) 
     _, _, high, low, count = datasrc.hilo(visible_left, visible_right)
     if count <= 0 or not _is_finite_range(high, low):
         return None, None
-    return low, high
+    yscale = viewbox.yscale
+    return yscale.invxform(low, verify=True), yscale.invxform(high, verify=True)
 
 
 def _visible_data_window(left: float, right: float, xlen: int) -> tuple[float, float]:

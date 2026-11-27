@@ -1,11 +1,91 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from math import inf, nextafter
+from types import SimpleNamespace
 
+import finplot as fplt
 import pandas as pd
+import pytest
+from pytestqt.qtbot import QtBot
 
+from chart.plot_manager import _bar_datetime_index, _hollow_candle_colorfilter, _x_value_for_index
 from chart.window import ChartWidget
-from chart.plot_manager import _bar_datetime_index, _x_value_for_index
 from data.models import Bar, OHLCVSeries, Timeframe
 from simplechart.api import MarkerRender
+
+
+@pytest.fixture
+def candle_source() -> fplt.PandasDataSource:
+    return _candle_source([
+        (391.0, 384.96),
+        (370.51, 380.20),  # TSLA 11/25
+        (395.0, 390.0),
+        (389.0, 391.0),
+        (392.0, 391.0),
+        (384.0, 384.0),
+    ])
+
+
+def _candle_source(prices: list[tuple[float, float]]) -> fplt.PandasDataSource:
+    df = pd.DataFrame({
+        "open": [op for op, _ in prices],
+        "close": [close for _, close in prices],
+        "high": [max(op, close) for op, close in prices],
+        "low": [min(op, close) for op, close in prices],
+    }, index=pd.date_range("2026-11-01", periods=len(prices), tz="UTC"))
+    return fplt.PandasDataSource(df)
+
+
+def _group_colors(group: str) -> tuple[str, str, str]:
+    return group, group, group
+
+
+def _groups_by_label(datasrc: fplt.PandasDataSource, rows: pd.DataFrame) -> dict[int, str]:
+    item = SimpleNamespace(rowcolors=_group_colors)
+    return {
+        label: group
+        for _, group, _, candles in _hollow_candle_colorfilter(item, datasrc, rows)
+        for label in candles.index
+    }
+
+
+def test_hollow_candle_groups_include_ties_and_first_loaded_bar(
+    candle_source: fplt.PandasDataSource,
+) -> None:
+    assert _groups_by_label(candle_source, candle_source.df) == {
+        0: "bear",       # First loaded bar falls back to open.
+        1: "weak_bear",  # Hollow red.
+        2: "weak_bull",  # Filled green.
+        3: "bull",       # Hollow green.
+        4: "weak_bull",  # Tying the previous close is green.
+        5: "weak_bear",  # Tying the open is hollow.
+    }
+
+
+def test_hollow_candles_use_close_before_visible_slice(candle_source: fplt.PandasDataSource) -> None:
+    rows = candle_source.df.loc[2:3]
+
+    assert _groups_by_label(candle_source, rows) == {2: "weak_bull", 3: "bull"}
+
+
+def test_hollow_candles_classify_from_raw_prices_on_log_scale() -> None:
+    source = _candle_source([(98.0, 99.0), (nextafter(100.0, inf), 100.0)])
+    rows, _ = source.rows(5, 1, 1, fplt.YScale("log", 1), resamp="hilo")
+
+    assert rows.loc[1, "open"] == rows.loc[1, "close"]
+    assert _groups_by_label(source, rows) == {1: "weak_bull"}
+
+
+def test_hollow_candles_classify_from_aggregates_at_lod(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(fplt, "lod_candles", 11)
+    source = _candle_source(
+        [(30.0, 30.0)] * 2
+        + [(10.0, 9.0)] * 4 + [(10.0, 11.0)]
+        + [(9.0, 8.0)] * 4 + [(9.0, 10.0)]
+    )
+    rows, _ = source.rows(5, 0, 11, fplt.YScale("linear", 1), resamp="hilo")
+
+    assert _groups_by_label(source, rows) == {2: "bull", 7: "weak_bear"}
 
 
 def test_x_value_for_index_keeps_index_coordinates_in_x_indexed_mode() -> None:
@@ -201,6 +281,41 @@ def _minute_series(count: int, first: datetime) -> OHLCVSeries:
         for index in range(count)
     ]
     return OHLCVSeries(symbol="XBI", timeframe=Timeframe.MIN5, bars=bars)
+
+
+def test_updating_the_previous_bar_recolors_the_next_candle(
+    qtbot: QtBot, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fplt, "windows", [])
+    monkeypatch.setattr(fplt, "master_data", {})
+    monkeypatch.setattr(fplt, "last_ax", None)
+    widget = ChartWidget(
+        on_toggle=lambda _key: None,
+        on_configure=lambda _key: None,
+        on_remove=lambda _key: None,
+        on_add=lambda: None,
+        on_drawing_tool=lambda _name: None,
+        drawing_tools=[],
+    )
+    qtbot.addWidget(widget)
+    manager = widget.plot_manager
+    series = _minute_series(3, datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc))
+    manager.draw_candles(series)
+    item = manager._candle_plot
+    assert isinstance(item, fplt.CandlestickItem)
+
+    def next_candle_frames() -> list[str]:
+        source = item.datasrc
+        rows, _ = source.rows(5, 1, 1, item.ax.vb.yscale, resamp=item.resamp)
+        return [frame for _, frame, _, candles in item.colorfunc(item, source, rows) if 1 in candles.index]
+
+    assert next_candle_frames() == [manager._colors.candle_up]
+
+    revised = replace(series.bars[0], high=104.0, close=103.0)
+    manager.draw_candles(replace(series, bars=[revised, *series.bars[1:]]))
+
+    assert manager._candle_plot is item
+    assert next_candle_frames() == [manager._colors.candle_down]
 
 
 def test_preserving_viewport_shift_keeps_view_on_same_bars_after_prepend(
