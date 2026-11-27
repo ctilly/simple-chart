@@ -28,8 +28,15 @@ Data → Indicator engine → Charting (finplot) → Glue/orchestration
 
 - **AVWAP** — Anchored VWAP: volume-weighted average price anchored to a
   specific bar (UTC ms timestamp, never a bar index).
-- **MAs are day-based** — a 50-day SMA means 50 trading days, converted to bar
-  count per timeframe. The price value stays consistent across all timeframes.
+- **Day-based indicator** — settings are in trading days. It is calculated
+  from daily bars. On an intraday chart it shows the daily value as of each
+  bar, using that bar's price as today's close so far. At every day's close it
+  matches the daily chart exactly. SMA, EMA and RSI are day-based.
+- **Period-based indicator** — settings are in bars of the chart's timeframe
+  (the Webull/TradingView convention). None exists; one is built only when the
+  user deliberately creates it.
+- **Trading day** — one exchange session. A half day counts as one trading
+  day; closures and weekends are skipped.
 - **`_kernel.py`** — pure numeric kernel file eligible for mypyc compilation.
   Lives inside its indicator's directory (e.g. `indicators/ema/_kernel.py`).
   Accepts and returns numpy arrays; no I/O. Only reach for a kernel when the

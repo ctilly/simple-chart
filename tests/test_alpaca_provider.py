@@ -197,7 +197,7 @@ def test_fetch_bars_maps_request_and_filters_extended_hours() -> None:
     request = client.bar_requests[0]
     assert request.symbol_or_symbols == "SPY"
     assert str(request.timeframe) == "5Min"
-    assert request.adjustment == Adjustment.ALL
+    assert request.adjustment == Adjustment.SPLIT
     assert request.feed == DataFeed.SIP
 
 

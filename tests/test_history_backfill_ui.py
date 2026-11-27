@@ -102,7 +102,7 @@ def _sma_keys(window: MainWindow) -> list[str]:
     return [key for key in window._chart.plot_manager.active_series_keys() if key.startswith("sma_")]
 
 
-def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
+def test_recent_render_then_history_merge_keeps_view_and_indicators(
     provider_registry: ProviderRegistry,
     qtbot: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,7 +117,7 @@ def test_recent_render_then_history_merge_keeps_view_and_adds_indicators(
 
     assert window._current_series is recent
     assert window._terminal_chart_generation != request.generation
-    assert _sma_keys(window) == []
+    assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
     assert window._data_source_status._source_dot.toolTip().endswith(": Loading indicators...")
     status_bar = window.statusBar()
     assert status_bar is not None
@@ -170,7 +170,7 @@ def test_backfill_error_after_recent_render_shows_status_not_dialog(
     status_bar = window.statusBar()
     assert status_bar is not None
     assert "older history" in status_bar.currentMessage().lower()
-    assert _sma_keys(window) == []
+    assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
 
 
 _FINISHED_DRAG_TIMESTAMPS: list[int | None] = []
@@ -302,7 +302,7 @@ def test_interim_reload_does_not_prepend_partially_backfilled_bars(
 
     assert window._current_series is not None
     assert window._current_series.bars[0].timestamp == recent.bars[0].timestamp
-    assert _sma_keys(window) == []
+    assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
 
 
 def _production_recent_start(window: MainWindow, now: datetime) -> datetime:
@@ -310,7 +310,7 @@ def _production_recent_start(window: MainWindow, now: datetime) -> datetime:
         Timeframe.MIN5,
         now - timedelta(days=600),
         now,
-        window._extension_lookback_days("XBI"),
+        window._extension_lookback_days("XBI", Timeframe.MIN5),
     )
 
 
@@ -384,7 +384,7 @@ def test_production_load_renders_recent_window_before_backfill_completes(
         assert recent is not None
         assert recent.bars[0].timestamp >= recent_start
         assert window._partial_history_request is not None
-        # The first fetch covers the default SMAs' lookback.
+        # The default SMAs render on the recent window.
         assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
     finally:
         provider.gate.set()
@@ -425,7 +425,7 @@ def test_replacement_load_does_not_reveal_partial_cache_as_complete(
 
     assert window._current_series is not None
     assert window._current_series.bars[0].timestamp == recent.bars[0].timestamp
-    assert _sma_keys(window) == []
+    assert sorted(_sma_keys(window)) == ["sma_20", "sma_5", "sma_50"]
 
 
 class _InertTimer:

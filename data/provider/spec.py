@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from enum import StrEnum, auto
 from typing import TYPE_CHECKING
 
+from data.models import Timeframe
+
 if TYPE_CHECKING:
     from data.provider.base import DataProvider
     from data.provider.config import ProviderConnection
@@ -71,6 +73,8 @@ class ProviderSpec:
     option_fields: tuple[OptionField, ...] = ()
     required_modules: tuple[tuple[str, str], ...] = ()
     serves_symbol: Callable[[str], bool] = _all_symbols
+    # Scope of the one-time split-only cache migration. None means all timeframes.
+    legacy_dividend_adjusted_timeframes: tuple[Timeframe, ...] | None = ()
 
     @property
     def requires_credentials(self) -> bool:

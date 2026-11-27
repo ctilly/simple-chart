@@ -316,7 +316,7 @@ class AlpacaProvider(DataProvider):
             timeframe=alpaca_timeframe,
             start=start,
             end=end,
-            adjustment=Adjustment.ALL,
+            adjustment=Adjustment.SPLIT,
             feed=self._bar_feed,
         )
         try:

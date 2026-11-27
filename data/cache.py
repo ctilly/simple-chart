@@ -51,6 +51,7 @@ from data.provider.registry import ProviderRegistry
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 _MAX_TIMESTAMP_MS = 2**63 - 1
 _BASIS_CHANGE_CHOICE_SETTING = "basis_change_choice"
+_SPLIT_ONLY_MIGRATION_SETTING = "split_only_bar_cache_migrated"
 _SHOW_LAST_PRICE_LINE_SETTING = "show_last_price_line"
 _SHOW_PAST_EARNINGS_SETTING = "show_past_earnings"
 _SHOW_DIVIDENDS_SETTING = "show_dividends"
@@ -106,6 +107,7 @@ class Cache:
         self._migrate_watchlist_sort_order()
         self._init_provider_connections()
         self._migrate_asset_reference_source()
+        self._migrate_split_only_bar_cache()
 
     def _migrate_bars_cache_namespace(self) -> None:
         columns = {
@@ -149,6 +151,31 @@ class Cache:
             )
             self._conn.execute("DROP TABLE bars")
             self._conn.execute("ALTER TABLE bars_with_namespace RENAME TO bars")
+
+    def _migrate_split_only_bar_cache(self) -> None:
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            marker = self._conn.execute(
+                "SELECT 1 FROM application_settings WHERE setting_key = ?",
+                (_SPLIT_ONLY_MIGRATION_SETTING,),
+            ).fetchone()
+            if marker is not None:
+                return
+
+            for namespace, timeframes in self.registry.legacy_dividend_adjusted_namespaces.items():
+                where = "cache_namespace = ?"
+                parameters: tuple[str, ...] = (namespace,)
+                if timeframes is not None:
+                    placeholders = ", ".join("?" for _ in timeframes)
+                    where += f" AND timeframe IN ({placeholders})"
+                    parameters += tuple(timeframe.value for timeframe in timeframes)
+                for table in ("bars", "bar_fetch_coverage", "basis_changes", "bar_corrections"):
+                    self._conn.execute(f"DELETE FROM {table} WHERE {where}", parameters)
+
+            self._conn.execute(
+                "INSERT INTO application_settings (setting_key, setting_value) VALUES (?, '1')",
+                (_SPLIT_ONLY_MIGRATION_SETTING,),
+            )
 
     def _migrate_watchlist_sort_order(self) -> None:
         columns = {

@@ -1,3 +1,4 @@
+from data.models import Timeframe
 from data.provider.base import DataProvider
 from data.provider.config import ProviderConnection
 from data.provider.credentials import ProviderCredentials
@@ -34,4 +35,5 @@ PROVIDER: ProviderSpec = ProviderSpec(
     namespaces=(NamespaceSpec(_PROVIDER_NAME, "Yahoo Finance", (), True),),
     factory=_create_provider,
     required_modules=(("yfinance", "yfinance"),),
+    legacy_dividend_adjusted_timeframes=(Timeframe.DAILY, Timeframe.WEEKLY),
 )

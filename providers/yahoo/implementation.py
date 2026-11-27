@@ -119,7 +119,7 @@ class YFinanceProvider(DataProvider):
                 interval=interval,
                 start=start,
                 end=end,
-                auto_adjust=True,   # adjusts OHLC for splits and dividends
+                auto_adjust=False,  # Yahoo's OHLC already accounts for splits.
                 prepost=False,      # regular session only, no pre/post market bars
             )
         except YFPricesMissingError as exc:
@@ -397,6 +397,8 @@ def _unique_symbols(symbols: list[str]) -> list[str]:
 
 
 def _fetch_batch_daily_snapshots(symbols: list[str]) -> dict[str, MarketSnapshot]:
+    # Watchlist change uses dividend-adjusted closes here, so on an ex-date
+    # it can differ from the move between the chart's split-only closes.
     try:
         df = yf.download(
             symbols,
@@ -458,6 +460,8 @@ def _fetch_fast_info_snapshot(symbol: str) -> MarketSnapshot | None:
         snapshot = None
     if snapshot is None or snapshot.change_percent is None:
         try:
+            # Like the batch snapshot, this fallback uses dividend-adjusted
+            # closes for watchlist change, which can differ on an ex-date.
             history_snapshot = _snapshot_from_daily_history(
                 symbol,
                 ticker.history(period="5d", interval="1d", auto_adjust=True),

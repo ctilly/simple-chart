@@ -32,7 +32,8 @@ After the indicator is classified in Step 2, read the reference files that match
 the capability you are about to build:
 
 - `indicators/sma.py` — canonical example of a simple vectorized chart
-  indicator with day-based period conversion and intraday warmup fill
+  indicator that calculates from trading-day closes and projects daily values
+  onto intraday and weekly charts
 - `indicators/ema/__init__.py` — same pattern as SMA but uses a recurrence-relation
   kernel (EMA cannot be vectorized); the clearest model for indicators that
   require a loop where each value depends on the previous one
@@ -253,8 +254,20 @@ Key rules for `compute()`:
 - Series keys must be stable and unique across calls — if a key changes between
   calls, the chart creates a new plot line instead of updating the existing one
 - Use the pattern `f"{name}_{param}"` for keys (e.g. `"sma_50"`)
-- For day-based periods, use `bars_for_n_days(days, series.timeframe)` from
-  `simplechart.api` — this keeps price values consistent across all timeframes
+- Day-based settings count trading sessions. Half days count as one session,
+  and closures and weekends are skipped. The Daily chart calculates from
+  daily bars. Each intraday bar shows the daily value as of that bar, using
+  its close as the session's close so far. When that close equals the daily
+  close, the two values match. Each weekly bar shows the daily value as of
+  that week's latest daily row, including today's forming row when available.
+- Built-in day-based indicators such as SMA, EMA, and RSI receive the Daily
+  chart's reference window in `params["_daily_bars"]` on intraday and weekly
+  charts. This is a transient list of `Bar` objects. The built-ins use the
+  samples' session dates and closes with the prior daily closes. A weekly bar
+  with no daily row in its week yields `np.nan`. The projection helper in
+  `indicators/_day_based.py` is private to the built-ins.
+- Plugins that need a bar-count estimate can use
+  `bars_for_n_days(days, series.timeframe)` from `simplechart.api`.
 - Delegate heavy numeric work to the kernel; `compute()` is called on every
   symbol load and timeframe switch
 
@@ -276,8 +289,10 @@ as the loaded bars cover its lookback. A window average returns its window
 periods for the seed's weight to fall below display precision and verify it
 against full history: EMA uses `days * 4` (weight about e**-8); Wilder
 smoothing (RSI) decays half as fast and uses `days * 8`. Return `0` when values
-on a truncated series are exact (e.g. computed solely from `_daily_bars`). The
-default `None` hides the indicator until the full window arrives.
+on a truncated chart series are exact. For the day-based built-ins, the host
+uses `0` on intraday and weekly charts because the calculation history comes
+from `_daily_bars`. The default `None` hides the indicator until the full
+window arrives.
 
 End the file with: `register_extension(YourIndicator)`
 

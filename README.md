@@ -6,7 +6,8 @@ Simple Chart is a free desktop stock charting application for swing traders with
 clean and intuitive UI.  No more paying for a subscription to use Anchored VWAP or 
 limited configuration indicators. The app comes with customizable indicators and
 drawing tools, along with a robust API for creating
-[custom extensions](#custom-extensions) using the AI agent of your choice.
+[custom extensions](#custom-extensions) using the AI agent of your choice.  
+Supports equities, futures, and crypto so you can use the same tools in a single charting application.
 
 Included indicators:
 

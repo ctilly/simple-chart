@@ -84,6 +84,7 @@ from app.errors import ErrorContext, report_error
 from app.extension_runtime import (
     ChartExtensionRenderPass,
     ChartExtensionRuntime,
+    _extension_lookback_days,
     guarded_extension,
 )
 from app.extension_store import ChartExtensionStore
@@ -1618,9 +1619,9 @@ def _fetch_series_with_concurrent_references(
     on_references_done: Callable[[], None] | None = None,
 ) -> OHLCVSeries:
     """
-    Like _fetch_series_with_references, but the daily reference refresh runs
-    concurrently with the intraday fetch so the chart waits for the slower of
-    the two instead of their sum.
+    Refresh daily references for intraday and weekly charts. The intraday
+    fetch and its reference refresh run concurrently. Weekly fetches its
+    references first because a Daily basis change can invalidate Weekly bars.
 
     The reference thread owns its own Cache connection. Both branches finish
     before this returns or raises, so daily references are committed before
@@ -1628,6 +1629,13 @@ def _fetch_series_with_concurrent_references(
     only one error ever leaves this function.
     """
     _check_chart_load_cancelled(cancellation_event)
+    if timeframe == Timeframe.WEEKLY:
+        _refresh_daily_references(
+            aggregator, cache, cache_namespace, symbol, now, cancellation_event,
+        )
+        if on_references_done is not None:
+            on_references_done()
+        _check_chart_load_cancelled(cancellation_event)
     if not timeframe.is_intraday:
         return _fetch_series(
             aggregator,
@@ -2461,14 +2469,13 @@ def _basis_validation_bars(
 
 
 def _basis_change_message(symbol: str, record: BasisChangeRecord) -> str:
+    cause = ""
     if record.volume_factor != 1.0:
         split = Fraction(record.volume_factor).limit_denominator(100)
-        event = f"a {split.numerator}-for-{split.denominator} split"
-    else:
-        event = "dividends"
+        cause = f" for a {split.numerator}-for-{split.denominator} split"
     return (
-        f"{symbol}'s price history was adjusted by its data source for "
-        f"{event} (older prices \u00d7 {record.ratio:.4g}). Cached history "
+        f"{symbol}'s price history was adjusted by its data source{cause} "
+        f"(older prices \u00d7 {record.ratio:.4g}). Cached history "
         "older than the source still provides is on the old basis. Rescale "
         "it to match (keeps it), or discard it?"
     )
@@ -2755,6 +2762,7 @@ class MainWindow(QMainWindow):
             self._extension_store,
             _DEFAULT_LOOKBACK_DAYS,
             self._selected_route.cache_namespace,
+            daily_reference_window=self._daily_reference_window,
         )
         self._active_drawing_tool: str | None = None
         self._drawing_session: DrawingSession | None = None
@@ -3071,6 +3079,11 @@ class MainWindow(QMainWindow):
     def _route_for_symbol(self, symbol: str) -> _DataRoute:
         return self._router.route(Capability.BARS, symbol)
 
+    def _daily_reference_window(self, symbol: str, now: datetime) -> tuple[datetime, datetime]:
+        aggregator = self._route_for_symbol(symbol).aggregator
+        end = _history_end(Timeframe.DAILY, aggregator, now)
+        return _history_start(Timeframe.DAILY, aggregator, end), end
+
     def _load(self, history_start: datetime | None = None) -> None:
         """
         Kick off a background fetch for the current symbol and timeframe.
@@ -3143,11 +3156,11 @@ class MainWindow(QMainWindow):
             timeframe=timeframe,
             connection=connection,
             requested_at=requested_at or time.monotonic(),
-            lookback_days=self._extension_lookback_days(symbol),
+            lookback_days=self._extension_lookback_days(symbol, timeframe),
             history_start=history_start,
         )
 
-    def _extension_lookback_days(self, symbol: str) -> int:
+    def _extension_lookback_days(self, symbol: str, timeframe: Timeframe) -> int:
         """
         Longest history lookback among the extensions the symbol's chart will
         show, mirroring the extension set _on_fetch_done restores for it.
@@ -3163,7 +3176,7 @@ class MainWindow(QMainWindow):
             extension = guarded_extension(name)
             if extension is not None:
                 lookbacks.append(
-                    call_extension(name, extension.history_lookback_days, params)
+                    _extension_lookback_days(name, extension, params, timeframe)
                 )
         return max(
             (days for days in lookbacks if days is not None),
@@ -3975,7 +3988,10 @@ class MainWindow(QMainWindow):
             # from; a normal load resets or shows it again.
             self._load()
             return
-        if series.bars == displayed.bars:
+        if (
+            series.bars == displayed.bars
+            and not self._extension_runtime.daily_references_changed(series)
+        ):
             self._data_source_status.set_data_source(route.display_name, "connected")
             return
         self._apply_history_merge(series, live=True)
@@ -5111,11 +5127,24 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted:
-            self._extension_runtime.apply_config(
+            duplicate = self._extension_runtime.apply_config(
                 series_key,
                 dialog.result_params(),
+                series=self._current_series,
             )
+            if duplicate is not None:
+                self._show_duplicate_extension_message(duplicate)
+                return
             self._reload_extensions(draw_bars=False)
+
+    def _show_duplicate_extension_message(self, series_key: str) -> None:
+        label = self._chart.legend.extension_text(series_key) or series_key
+        show_information(
+            self,
+            "Indicator Already on Chart",
+            f"{label} is already on this chart. Use Configure on the existing line "
+            "to change its color or style.",
+        )
 
     def _on_extension_remove(self, series_key: str) -> None:
         """
@@ -5544,13 +5573,17 @@ class MainWindow(QMainWindow):
             params=params,
             parent=self,
         )
-        if (
-            dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted
-            and not is_disabled(name)
-        ):
-            self._state.extensions.append(
-                ChartExtensionState(name=name, params=dialog.result_params())
+        if dialog.exec() == ExtensionConfigDialog.DialogCode.Accepted and not is_disabled(name):
+            proposed = ChartExtensionState(name=name, params=dialog.result_params())
+            duplicate = self._extension_runtime.duplicate_series_key(
+                extension, proposed, self._current_series,
             )
+            if duplicate is not None:
+                self._show_duplicate_extension_message(duplicate)
+                return
+            if is_disabled(name):
+                return
+            self._state.extensions.append(proposed)
             self._reload_extensions(draw_bars=False)
 
     def _drawing_tool_entries(self) -> list[tuple[str, str, ToolIconSpec | None]]:

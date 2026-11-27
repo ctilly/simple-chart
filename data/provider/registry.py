@@ -8,6 +8,7 @@ from itertools import chain, product
 from types import MappingProxyType, ModuleType
 from typing import TypeIs
 
+from data.models import Timeframe
 from data.provider.base import DataProvider, ProviderConfigurationError
 from data.provider.config import ProviderConnection
 from data.provider.credentials import (
@@ -73,6 +74,15 @@ class ProviderRegistry:
             ),
             namespace,
         )
+
+    @property
+    def legacy_dividend_adjusted_namespaces(self) -> dict[str, tuple[Timeframe, ...] | None]:
+        return {
+            namespace.namespace: spec.legacy_dividend_adjusted_timeframes
+            for spec in self.providers.values()
+            if spec.legacy_dividend_adjusted_timeframes != ()
+            for namespace in spec.namespaces
+        }
 
     def editable_options(self, connection_id: str) -> tuple[OptionField, ...]:
         spec, template = self.connection_template(connection_id)
@@ -289,6 +299,16 @@ def _validate_spec(value: object) -> ProviderSpec:
         or not value.namespaces
     ):
         raise ValueError("Invalid provider declaration.")
+
+    timeframes = value.legacy_dividend_adjusted_timeframes
+    if (
+        (timeframes != () and Capability.BARS not in value.capabilities)
+        or (
+            timeframes is not None
+            and (type(timeframes) is not tuple or any(type(item) is not Timeframe for item in timeframes))
+        )
+    ):
+        raise ValueError("Invalid legacy dividend-adjusted timeframes.")
 
     fields: set[str] = set()
     for field in value.credential_fields:

@@ -99,4 +99,5 @@ PROVIDER: ProviderSpec = ProviderSpec(
     ),
     required_modules=(("alpaca", "alpaca-py"),),
     serves_symbol=_serves_symbol,
+    legacy_dividend_adjusted_timeframes=None,
 )

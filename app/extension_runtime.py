@@ -1,5 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import bisect
 import math
 from typing import Any
@@ -8,7 +9,9 @@ from app.extension_store import ChartExtensionStore
 from app.state import ChartExtensionState, State
 from chart.window import INITIAL_VISIBLE_BARS
 from data.cache import Cache
+from data.calendar import session_date_anchor
 from data.models import Bar, OHLCVSeries, Timeframe
+from data.session import MARKET_TIMEZONE
 from simplechart.extensions._guard import call_extension, is_disabled
 from simplechart.api import (
     ChartEvent,
@@ -27,6 +30,26 @@ from simplechart.api import (
 )
 
 _DAY_MS = 86_400_000
+_DAY_BASED_EXTENSION_MODULES = {
+    "sma": "indicators.sma",
+    "ema": "indicators.ema",
+    "rsi": "indicators.rsi",
+}
+
+
+def _uses_day_based_projection(name: str, extension: type[ChartExtension] | None) -> bool:
+    return extension is not None and extension.__module__ == _DAY_BASED_EXTENSION_MODULES.get(name)
+
+
+def _extension_lookback_days(
+    name: str,
+    extension: ChartExtension,
+    params: dict[str, Any],
+    timeframe: Timeframe,
+) -> int | None:
+    if timeframe != Timeframe.DAILY and _uses_day_based_projection(name, type(extension)):
+        return 0
+    return call_extension(name, extension.history_lookback_days, params)
 
 
 @dataclass
@@ -52,11 +75,15 @@ class ChartExtensionRuntime:
         extension_store: ChartExtensionStore,
         lookback_days: int,
         cache_namespace: str | None = None,
+        *,
+        daily_reference_window: Callable[[str, datetime], tuple[datetime, datetime]] | None = None,
     ) -> None:
         self._state = state
         self._cache = cache
         self._extension_store = extension_store
         self._lookback_days = lookback_days
+        self._daily_reference_window = daily_reference_window
+        self._rendered_daily_references: list[Bar] = []
         self._cache_namespace = (
             cache.registry.build_connection(cache.registry.fallback_connection_id).cache_namespace
             if cache_namespace is None else cache_namespace
@@ -110,7 +137,14 @@ class ChartExtensionRuntime:
         renders. Turned-off extensions are skipped.
         """
         self._extension_store.prepare_active_extensions()
-        daily_bars = self._daily_bars_for(series)
+        day_based_names = (
+            self._day_based_extension_names() if series.timeframe != Timeframe.DAILY else set()
+        )
+        daily_bars, daily_reference_start = (
+            self._daily_bars_for(series) if day_based_names else ([], None)
+        )
+        self._rendered_daily_references = _used_daily_references(series, daily_bars)
+        other_daily_bars: list[Bar] | None = None
 
         passes: list[ChartExtensionRenderPass] = []
         self._deferred_names = set()
@@ -119,18 +153,16 @@ class ChartExtensionRuntime:
         for ext_state in self._state.extensions:
             if is_disabled(ext_state.name):
                 continue
-            ext_state.params = self._extension_store.params_for(
-                ext_state.name,
-                ext_state.params,
-            )
+            ext_state.params = self._params_for_state(ext_state)
             if not history_complete:
                 extension = guarded_extension(ext_state.name)
                 if extension is None:
                     continue
-                lookback_days = call_extension(
+                lookback_days = _extension_lookback_days(
                     ext_state.name,
-                    extension.history_lookback_days,
+                    extension,
                     ext_state.params,
+                    series.timeframe,
                 )
                 if is_disabled(ext_state.name):
                     continue
@@ -141,7 +173,12 @@ class ChartExtensionRuntime:
                             _lookback_start_ms(series, lookback_days)
                         )
                     continue
-            render_pass = self.render_one(ext_state, series, daily_bars)
+            if ext_state.name in day_based_names:
+                render_pass = self.render_one(ext_state, series, daily_bars, daily_reference_start)
+            else:
+                if other_daily_bars is None:
+                    other_daily_bars = self._legacy_daily_bars_for(series)
+                render_pass = self.render_one(ext_state, series, other_daily_bars)
             if render_pass is not None:
                 passes.append(render_pass)
         return passes
@@ -151,25 +188,14 @@ class ChartExtensionRuntime:
         ext_state: ChartExtensionState,
         series: OHLCVSeries,
         daily_bars: list[Bar],
+        daily_reference_start: date | None = None,
     ) -> ChartExtensionRenderPass | None:
         extension = guarded_extension(ext_state.name)
         if extension is None:
             return None
-        # _daily_bars is a transient compute input (daily history for intraday
-        # MA warmup). Merge it into a throwaway params dict for this render only,
-        # never into the persisted ext_state.params — otherwise the full bar list
-        # rides into per-symbol saved state and gets deep-copied on every switch.
-        # _history_complete tells anchored extensions whether bars older than
-        # the loaded series may still arrive: from a running backfill, or by
-        # loading older history on demand.
-        anchored_complete = (
-            self._history_complete and not self._older_history_may_arrive
+        params = self._params_for_render(
+            ext_state.params, daily_bars, daily_reference_start,
         )
-        params = {
-            **ext_state.params,
-            "_daily_bars": daily_bars,
-            "_history_complete": anchored_complete,
-        }
         render = call_extension(ext_state.name, extension.render, series, params)
         if render is None:
             return None
@@ -564,6 +590,32 @@ class ChartExtensionRuntime:
         ext_state.visible = not ext_state.visible
         return list(ext_state.series_keys), ext_state.visible
 
+    def duplicate_series_key(
+        self,
+        extension: ChartExtension,
+        proposed: ChartExtensionState,
+        series: OHLCVSeries | None,
+        *,
+        editing: ChartExtensionState | None = None,
+    ) -> str | None:
+        if series is None:
+            return None
+        if _uses_day_based_projection(proposed.name, type(extension)):
+            daily_bars, daily_reference_start = self._daily_bars_for(series)
+        else:
+            daily_bars, daily_reference_start = self._legacy_daily_bars_for(series), None
+        params = self._params_for_render(
+            self._params_for_state(proposed), daily_bars, daily_reference_start,
+        )
+        computed = call_extension(proposed.name, extension.compute, series, params)
+        if computed is None:
+            return None
+        for key in computed:
+            owner = self._state.get_extension_by_series_key(key)
+            if owner is not None and owner is not editing:
+                return key
+        return None
+
     def config_request(self, series_key: str) -> ChartExtensionConfig | None:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
@@ -583,11 +635,13 @@ class ChartExtensionRuntime:
         if request is not None:
             return request
         label = call_extension(ext_state.name, extension.label)
-        if label is None:
+        defaults = call_extension(ext_state.name, extension.default_params)
+        if label is None or defaults is None:
             return None
+        # Settings added after an instance was saved appear with their defaults.
         return ChartExtensionConfig(
             label=label,
-            params=ext_state.params,
+            params=defaults | ext_state.params,
         )
 
     def apply_config(
@@ -595,13 +649,24 @@ class ChartExtensionRuntime:
         series_key: str,
         params: dict[str, Any],
         y_range: tuple[float, float] | None = None,
-    ) -> None:
+        *,
+        series: OHLCVSeries | None = None,
+    ) -> str | None:
         ext_state = self._state.get_extension_by_series_key(series_key)
         if ext_state is None:
-            return
+            return None
         extension = guarded_extension(ext_state.name)
         if extension is None:
-            return
+            return None
+        if (
+            series is not None
+            and call_extension(ext_state.name, extension.add_mode) == ChartExtensionAddMode.DIALOG
+        ):
+            duplicate = self.duplicate_series_key(
+                extension, ChartExtensionState(ext_state.name, params), series, editing=ext_state,
+            )
+            if duplicate is not None:
+                return duplicate
         mutation = call_extension(
             ext_state.name,
             extension.apply_config_to_series,
@@ -611,11 +676,12 @@ class ChartExtensionRuntime:
             y_range=y_range,
         )
         if is_disabled(ext_state.name):
-            return
+            return None
         if mutation is not None:
             self.apply_mutation(mutation)
-            return
-        ext_state.params = params
+        else:
+            ext_state.params = params
+        return None
 
     def remove(self, series_key: str) -> ChartExtensionRemoval | None:
         ext_state = self._state.get_extension_by_series_key(series_key)
@@ -672,6 +738,23 @@ class ChartExtensionRuntime:
     def _params_for_state(self, ext_state: ChartExtensionState) -> dict[str, Any]:
         return self._extension_store.params_for(ext_state.name, ext_state.params)
 
+    def _params_for_render(
+        self,
+        base_params: dict[str, Any],
+        daily_bars: list[Bar],
+        daily_reference_start: date | None,
+    ) -> dict[str, Any]:
+        # Keep daily reference history out of the stored params. Anchored
+        # extensions use _history_complete to tell if older bars may arrive.
+        params = {
+            **base_params,
+            "_daily_bars": daily_bars,
+            "_history_complete": self._history_complete and not self._older_history_may_arrive,
+        }
+        if daily_reference_start is not None:
+            params["_daily_reference_start"] = daily_reference_start
+        return params
+
     def _drawing_state(
         self,
         session: DrawingSession,
@@ -696,24 +779,45 @@ class ChartExtensionRuntime:
             series_keys=keys,
         )
 
-    def _daily_bars_for(self, series: OHLCVSeries) -> list[Bar]:
+    def daily_references_changed(self, series: OHLCVSeries) -> bool:
+        if series.timeframe == Timeframe.DAILY or not self._day_based_extension_names():
+            return False
+        daily_bars, _ = self._daily_bars_for(series)
+        return _used_daily_references(series, daily_bars) != self._rendered_daily_references
+
+    def _day_based_extension_names(self) -> set[str]:
+        extensions = all_extensions()
+        return {
+            state.name for state in self._state.extensions
+            if _uses_day_based_projection(state.name, extensions.get(state.name))
+        }
+
+    def _daily_bars_for(self, series: OHLCVSeries) -> tuple[list[Bar], date | None]:
+        if series.timeframe == Timeframe.DAILY:
+            return [], None
+        if self._daily_reference_window is None:
+            return self._legacy_daily_bars_for(series), None
+        start, end = self._daily_reference_window(series.symbol, datetime.now(tz=timezone.utc))
+        return self._read_daily_bars(series.symbol, start, end), start.astimezone(timezone.utc).date()
+
+    def _legacy_daily_bars_for(self, series: OHLCVSeries) -> list[Bar]:
+        # Other extensions, including pivots, keep their existing reference window.
         if not series.timeframe.is_intraday:
             return []
         now = datetime.now(tz=timezone.utc)
         lookback = timedelta(days=self._lookback_days)
-        # Reaches back past the series start too: older intraday history
-        # loaded by panning needs older daily references.
         start = now - lookback
         if series.bars:
             start = min(start, series.bars[0].timestamp - lookback)
-        start_ms = int(start.timestamp() * 1000)
-        end_ms = int(now.timestamp() * 1000)
+        return self._read_daily_bars(series.symbol, start, now)
+
+    def _read_daily_bars(self, symbol: str, start: datetime, end: datetime) -> list[Bar]:
         return self._cache.get_bars(
             self._cache_namespace,
-            series.symbol,
+            symbol,
             Timeframe.DAILY,
-            start_ms,
-            end_ms,
+            int(start.timestamp() * 1000),
+            int(end.timestamp() * 1000),
         )
 
     def _nearest_bar_index(self, series: OHLCVSeries, x: float) -> int | None:
@@ -770,6 +874,19 @@ def _unless_disabled(name: str, result: DrawingToolResult) -> DrawingToolResult:
     # A store handler of the tool's own plugin can fail while the result's
     # mutation is applied; the session must not continue for a turned-off tool.
     return _ended_drawing() if is_disabled(name) else result
+
+
+def _used_daily_references(series: OHLCVSeries, daily_bars: list[Bar]) -> list[Bar]:
+    if not series.bars or not daily_bars:
+        return []
+    last_bar = series.bars[-1].timestamp
+    if series.timeframe == Timeframe.WEEKLY:
+        week = session_date_anchor(last_bar.astimezone(timezone.utc).date(), Timeframe.WEEKLY)
+        cutoff = week + timedelta(days=7)
+    else:
+        cutoff = last_bar.astimezone(MARKET_TIMEZONE).date()
+    end = bisect.bisect_left(daily_bars, cutoff, key=lambda bar: bar.timestamp.date())
+    return daily_bars[:end]
 
 
 def _lookback_loaded(series: OHLCVSeries, lookback_days: int | None) -> bool:

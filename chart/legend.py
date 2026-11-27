@@ -336,6 +336,11 @@ class ChartLegend(QWidget):
         self.layout().removeWidget(label)  # type: ignore[union-attr]
         label.deleteLater()
 
+    def extension_text(self, series_key: str) -> str | None:
+        """The legend text shown for series_key, if it has a label."""
+        label = self._labels.get(series_key)
+        return label.text() if label is not None else None
+
     def set_extension_visible(self, series_key: str, visible: bool) -> None:
         """Update the visual state of a label without removing it."""
         if series_key in self._labels:

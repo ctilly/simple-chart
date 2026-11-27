@@ -777,11 +777,10 @@ def _intraday_series(count: int) -> OHLCVSeries:
     return OHLCVSeries(symbol="SPY", timeframe=Timeframe.MIN5, bars=bars)
 
 
-def test_interim_render_shows_extensions_whose_lookback_is_loaded(
+def test_interim_render_shows_day_based_indicators_without_intraday_lookback(
     tmp_path: Path,
 ) -> None:
-    # One 5m session is 78 bars; the initial view is 200 bars. 300 bars cover
-    # a 1-day lookback (278) but not a 2-day lookback (356).
+    # The initial view has no extra intraday lookback for either SMA.
     series = _intraday_series(300)
     state = State(symbol="SPY")
     state.extensions = [
@@ -793,10 +792,8 @@ def test_interim_render_shows_extensions_whose_lookback_is_loaded(
         runtime = _runtime(state, cache)
         interim = runtime.render_all(series, history_complete=False)
 
-        assert [p.state.params["days"] for p in interim] == [1]
-        pending = runtime.pending_history_start_ms
-        first_ms = int(series.bars[0].timestamp.timestamp() * 1000)
-        assert pending is not None and pending < first_ms
+        assert [p.state.params["days"] for p in interim] == [1, 2]
+        assert runtime.pending_history_start_ms is None
 
         runtime.render_all(series)
         assert runtime.pending_history_start_ms is None

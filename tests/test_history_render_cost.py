@@ -14,14 +14,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import indicators.ema as ema_module
 import indicators.pivot_points as pivot_module
-import indicators.sma as sma_module
 import tools._polyline.base_tool as polyline_module
 import tools.fib_retracement as fib_module
 import tools.vertical_line as vertical_line_module
 from chart.plot_manager import _series_to_candle_df, _series_to_volume_df
-from indicators.ema._kernel import ema as ema_kernel
+from indicators.ema import EMAIndicator
+from indicators.sma import SMAIndicator
 from app.state import ChartExtensionState
 from data.models import Bar, OHLCVSeries, Timeframe
 from test_basis_change import (  # noqa: F401  (fixture)
@@ -141,41 +140,20 @@ def test_empty_plot_frames() -> None:
     assert str(candles.index.dtype) == "datetime64[ns, UTC]"
 
 
-def _reference_fill(
-    intraday_bars: list[Bar],
-    values: np.ndarray,
-    daily_values: dict[date, float],
-) -> np.ndarray:
-    filled = values.copy()
-    for index, bar in enumerate(intraday_bars):
-        if np.isnan(filled[index]):
-            day = bar.timestamp.astimezone(ET).date()
-            if day in daily_values:
-                filled[index] = daily_values[day]
-    return filled
+def test_moving_averages_use_the_daily_window_for_every_intraday_bar() -> None:
+    days = _weekdays(date(2026, 1, 5), 6)
+    daily = _daily(days[:-1])
+    intraday = OHLCVSeries("X", Timeframe.MIN5, _intraday(days[-1:]))
+    for indicator in (SMAIndicator(), EMAIndicator()):
+        params = {"days": 5, "_daily_bars": daily}
+        key = f"{indicator.name()}_5"
+        expected = [
+            indicator.compute(OHLCVSeries("X", Timeframe.DAILY, [*daily, bar]), params)[key][-1]
+            for bar in intraday.bars
+        ]
+        values = indicator.compute(intraday, params)[key]
 
-
-def test_moving_average_warmup_fill_is_unchanged() -> None:
-    days = _weekdays(date(2026, 1, 5), 30)
-    daily = _daily(days)
-    intraday = _intraday(days[-3:])
-    for module, average in (
-        (sma_module, sma_module._sma),
-        (ema_module, ema_kernel),
-    ):
-        values = np.full(len(intraday), np.nan)
-        values[100:] = 7.0
-        daily_average = average(np.array([bar.close for bar in daily]), 5)
-        daily_values = {
-            bar.timestamp.astimezone(ET).date(): float(value)
-            for bar, value in zip(daily, daily_average)
-            if not np.isnan(value)
-        }
-        expected = _reference_fill(intraday, values, daily_values)
-
-        module._fill_warmup_from_daily(intraday, values, 5, daily)
-
-        np.testing.assert_array_equal(values, expected)
+        np.testing.assert_allclose(values, expected, rtol=1e-13)
 
 
 def test_pivot_session_ranges_are_unchanged() -> None:

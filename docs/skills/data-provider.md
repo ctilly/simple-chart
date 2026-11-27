@@ -86,6 +86,62 @@ Yahoo supplies undeclared capabilities and requests for symbols excluded by
 snapshots, company names, news, search, earnings, and dividends from Yahoo.
 An empty result from a declared capability stays empty.
 
+## Price basis
+
+Chart bars use split-only prices on every source and timeframe. Yahoo chart
+history uses `Close` with `auto_adjust=False`. Alpaca chart requests use
+`Adjustment.SPLIT`.
+
+The watchlist and Level 1 quotes have their own data paths. On a dividend
+ex-date, the watchlist can show a different change and percentage change from
+the chart's close-to-close move.
+
+**Short answer for a user who asks:** the watchlist's last price matches the
+chart. On the day a stock goes ex-dividend, the watchlist's change can differ
+from the chart. Yahoo's watchlist download compares today's price with a
+previous close that has been lowered by the dividend. The chart shows the
+previous close at the price that actually traded. Neither is wrong; they
+answer different questions. The gap equals the dividend per share and
+disappears the next trading day.
+
+- Yahoo's batch watchlist download and its daily-history fallback request
+  `auto_adjust=True`. The two latest valid closes from that adjusted series
+  supply the snapshot's last price and previous close. SimpleChart subtracts
+  the previous close from the last price and divides by the previous close
+  to calculate the percentage change. A cash dividend can lower the prior
+  close used in both calculations.
+- Yahoo's fast-info path uses `lastPrice` and prefers
+  `regularMarketPreviousClose` over `previousClose`. yfinance normally gets
+  these fields from history with `auto_adjust=False`. The secondary
+  `previousClose` field can come from extended-hours history. yfinance can
+  also fall back to Yahoo quote metadata. SimpleChart computes change and
+  percentage change from those fields. It tries the adjusted daily-history
+  fallback when fast-info cannot provide a usable percentage change. Yahoo
+  Level 1 uses Yahoo's quote fields. If the quoted change is missing, the
+  app computes change and percentage change from the quote prices when
+  available.
+- Alpaca snapshots and Level 1 quotes use the latest trade price, or the
+  daily bar's close when the trade is missing, and the previous daily bar's
+  close. The app requests the snapshot feed and uses the prices as returned
+  without applying a dividend adjustment. It computes both changes from
+  those prices.
+
+COST's USD 30 special dividend went ex on 2026-11-24. The chart's
+2026-11-23 close was USD 1,097.91. Yahoo's dividend-adjusted history used
+USD 1,067.91 for that previous close. If the ex-date last price were
+USD 1,067.91, a Yahoo watchlist snapshot using adjusted history would show
+USD 0.00 and 0.00%, while the move between the chart's split-only prices
+would be minus USD 30.00 and about minus 2.73%.
+
+Close the old application before opening the upgraded version. On first open,
+the cache migration drops old-basis Yahoo daily and weekly history and all
+Alpaca bar history, along with their fetch coverage, pending basis changes,
+and bar corrections. Affected charts download history again on demand. Yahoo
+intraday history and saved drawings are preserved. Horizontal lines, trend
+lines, and polylines saved at old-basis prices can sit away from the repriced
+candles by the accumulated dividend adjustments. AVWAP anchors and earnings
+and dividend markers keep their existing behavior.
+
 ## Step 5 — Verify
 
 In the project's dev environment, run the discovered-provider conformance
